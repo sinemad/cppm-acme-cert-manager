@@ -1,0 +1,14 @@
+# ClearPass Certificate Manager – crontab for supercronic
+#
+# supercronic notes:
+#   - Does not use or require SHELL= directive
+#   - Runs each job directly without a shell wrapper; scripts must be executable
+#   - Job output goes to supercronic's stdout/stderr (visible in docker compose logs)
+#   - Timezone is controlled by the TZ environment variable in the container
+#
+# acme.sh only renews when ≤30 days remain on the certificate.
+# On successful renewal, install_cert.sh copies flat files and uploads to ClearPass.
+
+# Run renewal check at 02:00 and 14:00 container-local time every day
+0 2  * * * /opt/cppm/renew.sh
+0 14 * * * /opt/cppm/renew.sh

@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  cppm-cert-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cppm-cert-manager:latest
+    container_name: cppm-cert-manager
+    restart: unless-stopped
+
+    environment:
+      TZ: ${TZ:-UTC}
+      # Cloudflare DNS API credentials
+      CF_Token:      ${CF_Token}
+      CF_Account_ID: ${CF_Account_ID}
+      CF_Zone_ID:    ${CF_Zone_ID}
+      # ACME settings
+      ACME_EMAIL:    ${ACME_EMAIL}
+      ACME_SERVER:   ${ACME_SERVER:-letsencrypt}
+      DOMAIN:        ${DOMAIN:-cppm.sinemalab.com}
+      # ClearPass API credentials
+      CPPM_HOST:            ${CPPM_HOST:-cppm.sinemalab.com}
+      CPPM_CLIENT_ID:       ${CPPM_CLIENT_ID}
+      CPPM_CLIENT_SECRET:   ${CPPM_CLIENT_SECRET}
+      CPPM_VERIFY_SSL:      ${CPPM_VERIFY_SSL:-false}
+      CPPM_CERT_PASSPHRASE: ${CPPM_CERT_PASSPHRASE:-CppmCert!2024}
+      # Callback URL for cert upload – CPPM fetches the PKCS12 via this URL.
+      # CPPM_CALLBACK_HOST must be the Docker host's LAN IP that CPPM can reach.
+      # The port must match the ports mapping below.
+      CPPM_CALLBACK_HOST:   ${CPPM_CALLBACK_HOST}
+      CPPM_CALLBACK_PORT:   ${CPPM_CALLBACK_PORT:-8765}
+      # Operational flags
+      FORCE_RENEW:  ${FORCE_RENEW:-false}
+      SKIP_UPLOAD:  ${SKIP_UPLOAD:-false}
+      LOG_LEVEL:    ${LOG_LEVEL:-INFO}
+
+    volumes:
+      # Single persistent volume – certificates only.
+      # acme.sh state is stored in /data/certs/.acme-state/
+      # Logs are stored in /data/certs/.logs/
+      - cppm_certs:/data/certs
+
+    ports:
+      # Exposes the temporary HTTP server that CPPM uses to fetch the PKCS12
+      # during cert upload.  CPPM_CALLBACK_HOST must be the Docker host's LAN IP.
+      # Change the host-side port here and in CPPM_CALLBACK_PORT if 8765 conflicts.
+      - "${CPPM_CALLBACK_PORT:-8765}:${CPPM_CALLBACK_PORT:-8765}"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cppm_certs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      # Host directory for persistent cert storage.
+      # Create before first run: sudo mkdir -p /opt/cppm-certs
+      device: /opt/cppm-certs
