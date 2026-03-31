@@ -57,9 +57,9 @@ on the host.
 |---|---|
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Host OS | Any Linux with Docker support (Ubuntu 22.04 LTS recommended) |
-| DNS | `cppm.sinemalab.com` managed by Cloudflare |
+| DNS | A domain managed by Cloudflare |
 | CPPM version | 6.9.x or 6.11.x (6.8.x requires endpoint adjustment; see [API Reference](#clearpass-api-reference)) |
-| Network | Container needs outbound HTTPS to `api.cloudflare.com` and `cppm.sinemalab.com` |
+| Network | Container needs outbound HTTPS to `api.cloudflare.com` and the clearpass server |
 
 ---
 
@@ -82,6 +82,8 @@ cppm-cert-manager/
 ```
 
 **Host persistent storage (survives container rebuilds):**
+
+# cppm.sinemalab.com is an example domain, replace with your domain
 
 ```
 /opt/cppm-data/                 # Host directory (bind-mounted to /data in container)
