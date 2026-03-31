@@ -1,4 +1,4 @@
-# ClearPass Certificate Manager
+# ClearPass ACME Certificate Manager
 
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**
 using [acme.sh](https://github.com/acmesh-official/acme.sh) and Cloudflare DNS-01 challenge.
