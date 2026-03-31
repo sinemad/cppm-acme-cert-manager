@@ -34,8 +34,8 @@ trusted HTTPS:
 
 ```bash
 # Confirm CPPM is serving the new cert
-openssl s_client -connect cppm.sinemalab.com:443 \
-    -servername cppm.sinemalab.com </dev/null 2>/dev/null \
+openssl s_client -connect cppm.example.com:443 \
+    -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -dates
 
 # Enable verification
@@ -115,7 +115,8 @@ when 30 or fewer days remain on the cert.
 docker exec -it cppm-cert-manager cat /etc/crontabs/root
 
 # Check when the next renewal will actually fire
-openssl x509 -in /opt/cppm-certs/cppm.sinemalab.com.cer -noout -enddate
+openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -enddate
+openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -enddate
 ```
 
 ---
@@ -141,6 +142,6 @@ docker exec -it cppm-cert-manager bash
 
 # Useful commands once inside:
 acme.sh --list                         # show all certs managed by acme.sh
-acme.sh --info -d cppm.sinemalab.com   # show detail for this domain
+acme.sh --info -d cppm.example.com   # show detail for this domain
 cat /data/certs/status.log             # view status log
 ```

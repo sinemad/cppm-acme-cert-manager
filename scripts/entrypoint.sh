@@ -37,11 +37,40 @@ log "CA      : ${ACME_SERVER:-letsencrypt}"
 status_write "INFO" "STARTUP" "Container started – domain=${DOMAIN} acme=${ACME_VER}"
 
 # ── Validate environment ──────────────────────────────────────────────────────
-REQUIRED_VARS=(DOMAIN ACME_EMAIL CF_Token CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET)
+REQUIRED_VARS=(DOMAIN ACME_EMAIL DNS_PROVIDER CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET CPPM_CALLBACK_HOST)
 MISSING=0
 for var in "${REQUIRED_VARS[@]}"; do
     [[ -z "${!var:-}" ]] && { err "Missing required env var: $var"; MISSING=$((MISSING+1)); }
 done
+
+# Validate DNS provider credentials
+case "${DNS_PROVIDER:-cloudflare,,}" in
+    cloudflare|cf)
+        if [[ -z "${CF_Token:-}" && ( -z "${CF_Key:-}" || -z "${CF_Email:-}" ) ]]; then
+            err "Cloudflare credentials missing: set CF_Token (preferred) or CF_Key + CF_Email"
+            MISSING=$((MISSING+1))
+        fi
+        ;;
+    porkbun)
+        [[ -z "${PORKBUN_API_KEY:-}" ]]        && { err "Missing: PORKBUN_API_KEY"; MISSING=$((MISSING+1)); }
+        [[ -z "${PORKBUN_SECRET_API_KEY:-}" ]] && { err "Missing: PORKBUN_SECRET_API_KEY"; MISSING=$((MISSING+1)); }
+        ;;
+    route53|aws|r53)
+        [[ -z "${AWS_ACCESS_KEY_ID:-}" ]]     && { err "Missing: AWS_ACCESS_KEY_ID"; MISSING=$((MISSING+1)); }
+        [[ -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && { err "Missing: AWS_SECRET_ACCESS_KEY"; MISSING=$((MISSING+1)); }
+        ;;
+    digitalocean|do)
+        [[ -z "${DO_API_KEY:-}" ]] && { err "Missing: DO_API_KEY"; MISSING=$((MISSING+1)); }
+        ;;
+    godaddy|gd)
+        [[ -z "${GD_Key:-}" ]]    && { err "Missing: GD_Key"; MISSING=$((MISSING+1)); }
+        [[ -z "${GD_Secret:-}" ]] && { err "Missing: GD_Secret"; MISSING=$((MISSING+1)); }
+        ;;
+    *)
+        log "Custom DNS provider '${DNS_PROVIDER}' – skipping credential pre-check"
+        ;;
+esac
+
 [[ $MISSING -gt 0 ]] && die "$MISSING required environment variable(s) missing – check .env"
 
 # ── Seed acme.sh state ────────────────────────────────────────────────────────

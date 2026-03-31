@@ -1,28 +1,46 @@
-# ClearPass ACME Certificate Manager
+# ClearPass Certificate Manager
 
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**
-using [acme.sh](https://github.com/acmesh-official/acme.sh) and Cloudflare DNS-01 challenge.
+using [acme.sh](https://github.com/acmesh-official/acme.sh) and a DNS-01 challenge.
 Everything runs in a self-contained Alpine Linux Docker container with persistent storage
 on the host.
 
+Two certificates are issued and maintained simultaneously:
+
+| Certificate | Algorithm | CPPM Service | Purpose |
+|---|---|---|---|
+| ECC (P-256) | ECDSA | HTTPS(ECC) | Web UI and API access |
+| RSA (2048) | RSA | RADIUS | 802.1X / EAP authentication |
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        ClearPass Cert Manager Flow                          │
-│                                                                             │
-│  ┌───────────┐    DNS-01     ┌───────────────┐    Upload cert   ┌────────┐  │
-│  │ acme.sh   │◄─────────────►│  Cloudflare   │                  │ CPPM   │  │
-│  │  (cron)   │               │  DNS API      │                  │ HTTPS  │  │
-│  └─────┬─────┘               └───────────────┘                  │ RADIUS │  │
-│        │ cert issued/renewed                                     └────────┘  │
-│        ▼                                                              ▲      │
-│  ┌─────────────┐   PKCS12 + API   ┌───────────────────────────────────┐     │
-│  │ deploy_hook │─────────────────►│  clearpass_upload.py              │     │
-│  │   .sh       │                  │  POST /api/server-certificate      │     │
-│  └─────────────┘                  │  POST /api/radius/service-cert     │     │
-│                                   └───────────────────────────────────┘     │
-│                                                                             │
-│  Persistent Storage: /opt/cppm-data (host) ◄──── /data (container)        │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      ClearPass Cert Manager Flow                         │
+│                                                                          │
+│  ┌──────────────┐  DNS-01  ┌─────────────────┐                          │
+│  │   acme.sh    │◄────────►│  DNS Provider   │                          │
+│  │  (supercronic│          │  (Cloudflare,   │                          │
+│  │   2x daily)  │          │   Porkbun, etc) │                          │
+│  └──────┬───────┘          └─────────────────┘                          │
+│         │ ECC + RSA certs issued/renewed                                 │
+│         ▼                                                                │
+│  ┌──────────────┐  PKCS12 + REST API  ┌──────────────────────────────┐  │
+│  │ deploy_hook  │────────────────────►│  clearpass_upload.py         │  │
+│  │    .sh       │                     │  (pyclearpass SDK)            │  │
+│  └──────────────┘                     │                              │  │
+│                                       │  Step 0: LE Trust List       │  │
+│                                       │  Step 1: PUT HTTPS(ECC) cert │  │
+│                                       │  Step 2: PUT RADIUS(RSA) cert│  │
+│                                       │  Step 3: Verify              │  │
+│                                       └──────────────┬───────────────┘  │
+│                                                      │                  │
+│                                              ┌───────▼──────┐           │
+│                                              │     CPPM     │           │
+│                                              │  HTTPS(ECC)  │           │
+│                                              │  RADIUS(RSA) │           │
+│                                              └──────────────┘           │
+│                                                                          │
+│  Persistent storage: /opt/cppm-certs (host) ◄──── /data/certs (container) │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -30,24 +48,16 @@ on the host.
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
-2. [Directory Structure](#directory-structure)
-3. [Initial Setup](#initial-setup)
-   - [Host Preparation](#1-host-preparation)
-   - [Cloudflare API Token](#2-cloudflare-api-token)
-   - [ClearPass API Client](#3-clearpass-api-client)
-   - [Configure Environment](#4-configure-environment)
-   - [Build and Start](#5-build-and-start)
-4. [How It Works](#how-it-works)
-5. [Certificate Files](#certificate-files)
-6. [Verifying the Certificate in CPPM](#verifying-the-certificate-in-cppm)
-7. [Maintenance](#maintenance)
-   - [View Logs](#view-logs)
-   - [Force Manual Renewal](#force-manual-renewal)
-   - [Update Credentials](#update-credentials)
-   - [Rebuilding the Container](#rebuilding-the-container)
-8. [Troubleshooting](#troubleshooting)
-9. [Security Considerations](#security-considerations)
-10. [ClearPass API Reference](#clearpass-api-reference)
+2. [DNS Provider Support](#dns-provider-support)
+3. [Directory Structure](#directory-structure)
+4. [Initial Setup](#initial-setup)
+5. [How It Works](#how-it-works)
+6. [Certificate Files](#certificate-files)
+7. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
+8. [Maintenance](#maintenance)
+9. [Troubleshooting](#troubleshooting)
+10. [Security Considerations](#security-considerations)
+11. [ClearPass API Reference](#clearpass-api-reference)
 
 ---
 
@@ -57,9 +67,30 @@ on the host.
 |---|---|
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Host OS | Any Linux with Docker support (Ubuntu 22.04 LTS recommended) |
-| DNS | A domain managed by Cloudflare |
-| CPPM version | 6.9.x or 6.11.x (6.8.x requires endpoint adjustment; see [API Reference](#clearpass-api-reference)) |
-| Network | Container needs outbound HTTPS to `api.cloudflare.com` and the clearpass server |
+| DNS provider | Domain managed by a supported DNS provider (see below) |
+| CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13) |
+| Network | Container needs outbound HTTPS to your DNS provider API and CPPM |
+| LAN IP | A host IP that CPPM can route to (required for cert upload callback) |
+
+---
+
+## DNS Provider Support
+
+The ACME DNS-01 challenge is used for certificate issuance. Set `DNS_PROVIDER`
+in `.env` to select your provider.
+
+| `DNS_PROVIDER` | Provider | Credentials required |
+|---|---|---|
+| `cloudflare` *(default)* | Cloudflare | `CF_Token` + `CF_Account_ID` + `CF_Zone_ID` |
+| `porkbun` | Porkbun | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
+| `route53` | AWS Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| `digitalocean` | DigitalOcean | `DO_API_KEY` |
+| `godaddy` | GoDaddy | `GD_Key` + `GD_Secret` |
+| *any* | [Any acme.sh dnsapi plugin](https://github.com/acmesh-official/acme.sh/wiki/dnsapi) | Plugin-specific variables |
+
+For any provider not in the list above, set `DNS_PROVIDER` to the plugin name
+without the `dns_` prefix (e.g. `DNS_PROVIDER=linode_v4` invokes `dns_linode_v4`)
+and ensure the plugin's credential variables are present in `.env`.
 
 ---
 
@@ -68,340 +99,374 @@ on the host.
 ```
 cppm-cert-manager/
 ├── Dockerfile                  # Alpine + acme.sh + Python image
-├── docker-compose.yml          # Service definition + volume mapping
-├── .env.example                # Copy to .env and fill in secrets
+├── docker-compose.yml          # Service definition, volume and port mapping
+├── env-example                 # Safe-to-commit reference — copy to .env
+├── .env.example                # Annotated local reference
+├── .gitignore
+├── .dockerignore
+├── setup.sh                    # One-time host preparation script
 ├── config/
-│   └── crontab                 # Renewal schedule (runs inside container)
+│   └── crontab                 # Renewal schedule (supercronic, inside container)
 ├── scripts/
-│   ├── entrypoint.sh           # Container startup: validates env, issues cert, starts cron
-│   ├── issue_cert.sh           # One-time cert issuance via Cloudflare DNS-01
-│   ├── renew.sh                # Called by cron – runs acme.sh --renew
-│   ├── deploy_hook.sh          # Called by acme.sh on successful renewal
-│   └── clearpass_upload.py     # Pushes cert to CPPM via REST API
-└── README.md                   # This file
+│   ├── entrypoint.sh           # Startup: validates env, manages cert state, starts supercronic
+│   ├── issue_cert.sh           # Issues ECC + RSA certs via DNS-01
+│   ├── install_cert.sh         # Copies flat files from acme.sh state to /data/certs/
+│   ├── renew.sh                # Called by supercronic — runs acme.sh --renew
+│   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
+│   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
+│   └── status.sh               # Shared status logging library
+└── docs/
+    ├── 01-initial-setup.md
+    ├── 02-how-it-works.md
+    ├── 03-monitoring.md
+    ├── 04-maintenance.md
+    ├── 05-troubleshooting.md
+    ├── 06-script-reference.md
+    └── 07-quick-reference.md
 ```
 
 **Host persistent storage (survives container rebuilds):**
+
 ```
-NOTE: cppm.sinemalab.com is an example domain
-```
-```
-/opt/cppm-data/                 # Host directory (bind-mounted to /data in container)
-├── acme.sh/                    # acme.sh account keys, cert metadata, CA cache
-│   ├── ca/                     # ACME CA trust store
-│   ├── cppm.sinemalab.com/     # Domain-specific cert state managed by acme.sh
-│   └── account.conf            # Registered ACME account (email, EAB if used)
-├── certs/                      # Flat certificate files for easy access
-│   ├── cppm.sinemalab.com.cer          # Domain certificate (PEM)
-│   ├── cppm.sinemalab.com.key          # Private key (PEM, chmod 600)
-│   ├── cppm.sinemalab.com.fullchain.cer # Cert + intermediates (PEM)
-│   └── cppm.sinemalab.com.ca.cer       # Issuer CA chain (PEM)
-└── logs/
-    ├── startup.log             # Container start events
-    ├── renewal.log             # acme.sh issuance/renewal output
-    ├── upload.log              # ClearPass API upload results
-    ├── last_upload.txt         # Timestamp of last successful upload
-    └── cron.log                # crond daemon log
+/opt/cppm-certs/                              ← bind-mounted to /data/certs in container
+├── status.log                                ← one-line-per-event summary log
+├── <domain>.ecc.cer                          ← ECC domain cert (PEM)
+├── <domain>.ecc.key                          ← ECC private key (chmod 600)
+├── <domain>.ecc.fullchain.cer                ← ECC cert + intermediates
+├── <domain>.ecc.ca.cer                       ← ECC CA chain
+├── <domain>.rsa.cer                          ← RSA domain cert (PEM)
+├── <domain>.rsa.key                          ← RSA private key (chmod 600)
+├── <domain>.rsa.fullchain.cer                ← RSA cert + intermediates
+├── <domain>.rsa.ca.cer                       ← RSA CA chain
+├── <domain>_ecc/                             ← acme.sh ECC internal state
+├── <domain>/                                 ← acme.sh RSA internal state
+├── .acme-state/                              ← acme.sh config and account keys
+└── .logs/
+    ├── startup.log
+    ├── renewal.log
+    ├── upload.log
+    └── cron.log
 ```
 
 ---
 
 ## Initial Setup
 
-### 1. Host Preparation
+### 1. Host preparation
 
 ```bash
-# Create the persistent data directory
-sudo mkdir -p /opt/cppm-data
-sudo chown root:root /opt/cppm-data
-sudo chmod 750 /opt/cppm-data
-
-# Clone or copy the project files
-cd /opt
-git clone <your-repo-url> cppm-cert-manager
-# -- OR --
-# copy files manually, then:
 cd /opt/cppm-cert-manager
+chmod +x setup.sh && ./setup.sh
 ```
 
-### 2. Cloudflare API Token
+`setup.sh` verifies Docker, creates `/opt/cppm-certs`, and copies `env-example`
+to `.env` if it does not already exist.
 
-Create a **scoped API token** (preferred over the global API key):
+### 2. DNS provider credentials
 
-1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens)
-2. Click **Create Token** → **Custom token**
-3. Set:
-   - **Token name:** `acme-cppm-dns`
-   - **Permissions:** `Zone` → `DNS` → `Edit`
-   - **Zone Resources:** `Include` → `Specific zone` → `sinemalab.com`
-4. Copy the token and note your **Account ID** and **Zone ID**
-   (both are visible on the Overview page of your zone in the Cloudflare dashboard)
+**Cloudflare (default)**
 
-### 3. ClearPass API Client
+Create a scoped API token:
 
-Create a dedicated API client in CPPM:
+1. [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → **Create Token → Custom token**
+2. Set **Permissions:** `Zone → DNS → Edit`
+3. Set **Zone Resources:** `Include → Specific zone → <your zone>`
+4. Copy the token and note your **Account ID** and **Zone ID** (Zone Overview page)
 
-1. Log in to CPPM Admin UI → **Administration → API Services → API Clients**
-2. Click **Add API Client**
-3. Configure:
+```ini
+DNS_PROVIDER=cloudflare
+CF_Token=<scoped-api-token>
+CF_Account_ID=<account-id>
+CF_Zone_ID=<zone-id>
+```
+
+**Porkbun**
+
+1. [Porkbun](https://porkbun.com/account/api) → Create API key
+2. Enable API access on the domain under Domain Management
+
+```ini
+DNS_PROVIDER=porkbun
+PORKBUN_API_KEY=pk1_...
+PORKBUN_SECRET_API_KEY=sk1_...
+```
+
+**Route53 / AWS**
+
+IAM policy required: `route53:ChangeResourceRecordSets`, `route53:ListHostedZones`,
+`route53:GetChange`, `route53:ListResourceRecordSets`
+
+```ini
+DNS_PROVIDER=route53
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+```
+
+**DigitalOcean**
+
+```ini
+DNS_PROVIDER=digitalocean
+DO_API_KEY=dop_v1_...
+```
+
+**GoDaddy**
+
+```ini
+DNS_PROVIDER=godaddy
+GD_Key=...
+GD_Secret=...
+```
+
+### 3. ClearPass API client
+
+1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
+2. Configure:
+
    | Field | Value |
    |---|---|
    | Client ID | `cppm-cert-manager` |
    | Enabled | ✓ |
-   | Operator Profile | `Super Administrator` (or a custom profile — see note below) |
+   | Operator Profile | `Super Administrator` or custom (see note) |
    | Grant Types | `client_credentials` |
    | Access Token Lifetime | `28800` (8 hours) |
-4. Click **Create Client** and **copy the client secret** — it is shown only once.
 
-> **Minimum permissions for a custom Operator Profile:**
-> The API client needs write access to *Server Certificates* only.
-> Create a custom profile under **Administration → Operator Logins → Operator Profiles**
-> with **Allow → All → Certificate Management** enabled.
+3. Click **Create Client** and copy the client secret — shown only once.
 
-### 4. Configure Environment
+> **Minimum custom Operator Profile permissions:**
+> Administration → Operator Logins → Operator Profiles → Add
+> Enable **Allow → All → Certificate Management**
+
+### 4. Configure `.env`
 
 ```bash
-cp .env.example .env
-chmod 600 .env       # Restrict read access to root only
-nano .env            # Fill in all values
+cp env-example .env
+chmod 600 .env
+nano .env
 ```
 
-Key values to set:
-```
-NOTE: cppm.sinemalab.com is an example domain, replace with your domain information
-```
+Minimum required values (Cloudflare example):
+
 ```ini
-# Cloudflare
-CF_Token=<your-scoped-api-token>
-CF_Account_ID=<cloudflare-account-id>
-CF_Zone_ID=<zone-id-for-sinemalab.com>
+# DNS
+DNS_PROVIDER=cloudflare
+CF_Token=<scoped-api-token>
+CF_Account_ID=<account-id>
+CF_Zone_ID=<zone-id>
 
 # ACME
-ACME_EMAIL=admin@sinemalab.com
+DOMAIN=cppm.example.com
+ACME_EMAIL=admin@example.com
+ACME_SERVER=letsencrypt
 
 # ClearPass
-CPPM_HOST=cppm.sinemalab.com
+CPPM_HOST=cppm.example.com
 CPPM_CLIENT_ID=cppm-cert-manager
-CPPM_CLIENT_SECRET=<secret-from-step-3>
-CPPM_VERIFY_SSL=false   # ← change to true after cert is installed
+CPPM_CLIENT_SECRET=<secret>
+CPPM_VERIFY_SSL=false
+
+# Callback — Docker host LAN IP that CPPM can reach (NOT the container IP)
+# Find it: ip route get <cppm-ip>  (look for 'src X.X.X.X')
+CPPM_CALLBACK_HOST=<host-lan-ip>
+CPPM_CALLBACK_PORT=8765
 ```
 
-### 5. Build and Start
+### 5. Build and start
 
 ```bash
-# Build the image
-docker compose build
-
-# Start (runs in background, issues cert on first start)
+docker compose build --no-cache
 docker compose up -d
-
-# Watch startup logs (Ctrl-C to stop watching, container keeps running)
 docker compose logs -f
-
-# Or watch the startup log file directly:
-tail -f /opt/cppm-data/logs/startup.log
 ```
 
-**What happens on first start:**
+**Expected first-run sequence:**
 
-1. Environment variables are validated
-2. `acme.sh` state is linked to `/data/acme.sh` (persistent)
-3. Certificate is issued via Cloudflare DNS-01
-4. Cert files are written to `/opt/cppm-data/certs/`
-5. `deploy_hook.sh` is called → `clearpass_upload.py` runs → cert uploaded to CPPM
-6. `crond` starts and runs the renewal schedule
+```
+[INFO ] No certificates found – starting first-time issuance
+[ISSUE] Issuing ECC (ec-256) certificate via cloudflare DNS-01
+[ISSUE] Issuing RSA (2048) certificate via cloudflare DNS-01
+[OK   ] New certificates issued (ECC + RSA)
+[OK   ] ECC+RSA certs installed – expires <date>
+[OK   ] 7 LE CA certs verified – 7 uploaded, 0 already trusted
+[OK   ] ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
+[INFO ] supercronic started – renewal checks at 02:00 and 14:00 UTC
+```
 
-**Expected first-start time:** 2–5 minutes (DNS propagation for the ACME challenge).
+First-run time: 2–5 minutes (DNS propagation for the ACME challenge).
 
 ---
 
 ## How It Works
 
-### Certificate Issuance (first run)
+### Certificate issuance (first run)
 
 ```
 entrypoint.sh
-    └─► issue_cert.sh
-            ├─ acme.sh --issue --dns dns_cf      (Cloudflare DNS-01 challenge)
-            ├─ acme.sh --install-cert            (copies flat files to /data/certs/)
-            └─ deploy_hook.sh
-                    └─ clearpass_upload.py
-                            │
-                            ├─ Step 0: Let's Encrypt Trust List Pre-flight
-                            │     ├─ Parse .ca.cer  → individual intermediate PEMs
-                            │     ├─ Download from letsencrypt.org:
-                            │     │     ISRG Root X1 (RSA root)
-                            │     │     ISRG Root X2 (ECDSA root)
-                            │     │     R10, R11     (RSA intermediates)
-                            │     │     E5, E6       (ECDSA intermediates)
-                            │     ├─ GET  /api/certificate/trust-list
-                            │     ├─ Compare SHA-256 fingerprints
-                            │     ├─ POST /api/certificate/trust-list  (upload missing)
-                            │     │       enable_for_eap    = true
-                            │     │       enable_for_others = true
-                            │     └─ PATCH /api/certificate/trust-list/{id}
-                            │             (if present but flags are disabled)
-                            │
-                            ├─ Step 1: openssl pkcs12 -export (PEM -> PKCS12)
-                            │          POST /api/server-certificate  (HTTPS cert)
-                            │
-                            ├─ Step 2: POST /api/radius/service-certificate
-                            │
-                            └─ Step 3: GET  /api/server-certificate (verify)
+    └── issue_cert.sh
+            ├── acme.sh --issue --keylength ec-256   ECC via DNS-01
+            ├── acme.sh --issue --keylength 2048      RSA via DNS-01
+            └── install_cert.sh
+                    ├── acme.sh --install-cert --ecc  → <domain>.ecc.*
+                    ├── acme.sh --install-cert        → <domain>.rsa.*
+                    └── deploy_hook.sh
+                            └── clearpass_upload.py  (pyclearpass SDK)
+                                    ├── Step 0: Trust List Pre-flight
+                                    │     Compute SHA-256 fingerprints from cert_file
+                                    │     PEM in each trust list entry, then:
+                                    │     POST  /api/cert-trust-list  (missing certs)
+                                    │     PATCH /api/cert-trust-list/{id}  (wrong flags)
+                                    │     cert_usage: ["EAP", "Others"]
+                                    │
+                                    ├── Step 1: ECC → HTTPS(ECC)
+                                    │     GET  /api/cluster/server/publisher  (UUID)
+                                    │     GET  /api/server-cert  (find HTTPS(ECC) slot)
+                                    │     PUT  /api/server-cert/name/{uuid}/HTTPS(ECC)
+                                    │     CPPM fetches PKCS12 via CPPM_CALLBACK_HOST
+                                    │
+                                    ├── Step 2: RSA → RADIUS
+                                    │     PUT  /api/server-cert/name/{uuid}/RADIUS
+                                    │
+                                    └── Step 3: GET /api/server-cert (verify domain)
 ```
 
-### Automatic Renewal (cron)
+### Automatic renewal (supercronic)
+
+supercronic runs `renew.sh` at **02:00 and 14:00 UTC** daily. acme.sh renews
+when ≤30 days remain — approximately 60 days after issuance for a 90-day
+Let's Encrypt certificate.
 
 ```
-crond (02:00 and 14:00 UTC)
-    └─► renew.sh
-            └─ acme.sh --renew
-                    ├─ [cert not yet due] → exits 2, nothing happens
-                    └─ [cert within 30 days of expiry]
-                            ├─ renews via Cloudflare DNS-01
-                            ├─ acme.sh --install-cert (updates flat files)
-                            └─ --reloadcmd → deploy_hook.sh → clearpass_upload.py
+supercronic (02:00 / 14:00 UTC)
+    └── renew.sh
+            ├── acme.sh --renew (ECC)
+            ├── acme.sh --renew (RSA)
+            └── on renewal → install_cert.sh → deploy_hook.sh → clearpass_upload.py
 ```
 
-Let's Encrypt certificates are valid for **90 days**. acme.sh renews when
-**≤30 days** remain. In normal operation this happens automatically ~60 days
-after issuance.
+### Authentication
+
+`clearpass_upload.py` performs an OAuth2 `client_credentials` exchange directly
+rather than using the pyclearpass SDK's built-in token fetch (which sends
+extra fields that cause CPPM to reject the request). The resulting Bearer token
+is then passed to the SDK as `api_token=` for all subsequent calls.
+
+### Server certificate upload
+
+The `PUT /api/server-cert/name/{uuid}/{service_name}` endpoint is JSON-only —
+CPPM must fetch the PKCS12 from a URL. The script serves the file from a
+temporary HTTP server bound to `0.0.0.0` on `CPPM_CALLBACK_PORT`, which is
+published to the Docker host via `docker-compose.yml`. `CPPM_CALLBACK_HOST`
+must be the host's LAN IP that CPPM can route to.
 
 ---
 
 ## Certificate Files
 
-After successful issuance, these files appear at `/opt/cppm-data/certs/`:
+After successful issuance, flat cert files are written to `/opt/cppm-certs/`:
 
-| File | Contents | Use |
-|---|---|---|
-| `cppm.sinemalab.com.cer` | Domain certificate (leaf) | Verification |
-| `cppm.sinemalab.com.key` | Private key (**chmod 600**) | Never leave this host |
-| `cppm.sinemalab.com.fullchain.cer` | Leaf + intermediate CA | Used for PKCS12 export to CPPM |
-| `cppm.sinemalab.com.ca.cer` | Issuer CA chain only | Trust anchor |
+| File | Contents |
+|---|---|
+| `<domain>.ecc.cer` | ECC domain certificate (PEM) |
+| `<domain>.ecc.key` | ECC private key (**chmod 600**) |
+| `<domain>.ecc.fullchain.cer` | ECC cert + intermediates |
+| `<domain>.ecc.ca.cer` | ECC CA chain |
+| `<domain>.rsa.cer` | RSA domain certificate (PEM) |
+| `<domain>.rsa.key` | RSA private key (**chmod 600**) |
+| `<domain>.rsa.fullchain.cer` | RSA cert + intermediates |
+| `<domain>.rsa.ca.cer` | RSA CA chain |
 
-> **Security:** The private key is never transmitted to CPPM directly.  
-> It is bundled into an ephemeral PKCS12 file (written to `/tmp`, deleted immediately
-> after upload) along with the passphrase in `CPPM_CERT_PASSPHRASE`.
+Private keys are never transmitted to CPPM directly. Each cert is converted to
+an ephemeral PKCS12 file written to `/tmp` and deleted immediately after upload.
 
 ---
 
-## Verifying the Certificate in CPPM
+## Verifying the Certificates in CPPM
 
-After the upload script runs, verify in the CPPM Admin UI:
+**In the CPPM Admin UI:**
 
-**HTTPS certificate:**
-> Administration → Certificates → Server Certificate
+- HTTPS cert: **Administration → Certificates → Server Certificate**
+- RADIUS cert: **Administration → Certificates → Service Certificates → RADIUS**
 
-**RADIUS certificate:**
-> Administration → Certificates → Service Certificates → RADIUS
-
-You should see the new Let's Encrypt certificate with the correct expiry date.
-
-To verify via CLI from your workstation:
+**Via CLI:**
 
 ```bash
-# Check HTTPS cert
-openssl s_client -connect cppm.sinemalab.com:443 -servername cppm.sinemalab.com </dev/null 2>/dev/null \
+# Verify HTTPS cert
+openssl s_client -connect cppm.example.com:443 \
+    -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -issuer -dates
 
-# Check RADIUS EAP cert (requires radtest or eapol_test)
-openssl s_client -connect cppm.sinemalab.com:1812 -starttls radius </dev/null 2>/dev/null \
-    | openssl x509 -noout -subject -dates
+# Check installed ECC flat file
+openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -subject -dates
+
+# Check installed RSA flat file
+openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
 ```
 
 ---
 
 ## Maintenance
 
-### View Logs
+### View logs
 
 ```bash
-# Container startup / first-run log
-tail -100 /opt/cppm-data/logs/startup.log
+# Quick status overview
+cat /opt/cppm-certs/status.log
+grep FAILED /opt/cppm-certs/status.log
 
-# Renewal cron log (daily acme.sh output)
-tail -100 /opt/cppm-data/logs/renewal.log
+# Detailed logs
+tail -100 /opt/cppm-certs/.logs/startup.log
+tail -100 /opt/cppm-certs/.logs/renewal.log
+tail -100 /opt/cppm-certs/.logs/upload.log
 
-# ClearPass API upload log
-tail -100 /opt/cppm-data/logs/upload.log
-
-# When was the last successful upload?
-cat /opt/cppm-data/logs/last_upload.txt
-
-# Docker container logs (crond + any stdout)
-docker compose logs --tail=100
-
-# Live tail all logs
+# Docker container output
 docker compose logs -f
 ```
 
-### Force Manual Renewal
-
-Use this if you need to rotate the certificate before expiry (e.g., after a
-CPPM migration):
+### Force certificate re-issue
 
 ```bash
-# Method 1: Environment flag (preferred – uses existing container)
-docker compose stop
-FORCE_RENEW=true docker compose up -d
-docker compose logs -f
-
-# After the cert is issued, reset the flag:
-# Edit .env → FORCE_RENEW=false → docker compose up -d
-
-# Method 2: exec into the container
-docker exec -it cppm-cert-manager /opt/cppm/issue_cert.sh
+# Edit .env: FORCE_RENEW=true
+docker compose up -d --force-recreate
+# After completion, edit .env: FORCE_RENEW=false
+docker compose up -d --force-recreate
 ```
 
-### Manually Trigger Upload Only
-
-If the cert is already up-to-date but you need to re-upload to CPPM
-(e.g., after a CPPM rebuild):
+### Re-upload to CPPM (cert unchanged)
 
 ```bash
 docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
-### Update Credentials
+### Switch DNS provider
 
-If you rotate the CPPM API secret or Cloudflare token:
+Update `.env` with the new `DNS_PROVIDER` and its credentials, then recreate:
 
 ```bash
-# 1. Update .env
-nano /opt/cppm-cert-manager/.env
-
-# 2. Recreate the container to pick up new env vars
+# Example: switch to Porkbun
+# Edit .env:
+#   DNS_PROVIDER=porkbun
+#   PORKBUN_API_KEY=pk1_...
+#   PORKBUN_SECRET_API_KEY=sk1_...
 docker compose up -d --force-recreate
 ```
 
-### Enable SSL Verification
+Existing certificates on the volume are unaffected — only new issuances and
+renewals use the new provider.
 
-After the Let's Encrypt certificate is installed and trusted by your workstation:
+### Enable SSL verification
+
+After the Let's Encrypt cert is installed and trusted:
 
 ```bash
-# 1. Update .env
-CPPM_VERIFY_SSL=true
-
-# 2. Recreate container
+# Edit .env: CPPM_VERIFY_SSL=true
 docker compose up -d --force-recreate
 ```
 
-### Rebuilding the Container
-
-Safe to do at any time – the certificate state lives on the host volume:
+### Rebuild the image (cert data preserved)
 
 ```bash
+docker compose down
 docker compose build --no-cache
 docker compose up -d
-# All certs, acme.sh state, and logs are preserved in /opt/cppm-data/
-```
-
-### Checking Certificate Expiry
-
-```bash
-openssl x509 -in /opt/cppm-data/certs/cppm.sinemalab.com.cer \
-    -noout -subject -issuer -dates
 ```
 
 ---
@@ -410,130 +475,95 @@ openssl x509 -in /opt/cppm-data/certs/cppm.sinemalab.com.cer \
 
 ### Container exits immediately
 
-Check environment variables:
 ```bash
-docker compose logs
-# Look for: [ERROR] Required environment variable not set: ...
+docker compose logs | grep -E "ERROR|Missing"
 ```
+
+Check that `DNS_PROVIDER` is set and the required credentials for that provider
+are present in `.env`.
 
 ### DNS-01 challenge fails
 
+**Cloudflare:** verify the token has `Zone:DNS:Edit` on the correct zone.
+
 ```bash
-# Verify Cloudflare credentials
+# Test Cloudflare token
 docker exec -it cppm-cert-manager sh -c '
     curl -s -H "Authorization: Bearer $CF_Token" \
-    "https://api.cloudflare.com/client/v4/zones/$CF_Zone_ID/dns_records" \
-    | python3 -m json.tool | head -20
+    "https://api.cloudflare.com/client/v4/zones/$CF_Zone_ID" \
+    | python3 -m json.tool | grep '"'"'name\|success'"'"'
 '
-
-# Common causes:
-# - CF_Token doesn't have Zone:DNS:Edit on sinemalab.com
-# - CF_Zone_ID is wrong (must be for sinemalab.com, not the account root)
-# - DNS propagation too slow (rare with Cloudflare)
 ```
 
-### CPPM API returns 401 Unauthorized
+**Porkbun:** ensure API access is enabled on the domain in the Porkbun dashboard.
+
+**Route53:** verify the IAM policy includes `route53:GetChange` — without it
+acme.sh cannot poll for propagation.
+
+Check the full acme.sh output:
+```bash
+tail -100 /opt/cppm-certs/.logs/renewal.log
+```
+
+### ClearPass API authentication fails (400 invalid_client)
 
 ```bash
-# Test authentication directly
-docker exec -it cppm-cert-manager python3 - <<'EOF'
-import requests, os
+docker exec -it cppm-cert-manager python3 -c "
+import os, requests
 r = requests.post(
-    f"https://{os.environ['CPPM_HOST']}/api/oauth",
+    'https://' + os.environ['CPPM_HOST'] + '/api/oauth',
     json={
-        "grant_type": "client_credentials",
-        "client_id": os.environ["CPPM_CLIENT_ID"],
-        "client_secret": os.environ["CPPM_CLIENT_SECRET"],
+        'grant_type':    'client_credentials',
+        'client_id':     os.environ['CPPM_CLIENT_ID'],
+        'client_secret': os.environ['CPPM_CLIENT_SECRET'],
     },
     verify=False,
 )
 print(r.status_code, r.json())
-EOF
-
-# Common causes:
-# - CPPM_CLIENT_SECRET is wrong (re-check in CPPM Admin UI)
-# - API Client is disabled in CPPM
-# - API Client grant type is not set to client_credentials
+"
 ```
 
-### CPPM API returns 404 on certificate endpoint
+Common causes: wrong `CPPM_CLIENT_SECRET`, API client disabled, grant type not
+set to `client_credentials`.
 
-Your CPPM version may use a different endpoint path. Check the Swagger UI:
+### HTTPS/RADIUS upload fails — 422 "Cert File is empty"
 
-```
-https://cppm.sinemalab.com/api-docs/
-```
+CPPM tried to fetch the PKCS12 from `CPPM_CALLBACK_HOST` but could not reach it.
 
-Search for "certificate" in the Swagger UI and identify the correct
-`POST` endpoint. Then update `clearpass_upload.py` → `upload_https_certificate()`
-method, `endpoints` list.
-
-### CPPM API returns 403 Forbidden
-
-The API client's Operator Profile lacks certificate write permission.
-In CPPM Admin UI, verify the profile attached to your API client includes:
-> **Allow** → **All** → **Certificate Management**
-
-### Trust list upload returns 400 / cert not appearing in UI
-
-CPPM validates that the uploaded PEM is a CA certificate (Basic Constraints: CA=TRUE).
-Let's Encrypt end-entity certs will be rejected — only roots and intermediates are valid.
-This is expected behaviour; the script only submits CA-type certs.
-
-If a specific cert fails and you need to add it manually:
-1. Download from letsencrypt.org (URLs in `clearpass_upload.py → LE_CERT_SOURCES`)
-2. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
-3. Select the PEM file
-4. Enable **EAP** and **Others** checkboxes
-5. Click **Save**
+1. Verify `CPPM_CALLBACK_HOST` is the Docker **host** LAN IP (not the container IP):
+   ```bash
+   ip route get <cppm-ip>   # look for 'src X.X.X.X'
+   ```
+2. Verify the port is published in `docker-compose.yml`:
+   ```yaml
+   ports:
+     - "8765:8765"
+   ```
+3. Verify CPPM can reach the host on that port (no firewall blocking it).
 
 ### EAP authentication fails after cert install
 
-This almost always means the LE intermediate or root is not in the trust list with
-EAP enabled.  Force a re-run of Step 0 only:
+A Let's Encrypt CA cert is missing from the CPPM trust list with EAP enabled.
+Force a re-run of the trust list pre-flight:
 
 ```bash
-docker exec -it cppm-cert-manager python3 /opt/cppm/clearpass_upload.py \
-    --cert      /data/certs/cppm.sinemalab.com.cer \
-    --key       /data/certs/cppm.sinemalab.com.key \
-    --fullchain /data/certs/cppm.sinemalab.com.fullchain.cer \
-    --ca        /data/certs/cppm.sinemalab.com.ca.cer \
-    --skip-radius
+docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+tail -f /opt/cppm-certs/status.log
 ```
 
-Then check the upload log:
+If entries still fail, add them manually:
+**Administration → Certificates → Trust List → Import** — enable **EAP** and
+**Others** for each entry.
+
+### Let's Encrypt rate limit
+
+Switch to staging for testing:
 ```bash
-tail -50 /opt/cppm-data/logs/upload.log
-```
-
-### acme.sh rate limit error
-
-Let's Encrypt limits: 5 duplicate certificate orders per week per domain.
-If you're testing, switch to the staging CA:
-
-```bash
-# In .env:
-ACME_SERVER=letsencrypt_test
-
-# Rebuild container
+# Edit .env: ACME_SERVER=letsencrypt_test
 docker compose up -d --force-recreate
 ```
 
-Do not use staging certs in production – CPPM will reject them unless you
-install the staging CA in CPPM's trust store.
-
-### openssl pkcs12 error during upload
-
-```bash
-# Verify cert and key match
-docker exec -it cppm-cert-manager sh -c '
-    CERT_MD5=$(openssl x509 -noout -modulus -in /data/certs/cppm.sinemalab.com.cer | md5sum)
-    KEY_MD5=$(openssl rsa -noout -modulus -in /data/certs/cppm.sinemalab.com.key | md5sum)
-    echo "Cert modulus: $CERT_MD5"
-    echo "Key modulus:  $KEY_MD5"
-    [ "$CERT_MD5" = "$KEY_MD5" ] && echo "MATCH ✓" || echo "MISMATCH ✗ – re-issue cert"
-'
-```
+Switch back to `letsencrypt` and wait 7 days before re-issuing if rate-limited.
 
 ---
 
@@ -541,124 +571,57 @@ docker exec -it cppm-cert-manager sh -c '
 
 | Item | Recommendation |
 |---|---|
-| `.env` file permissions | `chmod 600 .env` — readable only by root |
-| `/opt/cppm-data` permissions | `chmod 750` — readable only by root and docker group |
-| Private key | Never extracted from the container; PKCS12 is ephemeral (`/tmp`) |
-| `CPPM_CERT_PASSPHRASE` | Change from default; used only transiently |
+| `.env` permissions | `chmod 600 .env` — readable by root only |
+| `/opt/cppm-certs` permissions | `chmod 750` |
+| Private keys | Never leave the host; PKCS12 export is ephemeral in `/tmp` |
+| `CPPM_CERT_PASSPHRASE` | Change from default; used transiently only |
 | `CPPM_VERIFY_SSL` | Set `true` after initial cert install |
-| API Client scope | Create a dedicated CPPM Operator Profile with *only* cert write permissions |
-| Cloudflare token scope | Restrict token to `sinemalab.com` zone only, `DNS:Edit` only |
-| Container user | Runs as root (required by crond on Alpine); mitigated by no exposed ports |
-| Secrets in Docker | Managed via `.env` file; do not hard-code in `Dockerfile` |
+| API client scope | Use a dedicated Operator Profile with Certificate Management only |
+| Cloudflare token scope | Restrict to the specific zone, `DNS:Edit` only |
+| Other DNS providers | Apply least-privilege: zone-specific where supported |
+| Secrets in Docker | Managed via `.env`; never hard-coded in `Dockerfile` |
 
 ---
 
 ## ClearPass API Reference
 
-### Authentication
+All API calls use the **official pyclearpass SDK** (`pip install pyclearpass`).
 
+Source: https://github.com/aruba/pyclearpass
+
+Interactive Swagger UI on your CPPM instance:
 ```
-POST https://cppm.sinemalab.com/api/oauth
-Content-Type: application/json
-
-{
-  "grant_type": "client_credentials",
-  "client_id": "cppm-cert-manager",
-  "client_secret": "<secret>"
-}
-
-Response:
-{
-  "access_token": "eyJ...",
-  "token_type": "Bearer",
-  "expires_in": 28800
-}
+https://cppm.example.com/api-docs/
 ```
 
-### Server Certificate Upload (HTTPS + RADIUS)
+### Endpoints used
 
-```
-POST https://cppm.sinemalab.com/api/server-certificate
-Authorization: Bearer <token>
-Content-Type: multipart/form-data
-
-Fields:
-  certificate_file  (binary .pfx / PKCS12)
-  passphrase        (the export passphrase used by openssl)
-
-Response 200/201:
-{
-  "id": <cert-id>,
-  "subject": "CN=cppm.sinemalab.com",
-  "issuer": "CN=R10, O=Let's Encrypt, ...",
-  "valid_from": "...",
-  "valid_until": "...",
-  "status": "active"
-}
-```
-
-### RADIUS Service Certificate (separate binding, 6.9+)
-
-```
-POST https://cppm.sinemalab.com/api/radius/service-certificate
-Authorization: Bearer <token>
-Content-Type: multipart/form-data
-
-Fields:
-  certificate_file  (binary .pfx / PKCS12)
-  passphrase
-```
-
-### Endpoint Differences by CPPM Version
-
-| CPPM Version | HTTPS Cert Endpoint | RADIUS Cert Endpoint |
+| Method | Path | Purpose |
 |---|---|---|
-| 6.8.x | `/api/certificate/service-cert` | Not separately configurable |
-| 6.9.x | `/api/server-certificate` | `/api/radius/service-certificate` |
-| 6.11.x | `/api/server-certificate` | `/api/radius/service-certificate` |
+| `POST` | `/api/oauth` | OAuth2 token exchange |
+| `GET` | `/api/cert-trust-list` | Fetch trust list entries |
+| `POST` | `/api/cert-trust-list` | Add LE CA cert to trust list |
+| `PATCH` | `/api/cert-trust-list/{id}` | Patch trust list flags |
+| `GET` | `/api/cluster/server/publisher` | Get publisher server UUID |
+| `GET` | `/api/server-cert` | List server cert slots |
+| `PUT` | `/api/server-cert/name/{uuid}/HTTPS(ECC)` | Upload ECC cert |
+| `PUT` | `/api/server-cert/name/{uuid}/RADIUS` | Upload RSA cert |
 
-> The upload script tries both HTTPS endpoints automatically. For RADIUS,
-> a 404 response is treated as "unified cert mode" and silently skipped.
+### Known service_id values
 
-### Browse Your Instance's API
+| service_id | service_name |
+|---|---|
+| 1 | RADIUS |
+| 2 | HTTPS(ECC) |
+| 7 | HTTPS(RSA) |
+| 21 | RadSec |
+| 106 | Database |
 
-Every CPPM instance exposes an interactive Swagger UI:
+### Trust list cert_usage values
 
-```
-https://cppm.sinemalab.com/api-docs/
-```
+Valid strings per CPPM API docs:
+`"AD/LDAP Servers"`, `"Aruba Infrastructure"`, `"Aruba Services"`,
+`"Database"`, `"EAP"`, `"Endpoint Context Servers"`, `"RadSec"`,
+`"SAML"`, `"SMTP"`, `"EST"`, `"Others"`
 
-Use this to discover exact endpoint paths for your specific version.
-
----
-
-## Quick Reference
-
-```bash
-# Start container
-docker compose up -d
-
-# Stop container
-docker compose down
-
-# View live logs
-docker compose logs -f
-
-# Force certificate re-issue
-FORCE_RENEW=true docker compose up -d --force-recreate
-
-# Manually re-upload cert to CPPM
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
-
-# Check cert expiry
-openssl x509 -in /opt/cppm-data/certs/cppm.sinemalab.com.cer -noout -dates
-
-# Shell into container
-docker exec -it cppm-cert-manager bash
-
-# View last upload time
-cat /opt/cppm-data/logs/last_upload.txt
-
-# Rebuild image (preserves all cert data)
-docker compose build --no-cache && docker compose up -d
-```
+This project sets `["EAP", "Others"]` for all Let's Encrypt CA entries.

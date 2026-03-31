@@ -43,6 +43,51 @@ see this, check your host environment or `.env` for a string-valued `DEBUG`.
 
 ---
 
+## DNS provider credential error
+
+**Symptom:** Container exits at startup with `Missing required env var` or
+`<PROVIDER> credentials missing`.
+
+**Cause:** `DNS_PROVIDER` is set but the required credential variables for
+that provider are missing or empty.
+
+| Provider | Required variables |
+|---|---|
+| `cloudflare` | `CF_Token` **or** `CF_Key` + `CF_Email` |
+| `porkbun` | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
+| `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| `digitalocean` | `DO_API_KEY` |
+| `godaddy` | `GD_Key` + `GD_Secret` |
+
+Fix: add the missing variables to `.env` and recreate:
+```bash
+docker compose up -d --force-recreate
+```
+
+---
+
+## DNS-01 challenge fails — `DNS_API_ERROR` or TXT record not found
+
+**Cause:** The DNS provider API credentials are valid but the TXT record
+was not created, or did not propagate before the ACME server checked.
+
+Common causes by provider:
+
+- **Cloudflare:** Zone ID mismatch — `CF_Zone_ID` must match the zone that
+  contains the domain, not a parent zone.
+- **Porkbun:** API access not enabled for the domain. Check
+  **Domain Management → API Access** on the Porkbun dashboard.
+- **Route53:** IAM policy missing `route53:GetChange` — the script cannot
+  wait for the record to propagate.
+- **DigitalOcean:** Token has read-only scope — must be write scope.
+
+Check the renewal log for the full acme.sh error:
+```bash
+tail -100 /opt/cppm-certs/.logs/renewal.log
+```
+
+---
+
 ## Authentication failed
 
 **Symptom:** `upload.log` contains `HTTP 400 invalid_client`.
@@ -145,7 +190,7 @@ the request body. If CPPM cannot reach that URL, it times out and returns 422.
 in `.env`, and that the port is published in `docker-compose.yml`:
 
 ```ini
-CPPM_CALLBACK_HOST=10.1.14.50    # Docker host's LAN IP that CPPM can route to
+CPPM_CALLBACK_HOST=<docker-host-ip>    # Docker host's LAN IP that CPPM can route to
 CPPM_CALLBACK_PORT=8765
 ```
 
@@ -186,8 +231,8 @@ covers RADIUS authentication.
 Verify the cert and key belong to the same keypair:
 ```bash
 docker exec -it cppm-cert-manager sh -c '
-    CERT=/data/certs/cppm.sinemalab.com.ecc.cer
-    KEY=/data/certs/cppm.sinemalab.com.ecc.key
+    CERT=/data/certs/cppm.example.com.ecc.cer
+    KEY=/data/certs/cppm.example.com.ecc.key
     CM=$(openssl x509 -noout -pubkey -in $CERT | sha256sum)
     KM=$(openssl pkey  -noout -pubout -in $KEY  | sha256sum)
     [ "$CM" = "$KM" ] && echo "MATCH" || echo "MISMATCH – re-issue cert"
@@ -261,7 +306,7 @@ docker exec -it cppm-cert-manager python3
 
 Interactive Swagger UI:
 ```
-https://cppm.sinemalab.com/api-docs/
+https://cppm.example.com/api-docs/
 ```
 
 Official API reference (v6.9 – v6.12):

@@ -217,18 +217,18 @@ image and is recreated on every `docker compose build`.
 │
 ├── status.log                            ← human-readable event log
 │
-├── cppm.sinemalab.com.ecc.cer            ← ECC domain cert
-├── cppm.sinemalab.com.ecc.key            ← ECC private key (chmod 600)
-├── cppm.sinemalab.com.ecc.fullchain.cer  ← ECC cert + intermediates
-├── cppm.sinemalab.com.ecc.ca.cer         ← ECC CA chain
+├── cppm.example.com.ecc.cer            ← ECC domain cert
+├── cppm.example.com.ecc.key            ← ECC private key (chmod 600)
+├── cppm.example.com.ecc.fullchain.cer  ← ECC cert + intermediates
+├── cppm.example.com.ecc.ca.cer         ← ECC CA chain
 │
-├── cppm.sinemalab.com.rsa.cer            ← RSA domain cert
-├── cppm.sinemalab.com.rsa.key            ← RSA private key (chmod 600)
-├── cppm.sinemalab.com.rsa.fullchain.cer  ← RSA cert + intermediates
-├── cppm.sinemalab.com.rsa.ca.cer         ← RSA CA chain
+├── cppm.example.com.rsa.cer            ← RSA domain cert
+├── cppm.example.com.rsa.key            ← RSA private key (chmod 600)
+├── cppm.example.com.rsa.fullchain.cer  ← RSA cert + intermediates
+├── cppm.example.com.rsa.ca.cer         ← RSA CA chain
 │
-├── cppm.sinemalab.com_ecc/               ← acme.sh ECC internal state
-├── cppm.sinemalab.com/                   ← acme.sh RSA internal state
+├── cppm.example.com_ecc/               ← acme.sh ECC internal state
+├── cppm.example.com/                   ← acme.sh RSA internal state
 │
 ├── .acme-state/                          ← acme.sh config home
 │   ├── ca/
@@ -261,5 +261,5 @@ Runtime network access:
 |---|---|---|
 | `api.cloudflare.com` | DNS-01 challenge | Issuance and renewal only |
 | `acme-v02.api.letsencrypt.org` | ACME protocol | Issuance and renewal only |
-| `cppm.sinemalab.com` | ClearPass REST API | After every issuance/renewal |
+| `cppm.example.com` | ClearPass REST API | After every issuance/renewal |
 | `<CPPM_CALLBACK_HOST>:<CPPM_CALLBACK_PORT>` | PKCS12 fetch (inbound from CPPM) | During cert upload only |

@@ -11,10 +11,28 @@ services:
 
     environment:
       TZ: ${TZ:-UTC}
-      # Cloudflare DNS API credentials
-      CF_Token:      ${CF_Token}
-      CF_Account_ID: ${CF_Account_ID}
-      CF_Zone_ID:    ${CF_Zone_ID}
+      # ── DNS provider ────────────────────────────────────────────────────────
+      # Select the DNS provider for the ACME DNS-01 challenge.
+      # See .env.example for supported providers and their credential variables.
+      DNS_PROVIDER:    ${DNS_PROVIDER:-cloudflare}
+      # Cloudflare (dns_cf)
+      CF_Token:        ${CF_Token:-}
+      CF_Account_ID:   ${CF_Account_ID:-}
+      CF_Zone_ID:      ${CF_Zone_ID:-}
+      CF_Key:          ${CF_Key:-}
+      CF_Email:        ${CF_Email:-}
+      # Porkbun (dns_porkbun)
+      PORKBUN_API_KEY:        ${PORKBUN_API_KEY:-}
+      PORKBUN_SECRET_API_KEY: ${PORKBUN_SECRET_API_KEY:-}
+      # Route53 / AWS (dns_aws)
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION:    ${AWS_DEFAULT_REGION:-us-east-1}
+      # DigitalOcean (dns_dgon)
+      DO_API_KEY: ${DO_API_KEY:-}
+      # GoDaddy (dns_gd)
+      GD_Key:    ${GD_Key:-}
+      GD_Secret: ${GD_Secret:-}
       # ACME settings
       ACME_EMAIL:    ${ACME_EMAIL}
       ACME_SERVER:   ${ACME_SERVER:-letsencrypt}

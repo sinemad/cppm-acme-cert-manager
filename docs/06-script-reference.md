@@ -196,7 +196,7 @@ Provides `status_write LEVEL CATEGORY MESSAGE` which writes to
 | `CPPM_CLIENT_ID` | Yes | — | ClearPass API client ID |
 | `CPPM_CLIENT_SECRET` | Yes | — | ClearPass API client secret |
 | `CPPM_VERIFY_SSL` | No | `false` | Verify CPPM TLS cert (`true` after install) |
-| `CPPM_CERT_PASSPHRASE` | No | `CppmCert!2024` | PKCS12 export passphrase (transient, used in fallback only) |
+| `CPPM_CERT_PASSPHRASE` | No | `ChangeMe!` | PKCS12 export passphrase (transient, used in fallback only) |
 | `FORCE_RENEW` | No | `false` | Force re-issue on next start |
 | `SKIP_UPLOAD` | No | `false` | Disable ClearPass upload |
 | `LOG_LEVEL` | No | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |

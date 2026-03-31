@@ -8,13 +8,13 @@ column format:
 
 ```
 TIMESTAMP           | LEVEL  | CATEGORY | MESSAGE
-2026-03-17 10:43:07 | INFO   | STARTUP  | Container started – domain=cppm.sinemalab.com
-2026-03-17 10:43:07 | INFO   | CERT     | No certificate found – starting first-time issuance
-2026-03-17 10:43:34 | OK     | CERT     | New certificate issued via Cloudflare DNS-01
-2026-03-17 10:43:34 | OK     | CERT     | Cert installed – expires Jun 15 2026 (89 days remaining)
-2026-03-17 10:43:38 | OK     | TRUST    | 6 LE CA certs verified – 2 uploaded, 4 already trusted
-2026-03-17 10:43:42 | OK     | UPLOAD   | HTTPS + RADIUS cert uploaded to cppm.sinemalab.com
-2026-03-17 10:43:42 | INFO   | STARTUP  | crond started – renewal checks at 02:00 and 14:00 UTC
+2026-03-17 10:43:07 | INFO   | STARTUP  | Container started – domain=cppm.example.com
+2026-03-17 10:43:07 | INFO   | CERT     | No certificates found – starting first-time issuance
+2026-03-17 10:43:34 | OK     | CERT     | New certificates issued (ECC + RSA) via cloudflare DNS-01
+2026-03-17 10:43:34 | OK     | CERT     | ECC+RSA certs installed – expires Jun 15 2026 (89 days remaining)
+2026-03-17 10:43:38 | OK     | TRUST    | 7 LE CA certs verified – 2 uploaded, 5 already trusted
+2026-03-17 10:43:42 | OK     | UPLOAD   | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
+2026-03-17 10:43:42 | INFO   | STARTUP  | supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
 
 ```bash
@@ -49,7 +49,7 @@ tail -10 /opt/cppm-certs/status.log
 
 | Category | Written by | Covers |
 |---|---|---|
-| `STARTUP` | `entrypoint.sh` | Container start, crond launch, env validation |
+| `STARTUP` | `entrypoint.sh` | Container start, supercronic launch, env validation |
 | `CERT` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
 | `RENEW` | `renew.sh` | Daily renewal check results |
 | `TRUST` | `clearpass_upload.py` | Let's Encrypt trust list pre-flight summary |
@@ -59,12 +59,12 @@ tail -10 /opt/cppm-certs/status.log
 
 ## Expected status.log patterns
 
-### Normal restart (cert already installed)
+### Normal restart (both certs already installed)
 
 ```
-2026-03-18 09:00:01 | INFO   | STARTUP | Container started – domain=cppm.sinemalab.com
-2026-03-18 09:00:02 | OK     | CERT    | Certificate valid – expires Jun 15 2026 (88 days remaining)
-2026-03-18 09:00:02 | INFO   | STARTUP | crond started – renewal checks at 02:00 and 14:00 UTC
+2026-03-18 09:00:01 | INFO   | STARTUP | Container started – domain=cppm.example.com
+2026-03-18 09:00:02 | OK     | CERT    | ECC+RSA valid – expires Jun 15 2026 (88 days remaining)
+2026-03-18 09:00:02 | INFO   | STARTUP | supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
 
 ### Daily renewal check (not yet due)
@@ -76,16 +76,22 @@ tail -10 /opt/cppm-certs/status.log
 ### Successful renewal (~day 60)
 
 ```
-2026-06-01 02:00:01 | OK     | RENEW   | Certificate renewed – running install and upload
-2026-06-01 02:00:08 | OK     | CERT    | Cert installed – expires Sep 13 2026 (89 days remaining)
-2026-06-01 02:00:11 | OK     | TRUST   | 6 LE CA certs verified – 0 uploaded, 6 already trusted
-2026-06-01 02:00:15 | OK     | UPLOAD  | HTTPS + RADIUS cert uploaded to cppm.sinemalab.com
+2026-06-01 02:00:01 | OK     | RENEW   | Certificates renewed – running install and upload
+2026-06-01 02:00:08 | OK     | CERT    | ECC+RSA certs installed – expires Sep 13 2026 (89 days remaining)
+2026-06-01 02:00:11 | OK     | TRUST   | 7 LE CA certs verified – 0 uploaded, 7 already trusted
+2026-06-01 02:00:15 | OK     | UPLOAD  | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
 ```
 
 ### Upload failure
 
 ```
 2026-06-01 02:00:15 | FAILED | UPLOAD  | ClearPass upload failed (exit 1) – check upload.log
+```
+
+### DNS provider credential error
+
+```
+2026-03-18 09:00:01 | FAILED | CERT    | PORKBUN_API_KEY is not set.
 ```
 
 ---
@@ -98,13 +104,13 @@ The `.logs/` directory contains verbose output for deeper investigation:
 # Container startup and cert state decisions
 tail -100 /opt/cppm-certs/.logs/startup.log
 
-# acme.sh issuance and renewal full output
+# acme.sh issuance and renewal full output (includes DNS provider API calls)
 tail -100 /opt/cppm-certs/.logs/renewal.log
 
 # ClearPass API upload detail (OAuth, PKCS12, API responses)
 tail -100 /opt/cppm-certs/.logs/upload.log
 
-# crond execution timestamps
+# supercronic execution timestamps
 tail -50 /opt/cppm-certs/.logs/cron.log
 ```
 
@@ -125,14 +131,33 @@ docker compose logs --since="2026-03-17T10:00:00"
 
 ---
 
-## Verify the certificate directly
+## Verify the certificates directly
 
 ```bash
-# Check expiry of the installed flat cert file
-openssl x509 -in /opt/cppm-certs/cppm.sinemalab.com.cer -noout -subject -dates
+# Check expiry of the installed ECC cert
+openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -subject -dates
+
+# Check expiry of the installed RSA cert
+openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
 
 # Verify what CPPM is actually serving over HTTPS
-openssl s_client -connect cppm.sinemalab.com:443 \
-    -servername cppm.sinemalab.com </dev/null 2>/dev/null \
+openssl s_client -connect cppm.example.com:443 \
+    -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -issuer -dates
+```
+
+---
+
+## Check which DNS provider is active
+
+```bash
+docker exec -it cppm-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
+```
+
+The renewal log will also record the active provider on each issuance:
+
+```
+[ISSUE] Domain: cppm.example.com
+[ISSUE] Provider: porkbun
+[ISSUE] Server:   letsencrypt
 ```
