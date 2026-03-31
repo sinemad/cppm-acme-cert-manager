@@ -83,7 +83,7 @@ cppm-cert-manager/
 
 **Host persistent storage (survives container rebuilds):**
 ```
-NOTE: cppm.sinemalab.com is an example domain, replace with your domain
+NOTE: cppm.sinemalab.com is an example domain
 ```
 ```
 /opt/cppm-data/                 # Host directory (bind-mounted to /data in container)
@@ -167,7 +167,9 @@ nano .env            # Fill in all values
 ```
 
 Key values to set:
-
+```
+NOTE: cppm.sinemalab.com is an example domain, replace with your domain information
+```
 ```ini
 # Cloudflare
 CF_Token=<your-scoped-api-token>
