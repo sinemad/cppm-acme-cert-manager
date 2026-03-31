@@ -82,8 +82,7 @@ cppm-cert-manager/
 ```
 
 **Host persistent storage (survives container rebuilds):**
-
-# cppm.sinemalab.com is an example domain, replace with your domain
+** cppm.sinemalab.com is an example domain, replace with your domain **
 
 ```
 /opt/cppm-data/                 # Host directory (bind-mounted to /data in container)
