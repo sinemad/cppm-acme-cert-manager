@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ClearPass Certificate Manager – Environment Variables
+# Copy this file to .env and fill in all required values before first run.
+# NEVER commit .env to source control. THIS IS A SAMPLE ENV file
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── General ───────────────────────────────────────────────────────────────────
+# time zone
+TZ=America/Denver
+
+# ── Your Domain ex: my.domain.com ─────────────────────────────────────────────
+DOMAIN=
+
+# ── ACME settings ─────────────────────────────────────────────────────────────
+ACME_EMAIL=
+# Options: letsencrypt | letsencrypt_test | zerossl | buypass
+ACME_SERVER=
+
+# ── Cloudflare (Option A – Scoped API Token – PREFERRED) ─────────────────────
+# Create a token at: https://dash.cloudflare.com/profile/api-tokens
+# Permissions required: Zone > DNS > Edit  (for targeted zone only)
+CF_Token=
+CF_Account_ID=
+CF_Zone_ID=
+
+# ── Cloudflare (Option B – Legacy Global API Key) ─────────────────────────────
+# Uncomment and comment out Option A in docker-compose.yml if needed
+# CF_Key=your_global_api_key_here
+# CF_Email=your_cloudflare_login_email@example.com
+
+# ── Aruba ClearPass API ───────────────────────────────────────────────────────
+# DNS name of the CPPM host
+CPPM_HOST=
+# Create an API Client in CPPM:
+#   Administration > API Services > API Clients > Add
+#   Grant type: client_credentials
+#   Profile: Super Administrator (or a profile with Certificate Write permissions)
+CPPM_CLIENT_ID=
+CPPM_CLIENT_SECRET=
+
+# The Clearpass API does not allow a binary transfer of the certificate
+# via the API. A callback url is required, because of that we need to expose
+# the docker container to CPPM
+CPPM_CALLBACK_HOST=   # ← replace with your actual host IP
+CPPM_CALLBACK_PORT=8765
+
+# Set to true AFTER the certificate is installed and CPPM is accessible via HTTPS
+CPPM_VERIFY_SSL=false
+
+# PKCS12 export passphrase – used transiently during cert conversion; never stored
+CPPM_CERT_PASSPHRASE=
+
+# ── Operational flags (leave as-is unless needed) ────────────────────────────
+FORCE_RENEW=false
+SKIP_UPLOAD=false
+LOG_LEVEL=DEBUG
