@@ -86,8 +86,7 @@ in `.env` to select your provider.
 | `route53` | AWS Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | `digitalocean` | DigitalOcean | `DO_API_KEY` |
 | `godaddy` | GoDaddy | `GD_Key` + `GD_Secret` |
-|  *any* is NOT SUPPORTED AND EXPERIMENTAL
-| *any* | [Any acme.sh dnsapi plugin](https://github.com/acmesh-official/acme.sh/wiki/dnsapi) | Plugin-specific variables |
+| *any* NOT SUPPORTED AND EXPERIMENTAL | [Any acme.sh dnsapi plugin](https://github.com/acmesh-official/acme.sh/wiki/dnsapi) | Plugin-specific variables |
 
 ```
 ## NOT SUPPORTED & EXPERIMENTAL

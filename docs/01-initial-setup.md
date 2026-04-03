@@ -109,7 +109,7 @@ GD_Key=...
 GD_Secret=...
 ```
 
-### Other providers
+### Other providers NOT SUPPORTED AND EXPERIMENTAL
 
 Any acme.sh dnsapi plugin can be used. Set `DNS_PROVIDER` to the plugin name
 without the `dns_` prefix and ensure the plugin's credential variables are set

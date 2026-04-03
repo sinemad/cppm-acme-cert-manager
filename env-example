@@ -37,7 +37,7 @@ ACME_SERVER=letsencrypt
 #   route53       – AWS IAM credentials
 #   digitalocean  – personal access token
 #   godaddy       – API key + secret
-#   <any> IS NOT SUPPORTED & EXPERIMENTAL
+#   NOTE: <any> IS NOT SUPPORTED & EXPERIMENTAL
 #   <any>         – passthrough: treated as the bare acme.sh dnsapi plugin name
 #                   e.g. DNS_PROVIDER=linode_v4 → uses dns_linode_v4
 #                   See: https://github.com/acmesh-official/acme.sh/wiki/dnsapi
