@@ -21,7 +21,7 @@ and starts crond. No re-issue, no upload — nothing happens until renewal is du
 If you rotate the CPPM API secret, Cloudflare token, or any other `.env` value:
 
 ```bash
-nano /opt/cppm-cert-manager/.env
+nano /opt/cppm-acme-cert-manager/.env
 docker compose up -d --force-recreate
 ```
 
@@ -51,7 +51,7 @@ Use this if the cert is already current but needs to be re-uploaded
 (e.g. after a CPPM rebuild or restore):
 
 ```bash
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
 This runs the full upload sequence: trust list pre-flight, HTTPS cert upload,
@@ -65,7 +65,7 @@ If acme.sh has the cert in its internal state but the flat files are missing
 (visible in `status.log` as "Flat files missing"):
 
 ```bash
-docker exec -it cppm-cert-manager /opt/cppm/install_cert.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh
 ```
 
 No DNS challenge is performed. No contact with Let's Encrypt.
@@ -100,7 +100,7 @@ and is never stored on disk. To change it:
 # Edit .env: CPPM_CERT_PASSPHRASE=<new-passphrase>
 docker compose up -d --force-recreate
 # Force a re-upload so CPPM gets the new PKCS12
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
 ---
@@ -112,7 +112,7 @@ when 30 or fewer days remain on the cert.
 
 ```bash
 # See the cron schedule inside the container
-docker exec -it cppm-cert-manager cat /etc/crontabs/root
+docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 
 # Check when the next renewal will actually fire
 openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -enddate
@@ -138,7 +138,7 @@ renewal has occurred.
 ## Shell into the container
 
 ```bash
-docker exec -it cppm-cert-manager bash
+docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
 acme.sh --list                         # show all certs managed by acme.sh

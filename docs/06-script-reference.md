@@ -22,7 +22,7 @@ Decision order:
 
 ## issue_cert.sh
 
-**Manual:** `docker exec -it cppm-cert-manager /opt/cppm/issue_cert.sh`
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/issue_cert.sh`
 
 Runs `acme.sh --issue` with the Cloudflare DNS-01 plugin.
 
@@ -34,7 +34,7 @@ Runs `acme.sh --issue` with the Cloudflare DNS-01 plugin.
 
 ## install_cert.sh
 
-**Manual:** `docker exec -it cppm-cert-manager /opt/cppm/install_cert.sh`
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh`
 
 Runs `acme.sh --install-cert --cert-home /data/certs` to copy flat files from
 acme.sh internal state to `/data/certs/`. Verifies all four files are present,
@@ -45,7 +45,7 @@ then calls `deploy_hook.sh`. No DNS challenge, no Let's Encrypt contact.
 ## renew.sh
 
 **Called by:** supercronic at 02:00 and 14:00 UTC.
-**Manual:** `docker exec -it cppm-cert-manager /opt/cppm/renew.sh`
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/renew.sh`
 
 Runs `acme.sh --renew`. On success calls `install_cert.sh`. Exit 2 (not due)
 is logged and treated as clean exit.
@@ -55,7 +55,7 @@ is logged and treated as clean exit.
 ## deploy_hook.sh
 
 **Called by:** `install_cert.sh` (via `--reloadcmd`).
-**Manual:** `docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh`
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh`
 
 Resolves cert file paths and invokes `clearpass_upload.py`. Set
 `SKIP_UPLOAD=true` in `.env` to disable the upload without removing the hook.
@@ -65,7 +65,7 @@ Resolves cert file paths and invokes `clearpass_upload.py`. Set
 ## clearpass_upload.py
 
 **Called by:** `deploy_hook.sh`
-**Manual:** `docker exec -it cppm-cert-manager python3 /opt/cppm/clearpass_upload.py --help`
+**Manual:** `docker exec -it cppm-acme-cert-manager python3 /opt/cppm/clearpass_upload.py --help`
 
 Uses the **official Aruba pyclearpass SDK** (`github.com/aruba/pyclearpass`)
 for all ClearPass API operations.

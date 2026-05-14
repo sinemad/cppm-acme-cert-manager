@@ -1,12 +1,12 @@
 version: "3.9"
 
 services:
-  cppm-cert-manager:
+  cppm-acme-cert-manager:
     build:
       context: .
       dockerfile: Dockerfile
-    image: cppm-cert-manager:latest
-    container_name: cppm-cert-manager
+    image: cppm-acme-cert-manager:latest
+    container_name: cppm-acme-cert-manager
     restart: unless-stopped
 
     environment:
@@ -52,6 +52,8 @@ services:
       FORCE_RENEW:  ${FORCE_RENEW:-false}
       SKIP_UPLOAD:  ${SKIP_UPLOAD:-false}
       LOG_LEVEL:    ${LOG_LEVEL:-INFO}
+      # Web status dashboard
+      STATUS_PORT:  ${STATUS_PORT:-8080}
 
     volumes:
       # Single persistent volume – certificates only.
@@ -64,6 +66,8 @@ services:
       # during cert upload.  CPPM_CALLBACK_HOST must be the Docker host's LAN IP.
       # Change the host-side port here and in CPPM_CALLBACK_PORT if 8765 conflicts.
       - "${CPPM_CALLBACK_PORT:-8765}:${CPPM_CALLBACK_PORT:-8765}"
+      # Web status dashboard.  Browse to http://<docker-host>:8080/
+      - "${STATUS_PORT:-8080}:${STATUS_PORT:-8080}"
 
     logging:
       driver: "json-file"

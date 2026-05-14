@@ -121,6 +121,12 @@ CPPM_CERT_PASSPHRASE=ChangeMe!
 CPPM_CALLBACK_HOST=
 CPPM_CALLBACK_PORT=8765
 
+# ── Web status dashboard ──────────────────────────────────────────────────────
+# Port for the read-only web status page.
+# Browse to http://<docker-host>:STATUS_PORT/ once the container is running.
+# Must match the host-side port in docker-compose.yml.
+STATUS_PORT=8080
+
 # ── Operational flags ─────────────────────────────────────────────────────────
 # FORCE_RENEW: set to true to force certificate re-issuance on next start.
 # Reset to false after the container restarts.

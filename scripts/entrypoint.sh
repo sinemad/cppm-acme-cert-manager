@@ -135,7 +135,7 @@ run_with_guard() {
     else
         local exit_code=${PIPESTATUS[0]}
         err "$script failed (exit $exit_code). Container will stay running."
-        err "Retry manually: docker exec -it cppm-cert-manager $script"
+        err "Retry manually: docker exec -it cppm-acme-cert-manager $script"
         return 1
     fi
 }
@@ -177,6 +177,12 @@ else
     status_write "INFO" "CERT" "No certificates found – starting first-time issuance"
     run_with_guard /opt/cppm/issue_cert.sh || true
 fi
+
+# ── Start status web server ───────────────────────────────────────────────────
+STATUS_PORT="${STATUS_PORT:-8080}"
+log "Starting status web server on port ${STATUS_PORT}..."
+python3 /opt/cppm/status_server.py >> "${LOG_DIR}/status_server.log" 2>&1 &
+log "  Status server started (PID $!) – http://<host>:${STATUS_PORT}/"
 
 # ── Start crond ───────────────────────────────────────────────────────────────
 log "Starting supercronic (renewal checks at 02:00 and 14:00 UTC daily)..."

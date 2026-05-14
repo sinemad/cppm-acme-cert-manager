@@ -96,7 +96,7 @@ tail -100 /opt/cppm-certs/.logs/renewal.log
 Test directly:
 
 ```bash
-docker exec -it cppm-cert-manager python3 -c "
+docker exec -it cppm-acme-cert-manager python3 -c "
 import os, requests
 r = requests.post(
     'https://' + os.environ['CPPM_HOST'] + '/api/oauth',
@@ -208,7 +208,7 @@ ip route get <cppm-ip>
 After updating `.env` and `docker-compose.yml`, restart the container:
 ```bash
 docker compose down && docker compose up -d
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
 ---
@@ -230,7 +230,7 @@ covers RADIUS authentication.
 
 Verify the cert and key belong to the same keypair:
 ```bash
-docker exec -it cppm-cert-manager sh -c '
+docker exec -it cppm-acme-cert-manager sh -c '
     CERT=/data/certs/cppm.example.com.ecc.cer
     KEY=/data/certs/cppm.example.com.ecc.key
     CM=$(openssl x509 -noout -pubkey -in $CERT | sha256sum)
@@ -249,7 +249,7 @@ If mismatched, set `FORCE_RENEW=true` in `.env` and recreate the container.
 
 ```bash
 # Force a re-run of the trust list pre-flight
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 tail -f /opt/cppm-certs/status.log
 ```
 
@@ -257,7 +257,7 @@ Check the `TRUST` status lines. If any show `FAILED`, add the cert manually:
 
 1. Copy the missing cert from the container:
    ```bash
-   docker cp cppm-cert-manager:/opt/cppm/le-certs/isrg-root-x1.pem .
+   docker cp cppm-acme-cert-manager:/opt/cppm/le-certs/isrg-root-x1.pem .
    ```
 2. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
 3. Set `cert_usage` to include **EAP** and **Others** → Save.
@@ -283,7 +283,7 @@ and wait 7 days before re-issuing.
 
 ```bash
 # Drop into the container
-docker exec -it cppm-cert-manager python3
+docker exec -it cppm-acme-cert-manager python3
 
 >>> import os, requests
 >>> token = requests.post(

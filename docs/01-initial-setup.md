@@ -17,7 +17,7 @@ Run these steps once on the host before the container is ever started.
 ## Step 1 – Prepare the host directory
 
 ```bash
-cd /opt/cppm-cert-manager
+cd /opt/cppm-acme-cert-manager
 chmod +x setup.sh && ./setup.sh
 ```
 
@@ -132,7 +132,7 @@ for the full list of supported providers and their variable names.
 
    | Field | Value |
    |---|---|
-   | Client ID | `cppm-cert-manager` |
+   | Client ID | `cppm-acme-cert-manager` |
    | Enabled | ✓ |
    | Operator Profile | `Super Administrator` (or custom — see note) |
    | Grant Types | `client_credentials` |
@@ -149,7 +149,7 @@ for the full list of supported providers and their variable names.
 ## Step 4 – Fill in `.env`
 
 ```bash
-nano /opt/cppm-cert-manager/.env
+nano /opt/cppm-acme-cert-manager/.env
 ```
 
 Required values (example using Cloudflare):
@@ -170,7 +170,7 @@ DOMAIN=cppm.example.com
 
 # ClearPass
 CPPM_HOST=cppm.example.com
-CPPM_CLIENT_ID=cppm-cert-manager
+CPPM_CLIENT_ID=cppm-acme-cert-manager
 CPPM_CLIENT_SECRET=<secret-from-step-3>
 CPPM_VERIFY_SSL=false       # set true after the cert is installed
 
@@ -182,7 +182,7 @@ CPPM_CALLBACK_PORT=8765
 Secure the file:
 
 ```bash
-chmod 600 /opt/cppm-cert-manager/.env
+chmod 600 /opt/cppm-acme-cert-manager/.env
 ```
 
 ---

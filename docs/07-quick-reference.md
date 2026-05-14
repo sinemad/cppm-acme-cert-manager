@@ -43,10 +43,10 @@ docker compose up -d
 docker compose up -d --force-recreate
 
 # Re-upload cert to CPPM (certs unchanged)
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 
 # Install flat files from acme.sh state (no re-issue)
-docker exec -it cppm-cert-manager /opt/cppm/install_cert.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh
 
 # Force full certificate re-issue
 # Edit .env: FORCE_RENEW=true
@@ -55,13 +55,13 @@ docker compose up -d --force-recreate
 docker compose up -d --force-recreate
 
 # Check active DNS provider
-docker exec -it cppm-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
+docker exec -it cppm-acme-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
 
 # List certs known to acme.sh
-docker exec -it cppm-cert-manager acme.sh --list
+docker exec -it cppm-acme-cert-manager acme.sh --list
 
 # Shell into container
-docker exec -it cppm-cert-manager bash
+docker exec -it cppm-acme-cert-manager bash
 ```
 
 ---
@@ -113,7 +113,7 @@ docker compose up -d --force-recreate
 grep FAILED /opt/cppm-certs/status.log
 
 # Test ClearPass authentication
-docker exec -it cppm-cert-manager python3 -c "
+docker exec -it cppm-acme-cert-manager python3 -c "
 import os, requests
 r = requests.post(
     'https://' + os.environ['CPPM_HOST'] + '/api/oauth',
@@ -128,19 +128,19 @@ print(r.status_code, r.json())
 "
 
 # Verify ECC cert and key match
-docker exec -it cppm-cert-manager sh -c '
+docker exec -it cppm-acme-cert-manager sh -c '
     CM=$(openssl x509 -noout -pubkey -in /data/certs/cppm.example.com.ecc.cer | sha256sum)
     KM=$(openssl pkey  -noout -pubout -in /data/certs/cppm.example.com.ecc.key | sha256sum)
     [ "$CM" = "$KM" ] && echo "ECC: MATCH" || echo "ECC: MISMATCH"
 '
 
 # Verify RSA cert and key match
-docker exec -it cppm-cert-manager sh -c '
+docker exec -it cppm-acme-cert-manager sh -c '
     CM=$(openssl x509 -noout -pubkey -in /data/certs/cppm.example.com.rsa.cer | sha256sum)
     KM=$(openssl pkey  -noout -pubout -in /data/certs/cppm.example.com.rsa.key | sha256sum)
     [ "$CM" = "$KM" ] && echo "RSA: MATCH" || echo "RSA: MISMATCH"
 '
 
 # List acme.sh cert state (both ECC and RSA)
-docker exec -it cppm-cert-manager acme.sh --list
+docker exec -it cppm-acme-cert-manager acme.sh --list
 ```

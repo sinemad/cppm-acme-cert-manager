@@ -151,7 +151,7 @@ openssl s_client -connect cppm.example.com:443 \
 ## Check which DNS provider is active
 
 ```bash
-docker exec -it cppm-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
+docker exec -it cppm-acme-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
 ```
 
 The renewal log will also record the active provider on each issuance:

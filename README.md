@@ -99,7 +99,7 @@ and ensure the plugin's credential variables are present in `.env`.
 ## Directory Structure
 
 ```
-cppm-cert-manager/
+cppm-acme-cert-manager/
 ├── Dockerfile                  # Alpine + acme.sh + Python image
 ├── docker-compose.yml          # Service definition, volume and port mapping
 ├── env-example                 # Safe-to-commit reference — copy to .env
@@ -157,7 +157,7 @@ cppm-cert-manager/
 ### 1. Host preparation
 
 ```bash
-cd /opt/cppm-cert-manager
+cd /opt/cppm-acme-cert-manager
 chmod +x setup.sh && ./setup.sh
 ```
 
@@ -226,7 +226,7 @@ GD_Secret=...
 
    | Field | Value |
    |---|---|
-   | Client ID | `cppm-cert-manager` |
+   | Client ID | `cppm-acme-cert-manager` |
    | Enabled | ✓ |
    | Operator Profile | `Super Administrator` or custom (see note) |
    | Grant Types | `client_credentials` |
@@ -262,7 +262,7 @@ ACME_SERVER=letsencrypt
 
 # ClearPass
 CPPM_HOST=cppm.example.com
-CPPM_CLIENT_ID=cppm-cert-manager
+CPPM_CLIENT_ID=cppm-acme-cert-manager
 CPPM_CLIENT_SECRET=<secret>
 CPPM_VERIFY_SSL=false
 
@@ -435,7 +435,7 @@ docker compose up -d --force-recreate
 ### Re-upload to CPPM (cert unchanged)
 
 ```bash
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
 ### Switch DNS provider
@@ -490,7 +490,7 @@ are present in `.env`.
 
 ```bash
 # Test Cloudflare token
-docker exec -it cppm-cert-manager sh -c '
+docker exec -it cppm-acme-cert-manager sh -c '
     curl -s -H "Authorization: Bearer $CF_Token" \
     "https://api.cloudflare.com/client/v4/zones/$CF_Zone_ID" \
     | python3 -m json.tool | grep '"'"'name\|success'"'"'
@@ -510,7 +510,7 @@ tail -100 /opt/cppm-certs/.logs/renewal.log
 ### ClearPass API authentication fails (400 invalid_client)
 
 ```bash
-docker exec -it cppm-cert-manager python3 -c "
+docker exec -it cppm-acme-cert-manager python3 -c "
 import os, requests
 r = requests.post(
     'https://' + os.environ['CPPM_HOST'] + '/api/oauth',
@@ -549,7 +549,7 @@ A Let's Encrypt CA cert is missing from the CPPM trust list with EAP enabled.
 Force a re-run of the trust list pre-flight:
 
 ```bash
-docker exec -it cppm-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 tail -f /opt/cppm-certs/status.log
 ```
 
