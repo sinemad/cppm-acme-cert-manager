@@ -15,7 +15,10 @@ docker compose logs -f               # watch first-run progress
 ## Daily operations
 
 ```bash
-# Check current status
+# Web dashboard — easiest way to check status (open in browser)
+# http://<docker-host>:8080/
+
+# Check current status (CLI)
 cat /opt/cppm-certs/status.log
 
 # Check cert expiry (ECC and RSA)
@@ -68,13 +71,15 @@ docker exec -it cppm-acme-cert-manager bash
 
 ## Log locations
 
-| What | Host path |
+| What | Where |
 |---|---|
+| Web dashboard | `http://<docker-host>:8080/` |
 | Status summary | `/opt/cppm-certs/status.log` |
 | Startup detail | `/opt/cppm-certs/.logs/startup.log` |
 | Renewal detail | `/opt/cppm-certs/.logs/renewal.log` |
 | Upload detail | `/opt/cppm-certs/.logs/upload.log` |
 | Cron log | `/opt/cppm-certs/.logs/cron.log` |
+| Dashboard log | `/opt/cppm-certs/.logs/status_server.log` |
 
 ---
 

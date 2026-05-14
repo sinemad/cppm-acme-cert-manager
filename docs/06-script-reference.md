@@ -173,6 +173,27 @@ as a sanity check.
 
 ---
 
+## status_server.py
+
+**Started by:** `entrypoint.sh` as a background process before `exec supercronic`.
+**Never call manually** — it runs for the lifetime of the container.
+
+Serves a read-only HTTP dashboard on `STATUS_PORT` (default `8080`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | HTML dashboard (self-contained, no CDN) |
+| `GET /api/status` | JSON payload consumed by the dashboard |
+
+The JSON payload includes cert details (expiry, issuer, key type, days remaining,
+raw PEM), the next scheduled renewal check time, active configuration (domain,
+DNS provider, ACME CA, ClearPass host), and the last 40 entries from
+`status.log`.
+
+Logs to `/data/certs/.logs/status_server.log`.
+
+---
+
 ## status.sh
 
 Sourced by all scripts (`source /opt/cppm/status.sh`). Never call directly.
@@ -200,4 +221,5 @@ Provides `status_write LEVEL CATEGORY MESSAGE` which writes to
 | `FORCE_RENEW` | No | `false` | Force re-issue on next start |
 | `SKIP_UPLOAD` | No | `false` | Disable ClearPass upload |
 | `LOG_LEVEL` | No | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `TZ` | No | `UTC` | Container timezone |
+| `STATUS_PORT` | No | `8080` | Port for the web status dashboard |
+| `TZ` | No | `UTC` | Container timezone (also controls renewal schedule display) |

@@ -53,11 +53,12 @@ Two certificates are issued and maintained simultaneously:
 4. [Initial Setup](#initial-setup)
 5. [How It Works](#how-it-works)
 6. [Certificate Files](#certificate-files)
-7. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
-8. [Maintenance](#maintenance)
-9. [Troubleshooting](#troubleshooting)
-10. [Security Considerations](#security-considerations)
-11. [ClearPass API Reference](#clearpass-api-reference)
+7. [Web Status Dashboard](#web-status-dashboard)
+8. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
+9. [Maintenance](#maintenance)
+10. [Troubleshooting](#troubleshooting)
+11. [Security Considerations](#security-considerations)
+12. [ClearPass API Reference](#clearpass-api-reference)
 
 ---
 
@@ -116,6 +117,7 @@ cppm-acme-cert-manager/
 │   ├── renew.sh                # Called by supercronic — runs acme.sh --renew
 │   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
 │   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
+│   ├── status_server.py        # Read-only web status dashboard (port STATUS_PORT)
 │   └── status.sh               # Shared status logging library
 └── docs/
     ├── 01-initial-setup.md
@@ -147,7 +149,8 @@ cppm-acme-cert-manager/
     ├── startup.log
     ├── renewal.log
     ├── upload.log
-    └── cron.log
+    ├── cron.log
+    └── status_server.log
 ```
 
 ---
@@ -381,6 +384,53 @@ an ephemeral PKCS12 file written to `/tmp` and deleted immediately after upload.
 
 ---
 
+## Web Status Dashboard
+
+A read-only HTTP dashboard starts automatically with the container and is
+available on `STATUS_PORT` (default **8080**):
+
+```
+http://<docker-host>:8080/
+```
+
+### What it shows
+
+| Panel | Contents |
+|---|---|
+| **ECC Certificate** | Days remaining, expiry date, issue date, issuer, key type, CPPM service — color-coded green/amber/red |
+| **RSA Certificate** | Same as above for the RSA cert |
+| **Renewal Schedule** | Countdown to the next renewal check, local time and UTC |
+| **Configuration** | Domain, DNS provider, ACME CA, ClearPass hostname |
+| **Activity Log** | Last 40 events from `status.log`, newest first, with level badges |
+| **Certificate Details** | Click **View Details** on either cert card to see the full decoded cert: subject, SANs, issuer, serial, key info, validity window, and scrollable PEM with a Copy button |
+
+The page auto-refreshes every 30 seconds. It has no external dependencies and
+works in air-gapped environments.
+
+### Configuration
+
+```ini
+# .env
+STATUS_PORT=8080          # Port for the web dashboard (default: 8080)
+```
+
+The port must be published in `docker-compose.yml` (it is by default):
+
+```yaml
+ports:
+  - "${STATUS_PORT:-8080}:${STATUS_PORT:-8080}"
+```
+
+### Logs
+
+Dashboard startup and any errors are written to:
+
+```
+/opt/cppm-certs/.logs/status_server.log
+```
+
+---
+
 ## Verifying the Certificates in CPPM
 
 **In the CPPM Admin UI:**
@@ -410,7 +460,10 @@ openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
 ### View logs
 
 ```bash
-# Quick status overview
+# Web dashboard (easiest — open in a browser)
+# http://<docker-host>:8080/
+
+# Quick status overview (CLI)
 cat /opt/cppm-certs/status.log
 grep FAILED /opt/cppm-certs/status.log
 
@@ -418,6 +471,7 @@ grep FAILED /opt/cppm-certs/status.log
 tail -100 /opt/cppm-certs/.logs/startup.log
 tail -100 /opt/cppm-certs/.logs/renewal.log
 tail -100 /opt/cppm-certs/.logs/upload.log
+tail -50  /opt/cppm-certs/.logs/status_server.log   # web dashboard startup/errors
 
 # Docker container output
 docker compose logs -f

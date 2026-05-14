@@ -1,5 +1,46 @@
 # Monitoring
 
+## Web status dashboard
+
+The easiest way to monitor the certificate manager is the built-in web
+dashboard, which starts automatically with the container.
+
+Open in a browser:
+
+```
+http://<docker-host>:8080/
+```
+
+> Change the port by setting `STATUS_PORT` in `.env` (default `8080`).
+
+### Dashboard panels
+
+| Panel | What you see |
+|---|---|
+| **ECC Certificate** | Days remaining (green/amber/red), expiry and issue dates, issuer CN, key type, deployed CPPM service |
+| **RSA Certificate** | Same fields for the RSA cert |
+| **Renewal Schedule** | Countdown to the next `renew.sh` run (02:00 or 14:00 container-local time) |
+| **Configuration** | Active domain, DNS provider, ACME CA, ClearPass hostname |
+| **Activity Log** | Last 40 `status.log` events, newest first, color-coded by level |
+
+### Certificate Details modal
+
+Click **View Details** on either cert card to see the full decoded certificate:
+subject CN, SANs, issuer, serial number, key algorithm and size, validity
+window, and the raw PEM with a **Copy** button.
+
+The page polls `/api/status` every 30 seconds and updates in place. It has
+no external dependencies and works in air-gapped environments.
+
+### Dashboard log
+
+```bash
+# Startup confirmation and any errors from the status server
+tail -50 /opt/cppm-certs/.logs/status_server.log
+```
+
+---
+
 ## status.log — the quick view
 
 `status.log` lives directly in `/opt/cppm-certs/` and is readable on the host
@@ -112,6 +153,9 @@ tail -100 /opt/cppm-certs/.logs/upload.log
 
 # supercronic execution timestamps
 tail -50 /opt/cppm-certs/.logs/cron.log
+
+# Web status dashboard startup confirmation and errors
+tail -50 /opt/cppm-certs/.logs/status_server.log
 ```
 
 ---
