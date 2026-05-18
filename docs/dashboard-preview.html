@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CPPM Cert Manager – Dashboard Preview</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f172a;--card:#1e293b;--border:#334155;--border2:#475569;
+  --accent:#38bdf8;--ok:#22c55e;--warn:#f59e0b;--danger:#ef4444;--info:#818cf8;
+  --text:#e2e8f0;--muted:#94a3b8;--subtle:#64748b;
+  --radius:0.75rem;--shadow:0 4px 24px rgba(0,0,0,.4);
+}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.6;min-height:100vh}
+
+.app{max-width:1200px;margin:0 auto;padding:1.5rem}
+
+.hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;padding:1rem 1.5rem;background:var(--card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow)}
+.hdr-left{display:flex;align-items:center;gap:1rem}
+.hdr-logo{font-size:1rem;font-weight:700;color:var(--accent);letter-spacing:-.01em}
+.hdr-domain{font-size:0.8rem;color:var(--muted);font-family:monospace;background:rgba(56,189,248,.08);padding:0.15rem 0.5rem;border-radius:4px;border:1px solid rgba(56,189,248,.15)}
+.hdr-right{display:flex;align-items:center;gap:0.6rem;font-size:0.78rem;color:var(--subtle)}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(34,197,94,.2)}
+
+.grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-bottom:1rem}
+
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow)}
+.card-title{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:0.85rem}
+
+.cert-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow);border-left:3px solid var(--subtle)}
+.cert-card.ok{border-left-color:var(--ok)}
+.cert-card.warn{border-left-color:var(--warn)}
+.cert-card.danger{border-left-color:var(--danger)}
+
+.cert-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+.cert-title{font-size:0.85rem;font-weight:600}
+.badge{font-size:0.68rem;padding:0.18rem 0.55rem;border-radius:999px;font-weight:600}
+.badge-ok{background:rgba(34,197,94,.15);color:var(--ok)}
+.badge-warn{background:rgba(245,158,11,.15);color:var(--warn)}
+.badge-danger{background:rgba(239,68,68,.15);color:var(--danger)}
+.badge-none{background:rgba(100,116,139,.12);color:var(--subtle)}
+
+.days-num{font-size:2.8rem;font-weight:800;line-height:1;letter-spacing:-.03em}
+.days-num.ok{color:var(--ok)}
+.days-num.warn{color:var(--warn)}
+.days-num.danger{color:var(--danger)}
+.days-label{font-size:0.72rem;color:var(--muted);margin-top:0.1rem}
+
+.meta{margin-top:0.85rem;display:flex;flex-direction:column;gap:0.28rem}
+.row{display:flex;gap:0.5rem;font-size:0.78rem}
+.row .lbl{color:var(--muted);min-width:68px;flex-shrink:0}
+.row .val{font-family:monospace;font-size:0.75rem;word-break:break-all}
+
+.actions{margin-top:1rem}
+.btn{display:inline-flex;align-items:center;gap:0.35rem;padding:0.38rem 0.85rem;border-radius:0.4rem;font-size:0.78rem;font-weight:500;border:none;cursor:pointer;transition:all .15s}
+.btn-primary{background:rgba(56,189,248,.12);color:var(--accent);border:1px solid rgba(56,189,248,.25)}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border2)}
+
+.big-val{font-size:1.6rem;font-weight:700;color:var(--accent);line-height:1}
+.sub-val{font-size:0.78rem;color:var(--muted);margin-top:0.2rem;margin-bottom:0.85rem}
+
+.log-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow)}
+.log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem}
+.log-count{font-size:0.72rem;color:var(--subtle)}
+.log-table{width:100%;border-collapse:collapse}
+.log-table tr:nth-child(odd) td{background:rgba(255,255,255,.015)}
+.log-table td{padding:0.32rem 0.5rem;border-bottom:1px solid rgba(51,65,85,.5);vertical-align:top}
+.log-table td.ts{white-space:nowrap;color:var(--muted);font-family:monospace;font-size:0.72rem;padding-right:0.75rem}
+.log-table td.lvl-cell{white-space:nowrap;width:64px}
+.log-table td.cat{white-space:nowrap;color:var(--subtle);font-size:0.72rem;padding-right:0.75rem}
+.log-table td.msg{color:var(--text);font-size:0.78rem}
+.lvl{display:inline-block;padding:0.08rem 0.4rem;border-radius:3px;font-size:0.68rem;font-weight:600}
+.lvl-ok{background:rgba(34,197,94,.13);color:var(--ok)}
+.lvl-warn{background:rgba(245,158,11,.13);color:var(--warn)}
+.lvl-failed{background:rgba(239,68,68,.13);color:var(--danger)}
+.lvl-info{background:rgba(129,140,248,.13);color:var(--info)}
+
+.preview-banner{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:0.5rem;padding:0.5rem 1rem;font-size:0.75rem;color:var(--warn);text-align:center;margin-bottom:1rem}
+</style>
+</head>
+<body>
+<div class="app">
+
+<div class="preview-banner">Sample preview — representative data only</div>
+
+<!-- Header -->
+<div class="hdr">
+  <div class="hdr-left">
+    <span class="hdr-logo">ClearPass Cert Manager</span>
+    <span class="hdr-domain">cppm.example.com</span>
+  </div>
+  <div class="hdr-right">
+    <span class="pulse"></span>
+    <span>Updated 02:00:07 AM</span>
+  </div>
+</div>
+
+<!-- Cert cards -->
+<div class="grid-2">
+
+  <div class="cert-card ok">
+    <div class="cert-header">
+      <span class="cert-title">ECC Certificate</span>
+      <span class="badge badge-ok">Valid</span>
+    </div>
+    <div class="days-num ok">61</div>
+    <div class="days-label">days remaining</div>
+    <div class="meta">
+      <div class="row"><span class="lbl">Expires</span><span class="val">Jul 14, 2026</span></div>
+      <div class="row"><span class="lbl">Issued</span><span class="val">May 14, 2026</span></div>
+      <div class="row"><span class="lbl">Issuer</span><span class="val">E5, Let's Encrypt</span></div>
+      <div class="row"><span class="lbl">Key</span><span class="val">ECDSA (prime256v1)</span></div>
+      <div class="row"><span class="lbl">Service</span><span class="val">HTTPS(ECC)</span></div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary">View Details</button>
+    </div>
+  </div>
+
+  <div class="cert-card ok">
+    <div class="cert-header">
+      <span class="cert-title">RSA Certificate</span>
+      <span class="badge badge-ok">Valid</span>
+    </div>
+    <div class="days-num ok">61</div>
+    <div class="days-label">days remaining</div>
+    <div class="meta">
+      <div class="row"><span class="lbl">Expires</span><span class="val">Jul 14, 2026</span></div>
+      <div class="row"><span class="lbl">Issued</span><span class="val">May 14, 2026</span></div>
+      <div class="row"><span class="lbl">Issuer</span><span class="val">R11, Let's Encrypt</span></div>
+      <div class="row"><span class="lbl">Key</span><span class="val">RSA 2048-bit</span></div>
+      <div class="row"><span class="lbl">Service</span><span class="val">RADIUS</span></div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary">View Details</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Info row -->
+<div class="grid-2">
+
+  <div class="card">
+    <div class="card-title">Renewal Schedule</div>
+    <div class="big-val">11h 59m</div>
+    <div class="sub-val">until next check</div>
+    <div class="meta">
+      <div class="row"><span class="lbl">Next check</span><span class="val">May 14, 2026, 02:00 PM EDT</span></div>
+      <div class="row"><span class="lbl">Schedule</span><span class="val">02:00 and 14:00 daily</span></div>
+      <div class="row"><span class="lbl">Renews at</span><span class="val">≤30 days remaining</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Configuration</div>
+    <div class="meta">
+      <div class="row"><span class="lbl">Domain</span><span class="val">cppm.example.com</span></div>
+      <div class="row"><span class="lbl">DNS</span><span class="val">Cloudflare</span></div>
+      <div class="row"><span class="lbl">CA</span><span class="val">Let's Encrypt</span></div>
+      <div class="row"><span class="lbl">ClearPass</span><span class="val">cppm.example.com</span></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Activity log -->
+<div class="log-card">
+  <div class="log-hdr">
+    <span class="card-title" style="margin:0">Activity Log</span>
+    <span class="log-count">8 events</span>
+  </div>
+  <table class="log-table">
+    <tbody>
+      <tr>
+        <td class="ts">2026-05-14 02:00:07</td>
+        <td class="lvl-cell"><span class="lvl lvl-info">INFO</span></td>
+        <td class="cat">RENEW</td>
+        <td class="msg">Not due for renewal – 61 days remaining (next check in 12h)</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-13 14:00:04</td>
+        <td class="lvl-cell"><span class="lvl lvl-info">INFO</span></td>
+        <td class="cat">RENEW</td>
+        <td class="msg">Not due for renewal – 62 days remaining (next check in 12h)</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-13 02:00:05</td>
+        <td class="lvl-cell"><span class="lvl lvl-info">INFO</span></td>
+        <td class="cat">RENEW</td>
+        <td class="msg">Not due for renewal – 62 days remaining (next check in 12h)</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-14 09:31:42</td>
+        <td class="lvl-cell"><span class="lvl lvl-info">INFO</span></td>
+        <td class="cat">STARTUP</td>
+        <td class="msg">supercronic started – renewal checks at 02:00 and 14:00 UTC</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-14 09:31:42</td>
+        <td class="lvl-cell"><span class="lvl lvl-ok">OK</span></td>
+        <td class="cat">CERT</td>
+        <td class="msg">ECC+RSA valid – expires Jul 14 2026 (61 days remaining)</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-14 09:31:22</td>
+        <td class="lvl-cell"><span class="lvl lvl-ok">OK</span></td>
+        <td class="cat">UPLOAD</td>
+        <td class="msg">ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-14 09:31:18</td>
+        <td class="lvl-cell"><span class="lvl lvl-ok">OK</span></td>
+        <td class="cat">TRUST</td>
+        <td class="msg">7 LE CA certs verified – 0 uploaded, 7 already trusted</td>
+      </tr>
+      <tr>
+        <td class="ts">2026-05-14 09:30:54</td>
+        <td class="lvl-cell"><span class="lvl lvl-ok">OK</span></td>
+        <td class="cat">CERT</td>
+        <td class="msg">New certificates issued (ECC + RSA) via cloudflare DNS-01</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+</div>
+</body>
+</html>

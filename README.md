@@ -389,6 +389,8 @@ an ephemeral PKCS12 file written to `/tmp` and deleted immediately after upload.
 A read-only HTTP dashboard starts automatically with the container and is
 available on `STATUS_PORT` (default **8080**):
 
+![Web Status Dashboard](docs/dashboard-screenshot.png)
+
 ```
 http://<docker-host>:8080/
 ```

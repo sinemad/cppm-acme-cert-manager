@@ -5,6 +5,8 @@
 The easiest way to monitor the certificate manager is the built-in web
 dashboard, which starts automatically with the container.
 
+![Web Status Dashboard](dashboard-screenshot.png)
+
 Open in a browser:
 
 ```
