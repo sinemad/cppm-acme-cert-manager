@@ -850,6 +850,11 @@ def main() -> int:
     # to return 400 invalid_client because those fields violate the strict
     # client_credentials grant schema.
     #
+    # RFC 6749 §2.3.1 requires the token request body to be sent as
+    # application/x-www-form-urlencoded (requests kwarg: data=).  Using
+    # json= sets Content-Type: application/json, which some CPPM versions
+    # accept but newer builds reject with 400 invalid_client.
+    #
     # Once we have the token we pass it to the SDK as api_token=, which causes
     # pyclearpass to skip its OAuth call entirely and use our token as a Bearer
     # header directly. This preserves client_credentials semantics (correct for
@@ -860,7 +865,7 @@ def main() -> int:
     _sess.verify = verify_ssl
     _resp = _sess.post(
         f"https://{host}/api/oauth",
-        json={
+        data={
             "grant_type":    "client_credentials",
             "client_id":     client_id,
             "client_secret": client_secret,
@@ -874,7 +879,11 @@ def main() -> int:
             _body = _resp.text[:300]
         log.error(
             "Authentication failed (HTTP %d): %s\n"
-            "Check CPPM_CLIENT_ID and CPPM_CLIENT_SECRET in .env.",
+            "Check CPPM_CLIENT_ID and CPPM_CLIENT_SECRET in .env.\n"
+            "Verify the API client in CPPM Admin UI:\n"
+            "  Administration → API Services → API Clients\n"
+            "  Grant type must be 'client_credentials'\n"
+            "  Operator profile must have Certificate Management permission",
             _resp.status_code, _body,
         )
         return 1
