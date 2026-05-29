@@ -86,30 +86,66 @@ RUN git clone --depth 1 https://github.com/acmesh-official/acme.sh.git /opt/acme
 
 # ── Bundle Let's Encrypt CA certificates ─────────────────────────────────────
 # Downloaded at build time so the running container never needs letsencrypt.org.
+# Roots: ISRG Root X1 (RSA) and X2 (ECDSA) — permanent, never change.
+# Intermediates: Let's Encrypt rotates these periodically (roughly every 90 days).
+#   Confirmed batches: 2024 → E5/E6 (ECDSA), R10/R11 (RSA)
+#                      2024 → E7/E8/E9/E10 (ECDSA), R12/R13/R14 (RSA)
+# Best-effort block below attempts all known intermediates across 2024 and 2025
+# paths; any that do not exist yet are silently skipped. clearpass_upload.py also
+# reads the actual .ca.cer chains from issued certs and uploads any missing
+# intermediates at runtime, so the bundle is a warm-start optimisation only.
 RUN mkdir -p /opt/cppm/le-certs \
+    \
+    # ── Roots (stable, always required) ───────────────────────────────────────
     && curl -fsSL https://letsencrypt.org/certs/isrgrootx1.pem \
             -o /opt/cppm/le-certs/isrg-root-x1.pem \
     && curl -fsSL https://letsencrypt.org/certs/isrg-root-x2.pem \
             -o /opt/cppm/le-certs/isrg-root-x2.pem \
-    && curl -fsSL https://letsencrypt.org/certs/2024/r10.pem \
-            -o /opt/cppm/le-certs/lets-encrypt-r10.pem \
-    && curl -fsSL https://letsencrypt.org/certs/2024/r11.pem \
-            -o /opt/cppm/le-certs/lets-encrypt-r11.pem \
+    \
+    # ── 2024 batch intermediates (confirmed) ───────────────────────────────────
     && curl -fsSL https://letsencrypt.org/certs/2024/e5.pem \
             -o /opt/cppm/le-certs/lets-encrypt-e5.pem \
     && curl -fsSL https://letsencrypt.org/certs/2024/e6.pem \
             -o /opt/cppm/le-certs/lets-encrypt-e6.pem \
+    && curl -fsSL https://letsencrypt.org/certs/2024/r10.pem \
+            -o /opt/cppm/le-certs/lets-encrypt-r10.pem \
+    && curl -fsSL https://letsencrypt.org/certs/2024/r11.pem \
+            -o /opt/cppm/le-certs/lets-encrypt-r11.pem \
+    \
+    # ── Additional intermediates (best-effort — skipped if not yet published) ──
+    # Tries 2024 first, then 2025, for each intermediate name.
+    # A cert is kept only if openssl can parse it; invalid/missing downloads are removed.
+    && for name in e7 e8 e9 e10 r12 r13 r14; do \
+           fname="lets-encrypt-${name}.pem"; \
+           dest="/opt/cppm/le-certs/${fname}"; \
+           for year in 2024 2025; do \
+               url="https://letsencrypt.org/certs/${year}/${name}.pem"; \
+               if curl -fsSL --max-time 15 "${url}" -o "${dest}.tmp" 2>/dev/null \
+                  && openssl x509 -noout -subject -in "${dest}.tmp" >/dev/null 2>&1; then \
+                   mv "${dest}.tmp" "${dest}"; \
+                   echo "  Downloaded: ${fname} (${year})"; \
+                   break; \
+               fi; \
+               rm -f "${dest}.tmp"; \
+           done; \
+       done \
+    \
+    # ── Validate every cert that was successfully downloaded ───────────────────
+    && echo "Validating bundled LE certs..." \
     && for pem in /opt/cppm/le-certs/*.pem; do \
-           subj=$(openssl x509 -noout -subject -in "$pem") \
+           subj=$(openssl x509 -noout -subject -in "$pem" 2>&1) \
            && echo "  OK: $(basename $pem) -> $subj" \
            || { echo "ERROR: invalid PEM: $pem"; exit 1; }; \
        done \
-    && echo "All $(ls /opt/cppm/le-certs/*.pem | wc -l) CA certs validated."
+    && echo "Bundled $(ls /opt/cppm/le-certs/*.pem | wc -l) LE CA certs."
 
 # ── Copy application scripts ──────────────────────────────────────────────────
 RUN mkdir -p /opt/cppm
 COPY scripts/ /opt/cppm/
 COPY config/crontab /etc/crontabs/root
+# Merge the le-certs project directory (contains trust-exclusions.conf default)
+# into the directory already populated by the cert download RUN block above.
+COPY le-certs/ /opt/cppm/le-certs/
 
 RUN chmod +x /opt/cppm/*.sh \
     && chmod 755 /opt/cppm/clearpass_upload.py

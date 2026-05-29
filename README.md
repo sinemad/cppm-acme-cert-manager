@@ -117,8 +117,11 @@ cppm-acme-cert-manager/
 │   ├── renew.sh                # Called by supercronic — runs acme.sh --renew
 │   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
 │   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
+│   ├── trust_check.sh          # Weekly trust list verification (supercronic, Sunday 03:00)
 │   ├── status_server.py        # Read-only web status dashboard (port STATUS_PORT)
 │   └── status.sh               # Shared status logging library
+└── le-certs/
+    └── trust-exclusions.conf   # Default exclusion list for trust list uploads (admin-editable)
 └── docs/
     ├── 01-initial-setup.md
     ├── 02-how-it-works.md
@@ -145,6 +148,7 @@ cppm-acme-cert-manager/
 ├── <domain>_ecc/                             ← acme.sh ECC internal state
 ├── <domain>/                                 ← acme.sh RSA internal state
 ├── .acme-state/                              ← acme.sh config and account keys
+├── trust-exclusions.conf                         ← CA cert upload exclusion list (admin-editable)
 └── .logs/
     ├── startup.log
     ├── renewal.log
@@ -509,6 +513,39 @@ docker compose up -d --force-recreate
 
 Existing certificates on the volume are unaffected — only new issuances and
 renewals use the new provider.
+
+### Trust list management
+
+The container automatically verifies that all required Let's Encrypt CA and
+intermediate CA certificates are present in the ClearPass trust list:
+
+| Trigger | When | What runs |
+|---|---|---|
+| After cert issuance or renewal | Automatic | Full upload: trust check + HTTPS cert + RADIUS cert |
+| Weekly (Sunday 03:00) | Automatic | Trust-only: checks and repairs the trust list without renewing |
+| On demand | Manual | Either of the above |
+
+**Run the trust list check manually:**
+
+```bash
+docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
+```
+
+**Exclude specific CA or intermediate certs from upload:**
+
+Edit `trust-exclusions.conf` on the host — changes take effect immediately
+at the next trust check without restarting the container:
+
+```bash
+nano /opt/cppm-certs/trust-exclusions.conf
+```
+
+Each non-comment line is a case-insensitive partial match against the
+certificate's Subject CN. For example, adding `R11` excludes
+`CN=R11, O=Let's Encrypt, C=US`. The file is self-documented with a full
+header explaining all options.
+
+---
 
 ### Enable SSL verification
 

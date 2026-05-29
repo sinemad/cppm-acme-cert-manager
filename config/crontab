@@ -12,3 +12,8 @@
 # Run renewal check at 02:00 and 14:00 container-local time every day
 0 2  * * * /opt/cppm/renew.sh
 0 14 * * * /opt/cppm/renew.sh
+
+# Verify Let's Encrypt trust list once a week (Sunday 03:00 container-local time).
+# Uploads any CA or intermediate CA certs missing from the ClearPass trust list
+# without renewing certificates. Respects trust-exclusions.conf on the volume.
+0 3  * * 0 /opt/cppm/trust_check.sh

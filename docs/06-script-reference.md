@@ -173,6 +173,64 @@ as a sanity check.
 
 ---
 
+## trust_check.sh
+
+**Called by:** supercronic every Sunday at 03:00 container-local time.
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh`
+
+Verifies that every required Let's Encrypt CA and intermediate CA certificate
+is present in the ClearPass trust list, and uploads any that are missing —
+without issuing or renewing certificates.
+
+Behaviour:
+1. Exits cleanly if the domain certificates have not yet been issued.
+2. Calls `clearpass_upload.py --only-trust-check` with both the ECC and RSA
+   CA chain paths, so intermediates unique to either chain (e.g. R13 in the
+   RSA chain) are always checked.
+3. Respects `trust-exclusions.conf` — excluded certs are silently skipped.
+4. Appends output to `/data/certs/.logs/upload.log` and writes a `TRUST`
+   entry to `status.log`.
+
+---
+
+## trust-exclusions.conf
+
+**Location (persistent, admin-editable):**
+```
+/opt/cppm-certs/trust-exclusions.conf   (host path)
+/data/certs/trust-exclusions.conf       (container path)
+```
+
+**Image default (read-only reference):**
+```
+/opt/cppm/le-certs/trust-exclusions.conf
+```
+
+Controls which Let's Encrypt CA and intermediate CA certificates are excluded
+from all trust list operations (both post-renewal uploads and weekly checks).
+Excluded certificates are silently skipped — they are never uploaded, never
+patched, and no error is raised if they are absent from the trust list.
+
+The file is seeded to the persistent volume by `entrypoint.sh` on first start.
+Edit the host-side copy — changes take effect immediately at the next scheduled
+or manual trust check without restarting the container.
+
+**Format:** one entry per line, matched case-insensitively as a partial
+substring against the certificate's Subject CN. Lines starting with `#` are
+comments. See the file's header for full documentation and examples.
+
+```
+# Example: exclude R11 if it is already managed by a separate process
+R11
+
+# Example: exclude both ECDSA roots
+ISRG Root X2
+E5
+E6
+```
+
+---
+
 ## status_server.py
 
 **Started by:** `entrypoint.sh` as a background process before `exec supercronic`.

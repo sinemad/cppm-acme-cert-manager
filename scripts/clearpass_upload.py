@@ -80,14 +80,54 @@ def status_write(level: str, category: str, message: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 LE_CERT_DIR = Path(os.environ.get("LE_CERT_DIR", "/opt/cppm/le-certs"))
 
-LE_BUNDLED_CERTS: dict[str, str] = {
-    "isrg-root-x1.pem":     "ISRG Root X1 (RSA root)",
-    "isrg-root-x2.pem":     "ISRG Root X2 (ECDSA root)",
-    "lets-encrypt-r10.pem": "Let's Encrypt R10 (RSA intermediate)",
-    "lets-encrypt-r11.pem": "Let's Encrypt R11 (RSA intermediate)",
-    "lets-encrypt-e5.pem":  "Let's Encrypt E5 (ECDSA intermediate)",
-    "lets-encrypt-e6.pem":  "Let's Encrypt E6 (ECDSA intermediate)",
-}
+# No hardcoded list — load_bundled_le_certs() scans the whole directory so
+# any intermediate downloaded at image build time is automatically included.
+
+# Trust exclusion config — first file found wins.
+# The volume copy at /data/certs/ is seeded by entrypoint.sh and is editable
+# by the admin without rebuilding the image.
+TRUST_EXCLUSIONS_PATHS: list[Path] = [
+    Path("/data/certs/trust-exclusions.conf"),       # persistent volume, admin-editable
+    Path("/opt/cppm/le-certs/trust-exclusions.conf"), # image default
+]
+
+
+def load_trust_exclusions() -> set[str]:
+    """
+    Return the set of lower-case CN patterns to exclude from trust list operations.
+
+    Reads the first trust-exclusions.conf that exists (volume copy preferred over
+    image default).  Each non-comment line is treated as a case-insensitive
+    partial match against the certificate's Subject CN.
+    """
+    for path in TRUST_EXCLUSIONS_PATHS:
+        if not path.is_file():
+            continue
+        log.info("Trust exclusion config: %s", path)
+        exclusions: set[str] = set()
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                exclusions.add(line.lower())
+                log.info("  Will exclude CN matching: %r", line)
+        except OSError as exc:
+            log.warning("Cannot read trust exclusions from %s: %s", path, exc)
+        return exclusions
+    log.debug("No trust-exclusions.conf found; no certs excluded.")
+    return set()
+
+
+def _is_excluded(cert: "CertInfo", exclusions: set[str]) -> bool:
+    """Return True if the cert's CN contains any exclusion pattern (case-insensitive)."""
+    if not exclusions:
+        return False
+    cn = ""
+    if "CN=" in cert.subject:
+        cn = cert.subject.split("CN=")[-1].split(",")[0].strip().lower()
+    label_lower = cert.label.lower()
+    return any(excl in cn or excl in label_lower for excl in exclusions)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,31 +207,43 @@ def _normalise_fp(fp: str) -> str:
 
 
 def load_bundled_le_certs() -> dict[str, CertInfo]:
-    """Load the LE CA certs baked into the image. Returns dict keyed by normalised SHA-256."""
+    """
+    Load every .pem file in LE_CERT_DIR and return a fingerprint-keyed dict.
+
+    Scanning the directory (rather than a hardcoded list) means any intermediate
+    downloaded at image build time — including future batches like R13/R14/E9/E10 —
+    is automatically included without code changes.
+    """
     required: dict[str, CertInfo] = {}
     if not LE_CERT_DIR.is_dir():
         log.error("Bundled LE cert dir not found: %s – rebuild the image.", LE_CERT_DIR)
         return required
-    for filename, label in LE_BUNDLED_CERTS.items():
-        pem_path = LE_CERT_DIR / filename
-        if not pem_path.is_file():
-            log.warning("Bundled cert missing: %s", pem_path)
-            continue
+
+    pem_files = sorted(LE_CERT_DIR.glob("*.pem"))
+    if not pem_files:
+        log.warning("No PEM files found in %s – rebuild the image.", LE_CERT_DIR)
+        return required
+
+    for pem_path in pem_files:
         try:
             pem_text = pem_path.read_text(encoding="utf-8")
         except OSError as exc:
             log.warning("Cannot read %s: %s", pem_path, exc)
             continue
-        certs = parse_pem_bundle(pem_text, label_prefix=label)
-        if not certs:
-            continue
-        cert = certs[0]
-        cert.label = label
-        fp_norm = _normalise_fp(cert.fingerprint)
-        if fp_norm not in required:
-            required[fp_norm] = cert
-            log.debug("Loaded: %s | expires: %s", label, cert.not_after)
-    log.info("Loaded %d bundled LE CA certs from %s", len(required), LE_CERT_DIR)
+        for cert in parse_pem_bundle(pem_text, label_prefix=pem_path.stem):
+            # Use the cert's own CN as the label (e.g. "R13", "ISRG Root X1")
+            if "CN=" in cert.subject:
+                cert.label = cert.subject.split("CN=")[-1].split(",")[0].strip()
+            else:
+                cert.label = pem_path.stem
+            fp_norm = _normalise_fp(cert.fingerprint)
+            if fp_norm not in required:
+                required[fp_norm] = cert
+                log.debug("Bundled: %s | file: %s | expires: %s",
+                          cert.label, pem_path.name, cert.not_after)
+
+    log.info("Loaded %d bundled LE CA certs from %s (%d files scanned)",
+             len(required), LE_CERT_DIR, len(pem_files))
     return required
 
 
@@ -263,7 +315,7 @@ def _check_response(data: Any, operation: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ensure_letsencrypt_chain_trusted(
-    api: ApiPlatformCertificates, ca_cert_path: str
+    api: ApiPlatformCertificates, ca_cert_paths: list[str]
 ) -> dict:
     """
     Ensure every LE CA cert is in the CPPM trust list with EAP + Others enabled.
@@ -291,13 +343,22 @@ def ensure_letsencrypt_chain_trusted(
     # Build required cert set: bundled image certs + acme.sh chain extras
     required = load_bundled_le_certs()
 
-    if Path(ca_cert_path).is_file():
+    # Parse every CA chain supplied (ECC + RSA) so intermediates unique to
+    # either chain — e.g. R13 in the RSA chain when ECC uses E6 — are all found.
+    seen_paths: set[str] = set()
+    for ca_cert_path in ca_cert_paths:
+        if ca_cert_path in seen_paths:
+            continue
+        seen_paths.add(ca_cert_path)
+        if not Path(ca_cert_path).is_file():
+            log.warning("CA chain file not found: %s (skipping)", ca_cert_path)
+            continue
         log.info("Parsing acme.sh CA chain: %s", ca_cert_path)
         try:
             chain_text = Path(ca_cert_path).read_text(encoding="utf-8")
         except OSError as exc:
             log.warning("Cannot read CA chain %s: %s", ca_cert_path, exc)
-            chain_text = ""
+            continue
         for c in parse_pem_bundle(chain_text, "chain"):
             fp = _normalise_fp(c.fingerprint)
             if fp not in required:
@@ -306,11 +367,29 @@ def ensure_letsencrypt_chain_trusted(
                 c.label = f"LE chain: {cn}"
                 required[fp] = c
                 log.info("  Extra chain cert (not in bundle): %s", c.label)
-    else:
-        log.warning("CA chain file not found: %s (using bundled certs only)", ca_cert_path)
+    if not seen_paths:
+        log.warning("No CA chain files found – using bundled certs only")
 
     if not required:
         log.error("No LE certs available – rebuild the image.")
+        return summary
+
+    # Apply exclusions from trust-exclusions.conf before touching the trust list
+    exclusions = load_trust_exclusions()
+    if exclusions:
+        before = len(required)
+        excluded_labels = []
+        for fp in list(required):
+            if _is_excluded(required[fp], exclusions):
+                excluded_labels.append(required[fp].label)
+                del required[fp]
+        if excluded_labels:
+            log.info("Excluded by trust-exclusions.conf (%d): %s",
+                     len(excluded_labels), excluded_labels)
+            log.info("  Remaining certs to verify: %d (of %d)", len(required), before)
+
+    if not required:
+        log.info("All certs excluded by trust-exclusions.conf – nothing to verify.")
         return summary
 
     log.info("Total unique LE certs to verify: %d", len(required))
@@ -775,19 +854,22 @@ Methods used:
 Note: PATCH /api/server-cert/{id} is NOT used — CPPM returns 405 for PATCH.
 """,
     )
-    # ECC cert → HTTPS(ECC) slot
-    p.add_argument("--https-cert",      required=True,  help="ECC domain cert (.ecc.cer)")
-    p.add_argument("--https-key",       required=True,  help="ECC private key (.ecc.key)")
-    p.add_argument("--https-fullchain", required=True,  help="ECC fullchain (.ecc.fullchain.cer)")
-    p.add_argument("--https-ca",        default=None,   help="ECC CA chain (.ecc.ca.cer)")
-    # RSA cert → RADIUS slot
-    p.add_argument("--radius-cert",      required=True,  help="RSA domain cert (.rsa.cer)")
-    p.add_argument("--radius-key",       required=True,  help="RSA private key (.rsa.key)")
-    p.add_argument("--radius-fullchain", required=True,  help="RSA fullchain (.rsa.fullchain.cer)")
-    p.add_argument("--radius-ca",        default=None,   help="RSA CA chain (.rsa.ca.cer)")
+    # ECC cert → HTTPS(ECC) slot (required unless --only-trust-check)
+    p.add_argument("--https-cert",      default=None, help="ECC domain cert (.ecc.cer)")
+    p.add_argument("--https-key",       default=None, help="ECC private key (.ecc.key)")
+    p.add_argument("--https-fullchain", default=None, help="ECC fullchain (.ecc.fullchain.cer)")
+    p.add_argument("--https-ca",        default=None, help="ECC CA chain (.ecc.ca.cer)")
+    # RSA cert → RADIUS slot (required unless --only-trust-check)
+    p.add_argument("--radius-cert",      default=None, help="RSA domain cert (.rsa.cer)")
+    p.add_argument("--radius-key",       default=None, help="RSA private key (.rsa.key)")
+    p.add_argument("--radius-fullchain", default=None, help="RSA fullchain (.rsa.fullchain.cer)")
+    p.add_argument("--radius-ca",        default=None, help="RSA CA chain (.rsa.ca.cer)")
 
     p.add_argument("--domain",           default=os.environ.get("DOMAIN", "cppm.sinemalab.com"))
-    p.add_argument("--skip-trust-check", action="store_true")
+    p.add_argument("--skip-trust-check", action="store_true",
+                   help="Skip Step 0 (trust list pre-flight)")
+    p.add_argument("--only-trust-check", action="store_true",
+                   help="Run Step 0 only (trust list verify/upload) — skip cert upload steps")
     p.add_argument("--skip-radius",      action="store_true")
     return p.parse_args()
 
@@ -810,7 +892,8 @@ def main() -> int:
         log.error("CPPM_CLIENT_ID and CPPM_CLIENT_SECRET must be set.")
         return 1
 
-    if not callback_host:
+    # In trust-check-only mode the callback host is not needed (no PKCS12 upload)
+    if not args.only_trust_check and not callback_host:
         log.error(
             "CPPM_CALLBACK_HOST is not set.\n"
             "Set it to the Docker host's LAN IP that CPPM can route to, e.g.:\n"
@@ -821,22 +904,43 @@ def main() -> int:
         )
         return 1
 
-    for label, path in [
+    # Cert files are required for full upload mode; optional for trust-check-only
+    required_files = [
         ("https-cert",      args.https_cert),
         ("https-key",       args.https_key),
         ("https-fullchain", args.https_fullchain),
         ("radius-cert",     args.radius_cert),
         ("radius-key",      args.radius_key),
         ("radius-fullchain",args.radius_fullchain),
-    ]:
-        if not Path(path).is_file():
-            log.error("File not found (%s): %s", label, path)
-            return 1
+    ]
+    if args.only_trust_check:
+        # Only validate files that were explicitly provided
+        for label, path in required_files:
+            if path and not Path(path).is_file():
+                log.error("File not found (%s): %s", label, path)
+                return 1
+    else:
+        # Full mode: all cert files are required
+        for label, path in required_files:
+            if not path:
+                log.error("Missing required argument: --%s", label)
+                return 1
+            if not Path(path).is_file():
+                log.error("File not found (%s): %s", label, path)
+                return 1
 
-    # CA chain for trust list pre-flight – prefer ECC chain, fall back to RSA
-    https_ca  = args.https_ca  or str(Path(args.https_cert).parent  / f"{args.domain}.ecc.ca.cer")
-    radius_ca = args.radius_ca or str(Path(args.radius_cert).parent / f"{args.domain}.rsa.ca.cer")
-    ca_path = https_ca if Path(https_ca).is_file() else radius_ca
+    # CA chains for trust list pre-flight.
+    # Both ECC and RSA chains are passed so intermediates unique to either chain
+    # (e.g. R13 in the RSA chain when ECC uses E6) are all discovered and uploaded.
+    https_ca  = args.https_ca  or (
+        str(Path(args.https_cert).parent / f"{args.domain}.ecc.ca.cer")
+        if args.https_cert else ""
+    )
+    radius_ca = args.radius_ca or (
+        str(Path(args.radius_cert).parent / f"{args.domain}.rsa.ca.cer")
+        if args.radius_cert else ""
+    )
+    ca_paths = [p for p in [https_ca, radius_ca] if p]
 
     if not verify_ssl:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -904,6 +1008,24 @@ def main() -> int:
     )
     api = ApiPlatformCertificates(**sdk_args)
 
+    # ── Trust-check-only mode ────────────────────────────────────────────────
+    # --only-trust-check: run Step 0 only, then exit.  Used by trust_check.sh
+    # on its weekly schedule so trust list hygiene is maintained independently
+    # of certificate renewal.
+    if args.only_trust_check:
+        log.info("== Mode: Trust List Verification Only =======================")
+        try:
+            summary = ensure_letsencrypt_chain_trusted(api, ca_paths)
+            if summary["failed"]:
+                status_write("WARN", "TRUST",
+                             f"Trust check incomplete – failed: {summary['failed']}")
+                return 1
+        except Exception as exc:
+            log.error("Trust check exception: %s", exc)
+            status_write("FAILED", "TRUST", f"Trust check exception: {exc}")
+            return 1
+        return 0
+
     hard_errors: list[str] = []
     soft_errors:  list[str] = []
 
@@ -911,7 +1033,7 @@ def main() -> int:
     if not args.skip_trust_check:
         log.info("== Step 0: Trust List Pre-flight ============================")
         try:
-            summary = ensure_letsencrypt_chain_trusted(api, ca_path)
+            summary = ensure_letsencrypt_chain_trusted(api, ca_paths)
             if summary["failed"]:
                 soft_errors.append(
                     f"Trust list incomplete – missing: {summary['failed']}"

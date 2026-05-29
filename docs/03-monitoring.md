@@ -95,7 +95,7 @@ tail -10 /opt/cppm-certs/status.log
 | `STARTUP` | `entrypoint.sh` | Container start, supercronic launch, env validation |
 | `CERT` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
 | `RENEW` | `renew.sh` | Daily renewal check results |
-| `TRUST` | `clearpass_upload.py` | Let's Encrypt trust list pre-flight summary |
+| `TRUST` | `clearpass_upload.py`, `trust_check.sh` | Let's Encrypt trust list pre-flight and weekly check |
 | `UPLOAD` | `deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
 
 ---
@@ -123,6 +123,20 @@ tail -10 /opt/cppm-certs/status.log
 2026-06-01 02:00:08 | OK     | CERT    | ECC+RSA certs installed – expires Sep 13 2026 (89 days remaining)
 2026-06-01 02:00:11 | OK     | TRUST   | 7 LE CA certs verified – 0 uploaded, 7 already trusted
 2026-06-01 02:00:15 | OK     | UPLOAD  | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
+```
+
+### Weekly trust list check (no renewal needed)
+
+```
+2026-06-08 03:00:02 | INFO   | TRUST   | Periodic trust list check started
+2026-06-08 03:00:07 | OK     | TRUST   | 9 LE CA certs verified – 0 uploaded, 0 patched, 9 already trusted
+```
+
+### Weekly trust list check (missing cert uploaded)
+
+```
+2026-06-08 03:00:02 | INFO   | TRUST   | Periodic trust list check started
+2026-06-08 03:00:09 | OK     | TRUST   | 9 LE CA certs verified – 1 uploaded, 0 patched, 8 already trusted
 ```
 
 ### Upload failure

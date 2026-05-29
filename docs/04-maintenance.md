@@ -105,33 +105,86 @@ docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 
 ---
 
-## Check renewal schedule
+## Trust list verification
 
-Renewals run at 02:00 and 14:00 UTC. acme.sh only contacts Let's Encrypt
-when 30 or fewer days remain on the cert.
+The Let's Encrypt CA and intermediate CA certificates in the ClearPass trust
+list are checked and repaired automatically on two schedules:
+
+| Schedule | Trigger | What runs |
+|---|---|---|
+| After every cert issuance or renewal | Automatic via `deploy_hook.sh` | Trust check + HTTPS + RADIUS upload |
+| Weekly — Sunday 03:00 container-local | Automatic via `trust_check.sh` | Trust check only (no cert upload) |
+
+### Run the trust list check manually
 
 ```bash
-# See the cron schedule inside the container
-docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
+docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
+```
 
-# Check when the next renewal will actually fire
-openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -enddate
-openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -enddate
+Output appends to `/opt/cppm-certs/.logs/upload.log` and records a `TRUST`
+entry in `status.log`.
+
+### Exclude specific CA or intermediate certs from upload
+
+A config file on the persistent volume controls which certs are excluded from
+all trust list operations. It is seeded automatically from the image default
+on first container start:
+
+```
+/opt/cppm-certs/trust-exclusions.conf   (host path — edit this one)
+/data/certs/trust-exclusions.conf       (same file, container path)
+```
+
+Edit it on the host — no container restart required; changes take effect at
+the next scheduled or manual trust check:
+
+```bash
+nano /opt/cppm-certs/trust-exclusions.conf
+```
+
+Each non-comment line is matched case-insensitively against the certificate's
+Subject CN. Partial matches are supported:
+
+```
+# Exclude Let's Encrypt R11 (already managed separately in this environment)
+R11
+
+# Exclude the ECDSA root — not needed if RADIUS uses RSA-only EAP
+ISRG Root X2
+```
+
+The file has a comprehensive header explaining every option. If you delete or
+corrupt it, the container will restore the default from the image on next
+restart.
+
+---
+
+## Check the scheduled task list
+
+```bash
+# View the full cron schedule inside the container
+docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 ```
 
 ---
 
-## Automatic renewal log review
+## Automatic log review
 
-After each cron run, `status.log` records the outcome. During the ~60 days
-between issue and renewal you will see twice-daily entries like:
+`status.log` records the outcome of every scheduled operation. During normal
+operation you will see entries like the following — no action is required.
 
+**Daily renewal checks (02:00 and 14:00):**
 ```
 2026-04-01 02:00:01 | INFO   | RENEW   | Not due for renewal – 75 days remaining (next check in 12h)
 ```
 
-No action is required. The first `OK | RENEW` entry indicates a successful
-renewal has occurred.
+**Weekly trust list check (Sunday 03:00):**
+```
+2026-06-08 03:00:07 | OK     | TRUST   | 9 LE CA certs verified – 0 uploaded, 0 patched, 9 already trusted
+```
+
+The first `OK | RENEW` entry confirms a successful certificate renewal.
+The weekly `OK | TRUST` entry confirms the ClearPass trust list is complete.
 
 ---
 

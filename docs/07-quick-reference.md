@@ -51,11 +51,20 @@ docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 # Install flat files from acme.sh state (no re-issue)
 docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh
 
+# Run trust list check manually (verify/upload CA certs, no cert renewal)
+docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
+
+# Edit trust list exclusions (takes effect at next check, no restart needed)
+nano /opt/cppm-certs/trust-exclusions.conf
+
 # Force full certificate re-issue
 # Edit .env: FORCE_RENEW=true
 docker compose up -d --force-recreate
 # Edit .env: FORCE_RENEW=false
 docker compose up -d --force-recreate
+
+# View the full cron schedule (renewal + trust check)
+docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 
 # Check active DNS provider
 docker exec -it cppm-acme-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
@@ -77,20 +86,24 @@ docker exec -it cppm-acme-cert-manager bash
 | Status summary | `/opt/cppm-certs/status.log` |
 | Startup detail | `/opt/cppm-certs/.logs/startup.log` |
 | Renewal detail | `/opt/cppm-certs/.logs/renewal.log` |
-| Upload detail | `/opt/cppm-certs/.logs/upload.log` |
+| Upload + trust check detail | `/opt/cppm-certs/.logs/upload.log` |
 | Cron log | `/opt/cppm-certs/.logs/cron.log` |
 | Dashboard log | `/opt/cppm-certs/.logs/status_server.log` |
+| Trust exclusion config | `/opt/cppm-certs/trust-exclusions.conf` |
 
 ---
 
-## Renewal schedule
+## Scheduled tasks
 
-| Time (UTC) | Action |
-|---|---|
-| 02:00 daily | `renew.sh` — checks expiry for both ECC and RSA certs |
-| 14:00 daily | `renew.sh` — checks expiry for both ECC and RSA certs |
-| ~60 days after issue | Actual renewal occurs (when ≤30 days remain) |
-| On renewal | Install ECC + RSA → upload ECC→HTTPS(ECC), RSA→RADIUS |
+All times are container-local (controlled by the `TZ` env var, default UTC).
+
+| Schedule | Script | Action |
+|---|---|---|
+| 02:00 daily | `renew.sh` | Checks ECC + RSA cert expiry; renews if ≤30 days remain |
+| 14:00 daily | `renew.sh` | Same as above |
+| ~60 days after issue | *(automatic on renewal)* | Issues new certs → installs flat files → uploads to CPPM |
+| Sunday 03:00 weekly | `trust_check.sh` | Verifies all LE CA certs in CPPM trust list; uploads any missing |
+| On renewal | *(automatic)* | Full upload: trust check + HTTPS(ECC) cert + RADIUS cert |
 
 ---
 
