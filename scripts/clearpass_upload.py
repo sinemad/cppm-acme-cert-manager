@@ -405,27 +405,51 @@ def ensure_letsencrypt_chain_trusted(
         status_write("WARN", "TRUST", f"Trust list fetch failed: {exc}")
         return summary
 
-    # Build fingerprint lookup from the cert_file PEM in each trust list entry.
-    # CPPM does not return a fingerprint field — only id, cert_file, enabled,
-    # cert_usage, and _links.  We compute SHA-256 from the PEM ourselves.
+    # Build fingerprint and CN lookup maps from the cert_file PEM in each trust
+    # list entry.  CPPM does not return a fingerprint or subject field — only
+    # id, cert_file, enabled, cert_usage, and _links — so we parse them with
+    # openssl.
+    #
+    # trust_fp_map  – primary lookup: SHA-256 fingerprint → entry
+    # trust_cn_map  – fallback lookup: lower-case CN → entry
+    #
+    # The CN map is needed because Let's Encrypt publishes cross-signed variants
+    # of each intermediate (same CN, different fingerprint / different issuer).
+    # When the fingerprint lookup misses a cert that is already trusted under its
+    # primary fingerprint, the CN map lets us detect the collision and avoid a
+    # false FAILED result.
     trust_fp_map: dict[str, dict] = {}
+    trust_cn_map: dict[str, dict] = {}
     for entry in trust_list:
         pem = entry.get("cert_file", "")
         if not pem or "BEGIN CERTIFICATE" not in pem:
             continue
+        pem_bytes = pem.encode()
         try:
             fp_raw = _run_openssl(
                 ["x509", "-noout", "-fingerprint", "-sha256"],
-                input_data=pem.encode(),
+                input_data=pem_bytes,
             ).strip()
             fp_norm = _normalise_fp(fp_raw.split("=", 1)[-1].strip())
             trust_fp_map[fp_norm] = entry
         except Exception as exc:
             log.debug("Could not fingerprint trust list entry id=%s: %s",
                       entry.get("id"), exc)
+            continue
+        try:
+            subj = _run_openssl(
+                ["x509", "-noout", "-subject", "-nameopt", "compat"],
+                input_data=pem_bytes,
+            ).strip().removeprefix("subject=").strip()
+            if "CN=" in subj:
+                cn = subj.split("CN=")[-1].split(",")[0].strip().lower()
+                trust_cn_map.setdefault(cn, entry)
+        except Exception as exc:
+            log.debug("Could not parse subject for trust list entry id=%s: %s",
+                      entry.get("id"), exc)
 
-    log.debug("Built fingerprint map from %d/%d trust list entries",
-              len(trust_fp_map), len(trust_list))
+    log.debug("Built lookup maps from %d/%d trust list entries (%d unique CNs)",
+              len(trust_fp_map), len(trust_list), len(trust_cn_map))
 
     def _find_entry(fp: str) -> Optional[dict]:
         return trust_fp_map.get(_normalise_fp(fp))
@@ -505,17 +529,20 @@ def ensure_letsencrypt_chain_trusted(
                     "enabled":    True,
                     "cert_usage": ["EAP", "Others"],
                 })
+                # Detect any duplicate-rejection response from CPPM.
+                # Covers HTTP 409 Conflict as well as 422 Unprocessable, and a range
+                # of wording variations across CPPM versions.
+                _dup_phrases = ("already exists", "duplicate", "already present", "conflict")
                 if isinstance(resp, dict):
-                    status = resp.get("status", 0)
-                    detail = resp.get("detail", "")
-                    if status == 422 and "already exists" in str(detail).lower():
-                        # Fingerprint map missed this entry — cert is present but
-                        # its PEM in the trust list may differ slightly (line endings
-                        # etc).  Treat as already trusted and note for manual check.
+                    resp_status = resp.get("status", 0)
+                    resp_detail = str(resp.get("detail", "")).lower()
+                    if resp_status in (409, 422) and any(p in resp_detail for p in _dup_phrases):
                         log.warning(
-                            "  422 'already exists' but fingerprint lookup missed it. "
-                            "Verify EAP+Others flags manually in CPPM Admin UI: "
-                            "Administration > Certificates > Trust List"
+                            "  %d '%s' – cert already present in trust list "
+                            "(fingerprint lookup missed it, possibly a cross-signed variant). "
+                            "Verify EAP+Others flags manually: "
+                            "Administration > Certificates > Trust List",
+                            resp_status, resp.get("detail", ""),
                         )
                         summary["already_trusted"].append(cert.label)
                         continue
@@ -524,8 +551,28 @@ def ensure_letsencrypt_chain_trusted(
                 log.info("  Uploaded (id=%s)", uploaded_id)
                 summary["uploaded"].append(cert.label)
             except Exception as exc:
-                log.error("  Upload failed: %s", exc)
-                summary["failed"].append(cert.label)
+                # Before declaring failure, check if a cert with the same CN is already
+                # trusted — handles cross-signed variants of LE intermediates where the
+                # same CN (e.g. "E7") appears in two certificates with different
+                # fingerprints (primary signed by ISRG Root X2, cross-signed by ISRG
+                # Root X1).  ClearPass only accepts one and rejects the second; the CN
+                # map lets us detect this and avoid a false FAILED result.
+                cert_cn = ""
+                if "CN=" in cert.subject:
+                    cert_cn = cert.subject.split("CN=")[-1].split(",")[0].strip().lower()
+                same_cn_entry = trust_cn_map.get(cert_cn) if cert_cn else None
+                if same_cn_entry is not None:
+                    log.warning(
+                        "  Upload rejected (%s) — CN=%r is already trusted "
+                        "(id=%s, different fingerprint). "
+                        "This is a cross-signed variant of the same intermediate; "
+                        "the version already in the trust list is sufficient.",
+                        exc, cert_cn, same_cn_entry.get("id"),
+                    )
+                    summary["already_trusted"].append(cert.label)
+                else:
+                    log.error("  Upload failed: %s", exc)
+                    summary["failed"].append(cert.label)
 
     # Summary
     log.info("=" * 62)
