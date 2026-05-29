@@ -224,7 +224,7 @@ GD_Secret=...
 
 ### 3. ClearPass API client
 
-1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
+1. CPPM Admin UI → Dashboard → ClearPass Guest → **Administration → API Services → API Clients → Add**
 2. Configure:
 
    | Field | Value |
