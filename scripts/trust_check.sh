@@ -19,15 +19,21 @@ LOG="${LOG_DIR}/upload.log"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 
-# Source status library (writes to /data/certs/status.log)
+# Source status library — this also calls _ensure_cppm_dirs(), which creates
+# /data/certs and /data/certs/.logs, so the source below is both a safety net
+# and the authoritative directory-creation path for all sourced scripts.
 # shellcheck source=status.sh
 source /opt/cppm/status.sh
 
-log()  { echo "[$(ts)] [INFO ] $*" | tee -a "$LOG"; }
-warn() { echo "[$(ts)] [WARN ] $*" | tee -a "$LOG"; }
-err()  { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
+# Log functions write to stdout/stderr unconditionally so output is always
+# visible in docker logs, then append to the log file as best-effort.
+# 2>/dev/null on the file write prevents BusyBox error messages from mixing
+# into the terminal output if the log directory is temporarily unavailable.
+log()  { local m="[$(ts)] [INFO ] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
+warn() { local m="[$(ts)] [WARN ] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
+err()  { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 log "=== Trust List Verification (weekly) ==="
 
@@ -61,14 +67,19 @@ python3 /opt/cppm/clearpass_upload.py \
     --radius-key       "${CERT_DIR}/${DOMAIN}.rsa.key" \
     --radius-fullchain "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer" \
     --radius-ca        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer" \
-    2>&1 | tee -a "$LOG"
+    2>&1 | tee -a "$LOG" 2>/dev/null
 
 EXIT_CODE="${PIPESTATUS[0]}"
 
 if [[ "$EXIT_CODE" -eq 0 ]]; then
     log "Trust check completed successfully."
 else
-    err "Trust check failed (exit ${EXIT_CODE}) – see ${LOG} for details."
+    err "Trust check failed (exit ${EXIT_CODE})."
+    if [[ -f "$LOG" ]]; then
+        err "Full output written to: ${LOG}"
+    else
+        err "Log file unavailable – confirm /opt/cppm-certs is mounted and writable on the host."
+    fi
 fi
 
 exit "$EXIT_CODE"

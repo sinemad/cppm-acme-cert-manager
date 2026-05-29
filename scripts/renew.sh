@@ -10,10 +10,14 @@ LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/renewal.log"
 DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
-log() { echo "[$(ts)] [RENEW] $*" | tee -a "$LOG"; }
-err() { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
+# Log functions write to stdout/stderr unconditionally (always visible in
+# docker logs) then append to the log file as a best-effort — 2>/dev/null
+# prevents BusyBox tee/echo errors from mixing into the output if the log
+# directory is temporarily unavailable.
+log() { local m="[$(ts)] [RENEW] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
+err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 source /opt/cppm/status.sh
 # acme.sh uses $DEBUG as a numeric variable; a non-numeric value from
@@ -46,7 +50,7 @@ RENEW_EXIT=0
     --home      /root/.acme.sh \
     --log       "$LOG" \
     --log-level 2 \
-    2>&1 | tee -a "$LOG" || RENEW_EXIT=$?
+    2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
 
 case $RENEW_EXIT in
     0)

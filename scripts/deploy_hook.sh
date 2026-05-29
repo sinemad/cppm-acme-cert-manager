@@ -11,10 +11,10 @@ LOG="${LOG_DIR}/upload.log"
 DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
 CPPM_HOST="${CPPM_HOST:-cppm.sinemalab.com}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
-log() { echo "[$(ts)] [HOOK]  $*" | tee -a "$LOG"; }
-err() { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
+log() { local m="[$(ts)] [HOOK]  $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
+err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 source /opt/cppm/status.sh
 
@@ -62,7 +62,7 @@ python3 /opt/cppm/clearpass_upload.py \
     --radius-fullchain "$RADIUS_FULLCHAIN" \
     --radius-ca       "$RADIUS_CA" \
     --domain          "$DOMAIN" \
-    2>&1 | tee -a "$LOG" || UPLOAD_EXIT=$?
+    2>&1 | tee -a "$LOG" 2>/dev/null || UPLOAD_EXIT=$?
 
 if [[ $UPLOAD_EXIT -eq 0 ]]; then
     log "Upload succeeded."

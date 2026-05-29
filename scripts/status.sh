@@ -16,6 +16,25 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 STATUS_LOG="/data/certs/status.log"
+_CPPM_CERT_DIR="/data/certs"
+_CPPM_LOG_DIR="/data/certs/.logs"
+
+# _ensure_cppm_dirs – Create the certificate and log directories.
+#
+# Called automatically by status_init(), which runs whenever any script sources
+# this library.  This means every script (entrypoint, renew, deploy_hook,
+# trust_check, etc.) benefits without needing its own mkdir guard.
+#
+# Errors are written to stderr only — never to a log file that may not
+# exist yet.  The function does not abort the caller even if mkdir fails,
+# so scripts degrade gracefully (terminal output still visible via Docker
+# logs even if file-based logging is unavailable).
+_ensure_cppm_dirs() {
+    if ! mkdir -p "$_CPPM_LOG_DIR" "$_CPPM_CERT_DIR" 2>/dev/null; then
+        printf '[%s] [ERROR] status.sh: cannot create runtime dirs (%s) – check volume mount permissions.\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$_CPPM_LOG_DIR" >&2
+    fi
+}
 
 # status_write LEVEL CATEGORY MESSAGE
 #   LEVEL:    OK | INFO | FAILED | WARN
@@ -32,16 +51,17 @@ status_write() {
         >> "$STATUS_LOG" 2>/dev/null || true
 }
 
-# Write the status header line the first time (empty file or new day)
+# status_init – Ensure runtime directories exist and initialise status.log.
+# Always called when this file is sourced.
 status_init() {
-    mkdir -p "$(dirname "$STATUS_LOG")"
+    _ensure_cppm_dirs
     if [[ ! -f "$STATUS_LOG" ]]; then
         {
             echo "# ClearPass Certificate Manager – Status Log"
             echo "# $(date '+%Y-%m-%d %H:%M:%S') – Log initialised"
             echo "# Columns: TIMESTAMP | LEVEL | CATEGORY | MESSAGE"
             echo "#"
-        } >> "$STATUS_LOG"
+        } >> "$STATUS_LOG" 2>/dev/null || true
     fi
 }
 
