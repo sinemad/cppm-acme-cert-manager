@@ -1,5 +1,7 @@
 # ClearPass ACME Certificate Manager
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**
 using [acme.sh](https://github.com/acmesh-official/acme.sh) and a DNS-01 challenge.
 Everything runs in a self-contained Alpine Linux Docker container with persistent storage
