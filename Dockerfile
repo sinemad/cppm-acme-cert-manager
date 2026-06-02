@@ -13,6 +13,7 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
     py3-cryptography \
+    py3-bcrypt \
     tzdata \
     socat \
     bind-tools \
@@ -148,7 +149,11 @@ COPY config/crontab /etc/crontabs/root
 COPY le-certs/ /opt/cppm/le-certs/
 
 RUN chmod +x /opt/cppm/*.sh \
-    && chmod 755 /opt/cppm/clearpass_upload.py
+    && chmod 755 /opt/cppm/clearpass_upload.py \
+    && chmod 755 /opt/cppm/cppm_acme_manager_servers.py \
+    && chmod 755 /opt/cppm/cppm_acme_manager_users.py \
+    && ln -s /opt/cppm/cppm_acme_manager_servers.py /usr/local/bin/cppm-servers \
+    && ln -s /opt/cppm/cppm_acme_manager_users.py   /usr/local/bin/cppm-users
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 ENV TZ=UTC

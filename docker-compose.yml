@@ -53,7 +53,8 @@ services:
       SKIP_UPLOAD:  ${SKIP_UPLOAD:-false}
       LOG_LEVEL:    ${LOG_LEVEL:-INFO}
       # Web status dashboard
-      STATUS_PORT:  ${STATUS_PORT:-8080}
+      STATUS_PORT:             ${STATUS_PORT:-8080}
+      REQUIRE_AUTH_FOR_STATUS: ${REQUIRE_AUTH_FOR_STATUS:-false}
 
     volumes:
       # Single persistent volume – certificates only.

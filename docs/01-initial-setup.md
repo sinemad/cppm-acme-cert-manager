@@ -224,7 +224,46 @@ First-run time including DNS propagation: approximately 2–5 minutes.
 
 ---
 
-## Step 7 – Enable SSL verification
+## Step 7 – Web UI first-time setup
+
+Open a browser to `http://<docker-host>:8080/`. On first access the navigation
+bar shows a **Setup** link because no admin accounts exist yet.
+
+1. Click **Setup** (or navigate to `http://<docker-host>:8080/setup`).
+2. Enter a username and a password of at least 8 characters.
+3. Click **Create Admin Account** — you will be redirected to the sign-in page.
+4. Sign in with the credentials you just created.
+
+Once signed in you will see the full navigation bar:
+**Dashboard · Servers · Users · Sign Out**
+
+### Configure your first ClearPass server
+
+1. Click **Servers** in the navigation bar.
+2. Click **+ Add Server**.
+3. Fill in all fields for your ClearPass host, ACME email, certificate
+   authority, and DNS provider credentials, then click **Add Server** to save.
+
+The server configuration is stored in `/opt/cppm-certs/servers.json` on the
+persistent volume alongside the certificates.
+
+### CLI alternative (no browser needed)
+
+Create the admin account without a browser:
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-users add admin
+```
+
+Add a server without a browser (interactive prompts):
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-servers add
+```
+
+---
+
+## Step 8 – Enable SSL verification
 
 Once the certificate is installed and CPPM is accessible via HTTPS with the
 new cert:

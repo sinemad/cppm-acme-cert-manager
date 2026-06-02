@@ -8,6 +8,9 @@ nano .env                            # set DNS_PROVIDER + credentials + CPPM set
 docker compose build --no-cache      # build image (downloads acme.sh + LE certs)
 docker compose up -d                 # start container
 docker compose logs -f               # watch first-run progress
+
+# Open http://<docker-host>:8080/setup in a browser to create the admin account
+# Then go to Servers → Add Server to register your ClearPass server
 ```
 
 ---
@@ -30,6 +33,66 @@ docker compose logs -f
 
 # Container health
 docker compose ps
+```
+
+---
+
+## Web UI
+
+```bash
+# Dashboard (public by default)
+# http://<docker-host>:8080/
+
+# First-time admin setup wizard
+# http://<docker-host>:8080/setup
+
+# Sign in
+# http://<docker-host>:8080/login
+
+# Servers — manage ClearPass server entries (sign-in required)
+# http://<docker-host>:8080/settings
+
+# Admin user management (sign-in required)
+# http://<docker-host>:8080/admin/users
+```
+
+---
+
+## Server management (CLI)
+
+```bash
+# List all configured servers (shows IDs needed for other commands)
+docker exec -it cppm-acme-cert-manager cppm-servers list
+
+# Add a new server (interactive prompts)
+docker exec -it cppm-acme-cert-manager cppm-servers add
+
+# Show full configuration for a server
+docker exec -it cppm-acme-cert-manager cppm-servers show <id>
+
+# Edit an existing server
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+
+# Delete a server
+docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
+```
+
+---
+
+## Admin user management (CLI)
+
+```bash
+# Create first admin account (also works for subsequent accounts)
+docker exec -it cppm-acme-cert-manager cppm-users add <username>
+
+# Change a password
+docker exec -it cppm-acme-cert-manager cppm-users passwd <username>
+
+# Delete a user
+docker exec -it cppm-acme-cert-manager cppm-users delete <username>
+
+# List all users
+docker exec -it cppm-acme-cert-manager cppm-users list
 ```
 
 ---
@@ -78,7 +141,7 @@ docker exec -it cppm-acme-cert-manager bash
 
 ---
 
-## Log locations
+## Log locations and persistent files
 
 | What | Where |
 |---|---|
@@ -90,6 +153,9 @@ docker exec -it cppm-acme-cert-manager bash
 | Cron log | `/opt/cppm-certs/.logs/cron.log` |
 | Dashboard log | `/opt/cppm-certs/.logs/status_server.log` |
 | Trust exclusion config | `/opt/cppm-certs/trust-exclusions.conf` |
+| ClearPass server config | `/opt/cppm-certs/servers.json` |
+| Admin credentials | `/opt/cppm-certs/admin.htpasswd` |
+| Session signing secret | `/opt/cppm-certs/.session-secret` |
 
 ---
 
@@ -130,12 +196,12 @@ docker compose up -d --force-recreate
 # Show only failures in status log
 grep FAILED /opt/cppm-certs/status.log
 
-# Test ClearPass authentication
+# Test ClearPass authentication (uses form-encoded POST per RFC 6749)
 docker exec -it cppm-acme-cert-manager python3 -c "
 import os, requests
 r = requests.post(
     'https://' + os.environ['CPPM_HOST'] + '/api/oauth',
-    json={
+    data={
         'grant_type':    'client_credentials',
         'client_id':     os.environ['CPPM_CLIENT_ID'],
         'client_secret': os.environ['CPPM_CLIENT_SECRET'],

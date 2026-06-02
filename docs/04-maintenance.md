@@ -188,6 +188,77 @@ The weekly `OK | TRUST` entry confirms the ClearPass trust list is complete.
 
 ---
 
+## Admin user management
+
+### Web UI
+
+Navigate to **Users** in the top navigation bar (sign-in required).
+
+| Action | How |
+|---|---|
+| Add user | Fill in the **Add User** form |
+| Change password | Select a user in the **Change Password** form |
+| Delete user | Click **Delete** on the user row → confirm inline |
+
+You cannot delete your own account while signed in. If the last user is deleted
+the setup wizard becomes available again on the next page load.
+
+### CLI
+
+```bash
+# Add a user (prompts for password)
+docker exec -it cppm-acme-cert-manager cppm-users add <username>
+
+# Change a password
+docker exec -it cppm-acme-cert-manager cppm-users passwd <username>
+
+# Delete a user
+docker exec -it cppm-acme-cert-manager cppm-users delete <username>
+
+# List all users
+docker exec -it cppm-acme-cert-manager cppm-users list
+```
+
+Credentials are stored in `/opt/cppm-certs/admin.htpasswd` (bcrypt hashed,
+chmod 600) and survive container rebuilds.
+
+---
+
+## ClearPass server configuration
+
+Server entries are managed via the **Servers** page in the web UI or the CLI
+(see below). They are stored in `/opt/cppm-certs/servers.json` (chmod 600) and
+persist across container rebuilds alongside the certificates.
+
+```bash
+# View current server configurations
+cat /opt/cppm-certs/servers.json
+
+# Back up before changes
+cp /opt/cppm-certs/servers.json /opt/cppm-certs/servers.json.bak
+```
+
+### CLI server management
+
+```bash
+# List all servers (shows IDs needed for other commands)
+docker exec -it cppm-acme-cert-manager cppm-servers list
+
+# Add a new server (interactive prompts)
+docker exec -it cppm-acme-cert-manager cppm-servers add
+
+# Show full configuration for a server
+docker exec -it cppm-acme-cert-manager cppm-servers show <id>
+
+# Edit an existing server
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+
+# Delete a server
+docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
+```
+
+---
+
 ## Shell into the container
 
 ```bash

@@ -2,8 +2,9 @@
 
 ## Web status dashboard
 
-The easiest way to monitor the certificate manager is the built-in web
-dashboard, which starts automatically with the container.
+The built-in web dashboard starts automatically with the container and provides
+a real-time view of certificate health, service connectivity, renewal schedule,
+and the activity log.
 
 ![Web Status Dashboard](dashboard-screenshot.png)
 
@@ -15,29 +16,206 @@ http://<docker-host>:8080/
 
 > Change the port by setting `STATUS_PORT` in `.env` (default `8080`).
 
-### Dashboard panels
+---
+
+## First-time setup wizard
+
+On first access, no admin accounts exist. The dashboard shows a **Setup** link
+in the navigation bar. Click it — or navigate directly to `/setup` — to create
+the initial administrator account.
+
+**Requirements:** username (letters, digits, `-`, `_`, 1–64 chars) and a
+password of at least 8 characters.
+
+After the account is created you are redirected to the sign-in page. Use the
+same credentials to log in.
+
+### CLI alternative
+
+If you prefer to create the first account without a browser:
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-users add admin
+```
+
+---
+
+## Authentication
+
+| Behavior | Detail |
+|---|---|
+| **Session lifetime** | 8 hours (configurable via `SESSION_LIFETIME_HOURS` env var) |
+| **Credential storage** | bcrypt-hashed in `/opt/cppm-certs/admin.htpasswd` (persists across rebuilds) |
+| **Session token** | HMAC-SHA256 signed cookie; secret in `/opt/cppm-certs/.session-secret` |
+| **Public dashboard** | By default the certificate status page is readable without login |
+| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to protect the status page |
+
+The `/admin/*` routes and the Servers page always require an authenticated session,
+regardless of `REQUIRE_AUTH_FOR_STATUS`.
+
+---
+
+## Dashboard panels
 
 | Panel | What you see |
 |---|---|
-| **ECC Certificate** | Days remaining (green/amber/red), expiry and issue dates, issuer CN, key type, deployed CPPM service |
+| **ECC Certificate** | Days remaining (green/amber/red), expiry and issue dates, issuer CN, key type |
 | **RSA Certificate** | Same fields for the RSA cert |
 | **Renewal Schedule** | Countdown to the next `renew.sh` run (02:00 or 14:00 container-local time) |
-| **Configuration** | Active domain, DNS provider, ACME CA, ClearPass hostname |
-| **Activity Log** | Last 40 `status.log` events, newest first, color-coded by level |
+| **Configuration** | Active domain, DNS provider (with status light), ACME CA, ClearPass hostname (with status light) |
+| **Activity Log** | Last 40 `status.log` events, newest first, colour-coded by level |
+
+### Service status lights
+
+The per-server **Details** page shows a real-time connectivity indicator next
+to the DNS provider and ClearPass host in the Configuration card:
+
+| Colour | Meaning |
+|---|---|
+| **Green** | Reachable and credentials valid |
+| **Yellow** | Reachable but authentication issue |
+| **Red** | Unreachable or timeout |
+| **Gray (pulsing)** | Check in progress |
+| **Gray (solid)** | Not configured or provider check not available |
+
+The check runs automatically on page load and repeats every 5 minutes. Hover
+over a dot to see the specific status message. Results are cached server-side
+for 2 minutes so the dashboard never hammers external APIs.
+
+**ClearPass check** — attempts a full OAuth `client_credentials` exchange
+against `/api/oauth`. A green dot confirms the host is reachable and the
+API client credentials are correct.
+
+**DNS provider checks** — provider-specific:
+
+| Provider | Check |
+|---|---|
+| Cloudflare | `GET /client/v4/user/tokens/verify` (scoped token) or `/user` (global key) |
+| Porkbun | `POST /api/json/v3/ping` with API key |
+| DigitalOcean | `GET /v2/account` with token |
+| GoDaddy | `GET /v1/domains` with key:secret |
+| Route 53 | TCP reachability to `route53.amazonaws.com` |
 
 ### Certificate Details modal
 
 Click **View Details** on either cert card to see the full decoded certificate:
 subject CN, SANs, issuer, serial number, key algorithm and size, validity
-window, and the raw PEM with a **Copy** button.
+window, and the raw PEM with a **Copy** button. Press **Escape** or click
+outside the modal to close it.
 
 The page polls `/api/status` every 30 seconds and updates in place. It has
 no external dependencies and works in air-gapped environments.
 
-### Dashboard log
+---
+
+## Servers page
+
+The Servers page (authenticated users only) manages the list of ClearPass
+servers and their associated ACME and DNS configurations.
+
+Navigate to **Servers** in the top navigation bar.
+
+### Adding a server
+
+Click **+ Add Server**. Fill in all fields for the new server entry.
+
+Each server entry includes:
+
+| Section | Fields |
+|---|---|
+| **Identity** | Friendly label |
+| **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL checkbox |
+| **Domain & ACME** | Domain, ACME email, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
+| **DNS Provider** | Provider selector; credential fields update dynamically based on the selected provider |
+
+### DNS provider credential fields
+
+| Provider | Fields shown |
+|---|---|
+| Cloudflare | API Token + Zone ID (recommended), or Global Key + Email |
+| Porkbun | API Key + Secret API Key |
+| AWS Route 53 | Access Key ID + Secret Access Key + Region |
+| DigitalOcean | API Token |
+| GoDaddy | API Key + API Secret |
+
+Only the credential fields for the selected provider are submitted — fields for
+other providers are disabled in the browser before form submission.
+
+### Editing and deleting
+
+- Click **Edit** on any row to modify an existing server entry.
+- Click **Delete** to initiate an inline two-step confirmation (no browser popup).
+
+Server configurations are stored in `/opt/cppm-certs/servers.json` (container
+path `/data/certs/servers.json`), which is chmod 600 and persists across
+container rebuilds alongside the certificates.
+
+---
+
+### CLI server management
+
+All server operations are also available via the CLI without a browser:
 
 ```bash
-# Startup confirmation and any errors from the status server
+# List all configured servers (shows IDs needed for other commands)
+docker exec -it cppm-acme-cert-manager cppm-servers list
+
+# Add a new server (interactive prompts)
+docker exec -it cppm-acme-cert-manager cppm-servers add
+
+# Show full configuration for a server
+docker exec -it cppm-acme-cert-manager cppm-servers show <id>
+
+# Edit an existing server
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+
+# Delete a server
+docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
+```
+
+Secret values (client secret, cert passphrase, DNS credentials) are never
+echoed during input. The `show` command displays `(set)` or `(empty)` in place
+of secret field values.
+
+---
+
+## Admin user management
+
+Navigate to **Users** in the top navigation bar (sign-in required).
+
+| Action | How |
+|---|---|
+| **Add user** | Fill in the Add User form on the left |
+| **Change password** | Select a user from the dropdown in the Change Password form |
+| **Delete user** | Click Delete on the user row → confirm inline |
+
+You cannot delete your own account while signed in.
+
+### CLI user management
+
+All user operations are also available via the CLI:
+
+```bash
+# Add a user
+docker exec -it cppm-acme-cert-manager cppm-users add <username>
+
+# Change a password
+docker exec -it cppm-acme-cert-manager cppm-users passwd <username>
+
+# Delete a user
+docker exec -it cppm-acme-cert-manager cppm-users delete <username>
+
+# List all users
+docker exec -it cppm-acme-cert-manager cppm-users list
+```
+
+Passwords must be at least 8 characters. If the last user is deleted the
+setup wizard becomes available again on the next page load.
+
+### Dashboard server log
+
+```bash
+# Startup confirmation, HTTP request log, and any errors
 tail -50 /opt/cppm-certs/.logs/status_server.log
 ```
 
@@ -145,12 +323,6 @@ tail -10 /opt/cppm-certs/status.log
 2026-06-01 02:00:15 | FAILED | UPLOAD  | ClearPass upload failed (exit 1) – check upload.log
 ```
 
-### DNS provider credential error
-
-```
-2026-03-18 09:00:01 | FAILED | CERT    | PORKBUN_API_KEY is not set.
-```
-
 ---
 
 ## Detailed logs
@@ -170,7 +342,7 @@ tail -100 /opt/cppm-certs/.logs/upload.log
 # supercronic execution timestamps
 tail -50 /opt/cppm-certs/.logs/cron.log
 
-# Web status dashboard startup confirmation and errors
+# Web dashboard startup, HTTP request log, and errors
 tail -50 /opt/cppm-certs/.logs/status_server.log
 ```
 
@@ -214,7 +386,7 @@ openssl s_client -connect cppm.example.com:443 \
 docker exec -it cppm-acme-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
 ```
 
-The renewal log will also record the active provider on each issuance:
+The renewal log also records the active provider on each issuance:
 
 ```
 [ISSUE] Domain: cppm.example.com
