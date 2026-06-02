@@ -14,7 +14,7 @@ info() { echo -e "${YELLOW}[--]${NC}  $*"; }
 fail() { echo -e "${RED}[!!]${NC}  $*" >&2; exit 1; }
 
 echo "=============================================="
-echo " ClearPass Cert Manager – Host Setup"
+echo " ClearPass ACME Certificate Manager – Host Setup"
 echo "=============================================="
 echo ""
 
