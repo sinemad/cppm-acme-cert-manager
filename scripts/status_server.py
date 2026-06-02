@@ -679,7 +679,7 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_esc(title)} — CPPM Cert Manager</title>
+<title>{_esc(title)} — ClearPass ACME Certificate Manager</title>
 <style>{_CSS}</style>
 </head>
 <body>
@@ -694,7 +694,7 @@ def _login_page(error: str = "", username_val: str = "") -> str:
     return _base("Sign In", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass Cert Manager</div>
+    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
     <h1 class="auth-title">Sign In</h1>
     {err_html}
     <form method="POST" action="/login">
@@ -720,7 +720,7 @@ def _setup_page(error: str = "") -> str:
     return _base("First-Time Setup", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass Cert Manager</div>
+    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
     <h1 class="auth-title">First-Time Setup</h1>
     <p class="auth-desc">No admin users are configured yet. Create the initial
     administrator account to secure access to this interface.</p>
@@ -1827,7 +1827,7 @@ class Handler(BaseHTTPRequestHandler):
             if flash_ok:
                 html = _base("Sign In", f"""
 <div class="auth-wrap"><div class="auth-card">
-  <div class="auth-logo">ClearPass Cert Manager</div>
+  <div class="auth-logo">ClearPass ACME Certificate Manager</div>
   <h1 class="auth-title">Sign In</h1>
   <div class="flash flash-ok">{_esc(flash_ok)}</div>
   <form method="POST" action="/login">

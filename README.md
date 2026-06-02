@@ -14,7 +14,7 @@ Two certificates are issued and maintained simultaneously:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                      ClearPass Cert Manager Flow                         │
+│              ClearPass ACME Certificate Manager Flow                     │
 │                                                                          │
 │  ┌──────────────┐  DNS-01  ┌─────────────────┐                          │
 │  │   acme.sh    │◄────────►│  DNS Provider   │                          │
