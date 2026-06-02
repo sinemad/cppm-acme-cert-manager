@@ -435,6 +435,8 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 
 The main page shows a table with one row per configured ClearPass server.
 
+![Dashboard — multi-server overview](docs/ui-dashboard.png)
+
 | Column | What you see |
 |---|---|
 | **ClearPass Server** | Friendly label and host address |
@@ -448,6 +450,8 @@ the per-server detail view.
 
 ### Per-server detail view
 
+![Per-server detail view](docs/ui-server-detail.png)
+
 Shows the full certificate status for one server: cert cards with days
 remaining, expiry, issuer and key type; renewal schedule; Configuration card
 with service connectivity status lights for the DNS provider and ClearPass host;
@@ -455,6 +459,8 @@ and the last 40 activity log entries. Click **View Details** on a cert card to
 inspect the full decoded certificate with a PEM copy button.
 
 ### Servers page — ClearPass server configuration
+
+![Servers list](docs/ui-servers-list.png)
 
 The **Servers** page (sign-in required) is where you register ClearPass servers
 and configure their ACME and DNS provider settings. Each entry covers:

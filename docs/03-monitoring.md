@@ -34,6 +34,8 @@ On first access, no admin accounts exist. The navigation bar shows a **Setup**
 link. Click it — or navigate directly to `/setup` — to create the initial
 administrator account.
 
+![First-time setup page](ui-setup.png)
+
 **Requirements:** username (letters, digits, `-`, `_`, 1–64 chars) and a
 password of at least 8 characters.
 
@@ -48,6 +50,8 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 ---
 
 ## Authentication
+
+![Sign-in page](ui-login.png)
 
 | Behavior | Detail |
 |---|---|
@@ -85,12 +89,16 @@ configured yet the table shows a link to add the first one.
 
 Click any row or the **Details →** button to open the per-server detail view.
 
+![Dashboard — multi-server overview](ui-dashboard.png)
+
 ---
 
 ## Per-server detail view
 
 Navigate to a server's detail page by clicking **Details →** on the main
 dashboard, or directly via `/server/<id>`.
+
+![Per-server detail view](ui-server-detail.png)
 
 ### Panels
 
@@ -148,6 +156,8 @@ ACME and DNS provider configurations. Sign-in is required.
 
 Navigate to **Servers** in the top navigation bar.
 
+![Servers list page](ui-servers-list.png)
+
 ### Server list actions
 
 Each server row shows three action buttons:
@@ -161,6 +171,8 @@ Each server row shows three action buttons:
 ### Adding a server
 
 Click **+ Add Server** and fill in all fields.
+
+![Add Server form](ui-server-form.png)
 
 | Section | Fields |
 |---|---|
@@ -277,6 +289,8 @@ through the web UI when you are ready to move to per-server control.
 ## Admin user management
 
 Navigate to **Users** in the top navigation bar (sign-in required).
+
+![Admin user management page](ui-users.png)
 
 | Action | How |
 |---|---|
