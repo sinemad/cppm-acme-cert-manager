@@ -77,24 +77,23 @@ Two certificates are issued and maintained simultaneously:
 
 ## DNS Provider Support
 
-The ACME DNS-01 challenge is used for certificate issuance. Set `DNS_PROVIDER`
-in `.env` to select your provider.
+The ACME DNS-01 challenge is used for certificate issuance. Select the provider
+and enter credentials when adding or editing a server in the web UI
+(**Servers → Add Server / Edit**) or via `cppm-servers add`.
 
-| `DNS_PROVIDER` | Provider | Credentials required |
+| Provider | Selector value | Credentials required |
 |---|---|---|
-| `cloudflare` *(default)* | Cloudflare | `CF_Token` + `CF_Account_ID` + `CF_Zone_ID` |
-| `porkbun` | Porkbun | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
-| `route53` | AWS Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
-| `digitalocean` | DigitalOcean | `DO_API_KEY` |
-| `godaddy` | GoDaddy | `GD_Key` + `GD_Secret` |
-| *any* NOT SUPPORTED AND EXPERIMENTAL | [Any acme.sh dnsapi plugin](https://github.com/acmesh-official/acme.sh/wiki/dnsapi) | Plugin-specific variables |
+| Cloudflare *(default)* | `cloudflare` | API Token + Zone ID (or Global Key + Email) |
+| Porkbun | `porkbun` | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
+| AWS Route 53 | `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| DigitalOcean | `digitalocean` | `DO_API_KEY` |
+| GoDaddy | `godaddy` | `GD_Key` + `GD_Secret` |
+| Any acme.sh dnsapi plugin *(experimental)* | plugin name without `dns_` prefix | Plugin-specific variables |
 
-```
-## NOT SUPPORTED & EXPERIMENTAL
-For any provider not in the list above, set `DNS_PROVIDER` to the plugin name
-without the `dns_` prefix (e.g. `DNS_PROVIDER=linode_v4` invokes `dns_linode_v4`)
-and ensure the plugin's credential variables are present in `.env`.
-```
+For custom providers, enter the plugin name (e.g. `linode_v4` for `dns_linode_v4`)
+in the DNS Provider field and add the required credential variables. See the
+[acme.sh dnsapi docs](https://github.com/acmesh-official/acme.sh/wiki/dnsapi)
+for the full list.
 ---
 
 ## Directory Structure
@@ -104,7 +103,6 @@ cppm-acme-cert-manager/
 ├── Dockerfile                  # Alpine + acme.sh + Python image
 ├── docker-compose.yml          # Service definition, volume and port mapping
 ├── env-example                 # Safe-to-commit reference — copy to .env
-├── .gitignore
 ├── setup.sh                    # One-time host preparation script
 ├── config/
 │   └── crontab                 # Renewal schedule (supercronic, inside container)
@@ -176,64 +174,30 @@ chmod +x setup.sh && ./setup.sh
 `setup.sh` verifies Docker, creates `/opt/cppm-certs`, and copies `env-example`
 to `.env` if it does not already exist.
 
-### 2. DNS provider credentials
+### 2. Configure `.env`
 
-**Cloudflare (default)**
+`.env` controls **container-level behaviour only** — ports, timezone, and
+operational flags. ClearPass credentials, DNS provider, domain, and ACME
+settings are configured through the web UI after the container starts.
 
-Create a scoped API token:
-
-1. [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → **Create Token → Custom token**
-2. Set **Permissions:** `Zone → DNS → Edit`
-3. Set **Zone Resources:** `Include → Specific zone → <your zone>`
-4. Copy the token and note your **Account ID** and **Zone ID** (Zone Overview page)
-
-```ini
-DNS_PROVIDER=cloudflare
-CF_Token=<scoped-api-token>
-CF_Account_ID=<account-id>
-CF_Zone_ID=<zone-id>
+```bash
+nano .env
 ```
 
-**Porkbun**
-
-1. [Porkbun](https://porkbun.com/account/api) → Create API key
-2. Enable API access on the domain under Domain Management
-
 ```ini
-DNS_PROVIDER=porkbun
-PORKBUN_API_KEY=pk1_...
-PORKBUN_SECRET_API_KEY=sk1_...
+TZ=America/New_York          # container timezone for logs and cron
+STATUS_PORT=8080             # web UI port (must match docker-compose.yml)
+CPPM_CALLBACK_PORT=8765      # PKCS12 delivery port (must match docker-compose.yml)
+REQUIRE_AUTH_FOR_STATUS=false
 ```
 
-**Route53 / AWS**
-
-IAM policy required: `route53:ChangeResourceRecordSets`, `route53:ListHostedZones`,
-`route53:GetChange`, `route53:ListResourceRecordSets`
-
-```ini
-DNS_PROVIDER=route53
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
+```bash
+chmod 600 .env
 ```
 
-**DigitalOcean**
+### 3. Create the ClearPass API client
 
-```ini
-DNS_PROVIDER=digitalocean
-DO_API_KEY=dop_v1_...
-```
-
-**GoDaddy**
-
-```ini
-DNS_PROVIDER=godaddy
-GD_Key=...
-GD_Secret=...
-```
-
-### 3. ClearPass API client
-
-1. CPPM Admin UI → Dashboard → ClearPass Guest → **Administration → API Services → API Clients → Add**
+1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
 2. Configure:
 
    | Field | Value |
@@ -250,41 +214,7 @@ GD_Secret=...
 > Administration → Operator Logins → Operator Profiles → Add
 > Enable **Allow → All → Certificate Management**
 
-### 4. Configure `.env`
-
-```bash
-cp env-example .env
-chmod 600 .env
-nano .env
-```
-
-Minimum required values (Cloudflare example):
-
-```ini
-# DNS
-DNS_PROVIDER=cloudflare
-CF_Token=<scoped-api-token>
-CF_Account_ID=<account-id>
-CF_Zone_ID=<zone-id>
-
-# ACME
-DOMAIN=cppm.example.com
-ACME_EMAIL=admin@example.com
-ACME_SERVER=letsencrypt
-
-# ClearPass
-CPPM_HOST=cppm.example.com
-CPPM_CLIENT_ID=cppm-acme-cert-manager
-CPPM_CLIENT_SECRET=<secret>
-CPPM_VERIFY_SSL=false
-
-# Callback — Docker host LAN IP that CPPM can reach (NOT the container IP)
-# Find it: ip route get <cppm-ip>  (look for 'src X.X.X.X')
-CPPM_CALLBACK_HOST=<host-lan-ip>
-CPPM_CALLBACK_PORT=8765
-```
-
-### 5. Build and start
+### 4. Build and start
 
 ```bash
 docker compose build --no-cache
@@ -292,15 +222,92 @@ docker compose up -d
 docker compose logs -f
 ```
 
-**Expected first-run sequence:**
+On first start with no servers configured the container logs a warning and
+waits — this is expected:
+
+```
+[WARN ] No servers configured.
+[WARN ]   Add one via the web UI after startup: http://<host>:8080/settings
+[INFO ] Starting status web server on port 8080
+[INFO ] Startup complete
+```
+
+### 5. Create the admin account
+
+**Web UI:**
+
+1. Open `http://<docker-host>:8080/` in a browser.
+2. Click **Setup** in the navigation bar (visible only before any users exist).
+3. Enter a username and a password of at least 8 characters.
+4. Click **Create Admin Account** and sign in.
+
+**CLI:**
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-users add admin
+```
+
+### 6. Add your ClearPass server
+
+All per-server configuration — ClearPass host, API credentials, DNS provider,
+domain, and ACME settings — is entered here and stored in `servers.json`.
+
+#### Web UI method
+
+1. Navigate to **Servers → + Add Server**.
+2. Fill in all sections and click **Add Server**.
+
+| Section | Fields |
+|---|---|
+| **Identity** | Friendly label (e.g. `Production ClearPass`) |
+| **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **Domain & ACME** | Domain, ACME email, Certificate Authority |
+| **DNS Provider** | Provider selector + credentials (see table below) |
+
+#### CLI method
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-servers add
+```
+
+Interactive prompts walk through the same fields. Secret values are entered
+with `getpass` (not echoed).
+
+#### DNS provider credentials
+
+| Provider | Credentials needed |
+|---|---|
+| **Cloudflare** | API Token + Zone ID — create at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with `Zone:DNS:Edit` on the target zone |
+| **Porkbun** | API Key + Secret API Key — enable API access per-domain at [porkbun.com/account/api](https://porkbun.com/account/api) |
+| **AWS Route 53** | Access Key ID + Secret Access Key — IAM policy needs `route53:ChangeResourceRecordSets`, `ListHostedZones`, `GetChange`, `ListResourceRecordSets` |
+| **DigitalOcean** | API Token with Write scope — generate at [cloud.digitalocean.com/account/api/tokens](https://cloud.digitalocean.com/account/api/tokens) |
+| **GoDaddy** | API Key + API Secret — create at [developer.godaddy.com/keys](https://developer.godaddy.com/keys) |
+
+> **Callback Host:** set this to the Docker host's LAN IP that ClearPass can
+> route to — not the container IP. Find it with:
+> ```bash
+> ip route get <cppm-ip>   # look for 'src X.X.X.X'
+> ```
+
+### 7. Trigger first-run certificate issuance
+
+After saving the first server, restart the container so it picks up the new
+configuration and issues the certificates:
+
+```bash
+docker compose restart
+docker compose logs -f
+```
+
+Expected first-run sequence:
 
 ```
 [INFO ] No certificates found – starting first-time issuance
-[ISSUE] Issuing ECC (ec-256) certificate via cloudflare DNS-01
-[ISSUE] Issuing RSA (2048) certificate via cloudflare DNS-01
+[ISSUE] Issuing ECC (ec-256) certificate via <provider> DNS-01
+[ISSUE] Issuing RSA (2048) certificate via <provider> DNS-01
 [OK   ] New certificates issued (ECC + RSA)
 [OK   ] ECC+RSA certs installed – expires <date>
-[OK   ] 7 LE CA certs verified – 7 uploaded, 0 already trusted
+[OK   ] CA certs verified – uploaded to trust list
 [OK   ] ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
 [INFO ] supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
@@ -567,26 +574,25 @@ docker compose up -d --force-recreate
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
-### Switch DNS provider
+### Switch DNS provider or ACME server
 
-Update `.env` with the new `DNS_PROVIDER` and its credentials, then recreate:
+Update the server entry in the web UI — no container restart needed:
+
+**Servers → Edit → change DNS Provider or Certificate Authority → Save Changes**
+
+Or via CLI:
 
 ```bash
-# Example: switch to Porkbun
-# Edit .env:
-#   DNS_PROVIDER=porkbun
-#   PORKBUN_API_KEY=pk1_...
-#   PORKBUN_SECRET_API_KEY=sk1_...
-docker compose up -d --force-recreate
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 ```
 
 Existing certificates on the volume are unaffected — only new issuances and
-renewals use the new provider.
+renewals use the updated settings.
 
 ### Trust list management
 
-The container automatically verifies that all required Let's Encrypt CA and
-intermediate CA certificates are present in the ClearPass trust list:
+The container automatically verifies that all required ACME CA and intermediate
+CA certificates are present in the ClearPass trust list:
 
 | Trigger | When | What runs |
 |---|---|---|
@@ -600,29 +606,35 @@ intermediate CA certificates are present in the ClearPass trust list:
 docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 ```
 
-**Exclude specific CA or intermediate certs from upload:**
+**Exclude specific CA certificates per server (recommended):**
 
-Edit `trust-exclusions.conf` on the host — changes take effect immediately
-at the next trust check without restarting the container:
+Configure in the web UI — **Servers → Trust Exclusions** on the server row.
+Check the certificates to exclude, then click **Save Exclusions**. Takes
+effect at the next trust check with no restart required.
+
+**Global fallback file** (applies to servers with no per-server exclusions):
 
 ```bash
 nano /opt/cppm-certs/trust-exclusions.conf
 ```
 
 Each non-comment line is a case-insensitive partial match against the
-certificate's Subject CN. For example, adding `R11` excludes
-`CN=R11, O=Let's Encrypt, C=US`. The file is self-documented with a full
-header explaining all options.
+certificate Subject CN. The per-server web UI setting always takes precedence
+over this file.
 
 ---
 
 ### Enable SSL verification
 
-After the Let's Encrypt cert is installed and trusted:
+After the certificate is installed and trusted by CPPM:
+
+**Servers → Edit → Verify SSL → enable → Save Changes**
+
+Or via CLI:
 
 ```bash
-# Edit .env: CPPM_VERIFY_SSL=true
-docker compose up -d --force-recreate
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+# Toggle: Verify SSL (enable after initial cert install) → yes
 ```
 
 ### Rebuild the image (cert data preserved)
@@ -643,8 +655,10 @@ docker compose up -d
 docker compose logs | grep -E "ERROR|Missing"
 ```
 
-Check that `DNS_PROVIDER` is set and the required credentials for that provider
-are present in `.env`.
+Check that `STATUS_PORT`, `CPPM_CALLBACK_PORT`, and `TZ` are set in `.env`.
+If no servers are configured the container logs a warning but stays running —
+add a server via the web UI (**Servers → + Add Server**) or CLI
+(`cppm-servers add`), then restart.
 
 ### DNS-01 challenge fails
 
@@ -719,15 +733,14 @@ If entries still fail, add them manually:
 **Administration → Certificates → Trust List → Import** — enable **EAP** and
 **Others** for each entry.
 
-### Let's Encrypt rate limit
+### ACME rate limit hit
 
-Switch to staging for testing:
-```bash
-# Edit .env: ACME_SERVER=letsencrypt_test
-docker compose up -d --force-recreate
-```
+Switch to staging for testing via the web UI:
+**Servers → Edit → Certificate Authority → Let's Encrypt (Staging) → Save Changes**,
+then force a re-issue (`FORCE_RENEW=true` in `.env`, recreate, then reset to `false`).
 
-Switch back to `letsencrypt` and wait 7 days before re-issuing if rate-limited.
+Switch back to **Let's Encrypt** in the server edit form and wait 7 days before
+re-issuing production certs.
 
 ---
 
@@ -736,14 +749,15 @@ Switch back to `letsencrypt` and wait 7 days before re-issuing if rate-limited.
 | Item | Recommendation |
 |---|---|
 | `.env` permissions | `chmod 600 .env` — readable by root only |
+| `servers.json` permissions | Automatically `chmod 600` — contains credentials |
 | `/opt/cppm-certs` permissions | `chmod 750` |
 | Private keys | Never leave the host; PKCS12 export is ephemeral in `/tmp` |
-| `CPPM_CERT_PASSPHRASE` | Change from default; used transiently only |
-| `CPPM_VERIFY_SSL` | Set `true` after initial cert install |
+| Cert passphrase | Set a strong passphrase per server in the web UI; used transiently only |
+| Verify SSL | Enable per server in the web UI after the initial cert is installed |
 | API client scope | Use a dedicated Operator Profile with Certificate Management only |
 | Cloudflare token scope | Restrict to the specific zone, `DNS:Edit` only |
 | Other DNS providers | Apply least-privilege: zone-specific where supported |
-| Secrets in Docker | Managed via `.env`; never hard-coded in `Dockerfile` |
+| Secrets in Docker | Stored in `servers.json` on the persistent volume; never hard-coded |
 
 ---
 

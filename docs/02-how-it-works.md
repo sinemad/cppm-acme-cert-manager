@@ -2,26 +2,34 @@
 
 ## Startup Decision Tree
 
-Every time the container starts, `entrypoint.sh` evaluates the current state
-of the certificates and takes only the minimum action required.
+Every time the container starts, `entrypoint.sh` runs a one-time migration
+check (`migrate_from_env`) to auto-populate `servers.json` from any legacy
+`.env` configuration, then iterates over every server in `servers.json`.
 
 ```
 Container starts
 │
-├─ FORCE_RENEW=true in .env?
-│    YES → Issue both certs (--force) → Install flat files → Upload to CPPM
+├─ servers.json empty?
+│    YES → Warn. Start web server and supercronic anyway.
+│          Add a server via web UI or `cppm-servers add`, then restart.
 │
-├─ <domain>.ecc.cer AND <domain>.rsa.cer both exist?
-│    YES → Log subject + expiry. Start supercronic. NOTHING ELSE.
-│          This is the normal path on every restart after initial setup.
-│
-├─ acme.sh internal state has both certs but flat files are missing?
-│   (happens after a container rebuild before --install-cert ran)
-│    YES → --install-cert only → Upload to CPPM
-│          No DNS challenge. No contact with Let's Encrypt.
-│
-└─ No certificates found (true first run or partial state)
-      → Cloudflare DNS-01 challenge → Issue ECC + RSA → Install → Upload to CPPM
+└─ For each server in servers.json:
+       │
+       ├─ FORCE_RENEW=true in .env?
+       │    YES → Issue both certs (--force) → Install flat files → Upload to CPPM
+       │
+       ├─ <domain>.ecc.cer AND <domain>.rsa.cer both exist?
+       │    YES → Log subject + expiry. NOTHING ELSE.
+       │          This is the normal path on every restart after initial setup.
+       │
+       ├─ acme.sh internal state has both certs but flat files are missing?
+       │   (happens after a container rebuild before --install-cert ran)
+       │    YES → --install-cert only → Upload to CPPM
+       │          No DNS challenge. No contact with the ACME CA.
+       │
+       └─ No certificates found (true first run or partial state)
+              → DNS-01 challenge via configured provider → Issue ECC + RSA
+              → Install → Upload to CPPM
 ```
 
 ---
@@ -32,8 +40,8 @@ Container starts
 entrypoint.sh
     └── issue_cert.sh
             │
-            ├── acme.sh --issue --keylength ec-256   ECC via Cloudflare DNS-01
-            ├── acme.sh --issue --keylength 2048      RSA via Cloudflare DNS-01
+            ├── acme.sh --issue --keylength ec-256   ECC via <provider> DNS-01
+            ├── acme.sh --issue --keylength 2048      RSA via <provider> DNS-01
             │
             └── install_cert.sh
                     │
@@ -45,8 +53,10 @@ entrypoint.sh
                             └── clearpass_upload.py  (pyclearpass SDK)
                                     │
                                     ├── Step 0: Trust List Pre-flight
-                                    │     ├── Load bundled LE CA certs from image
+                                    │     ├── Load bundled ACME CA certs from image
                                     │     ├── Parse acme.sh ECC CA chain
+                                    │     ├── Apply trust exclusions (per-server from
+                                    │     │   servers.json, or global trust-exclusions.conf)
                                     │     ├── Compute SHA-256 fingerprints from
                                     │     │   cert_file PEM in each trust list entry
                                     │     ├── get_cert_trust_list()
@@ -128,8 +138,8 @@ The CPPM trust list response includes only `id`, `cert_file`, `enabled`,
 `cert_usage`, and `_links` — no fingerprint or subject field. The script
 computes SHA-256 fingerprints from the `cert_file` PEM in each entry using
 `openssl x509 -fingerprint -sha256`, building a lookup map to match against
-the LE CA certs. This allows reliable detection of existing entries and
-accurate flag checking before any PATCH or POST is attempted.
+the bundled ACME CA certs. This allows reliable detection of existing entries
+and accurate flag checking before any PATCH or POST is attempted.
 
 **POST body schema:**
 ```json
@@ -269,7 +279,7 @@ Runtime network access:
 
 | Destination | Purpose | When |
 |---|---|---|
-| `api.cloudflare.com` | DNS-01 challenge | Issuance and renewal only |
-| `acme-v02.api.letsencrypt.org` | ACME protocol | Issuance and renewal only |
-| `cppm.example.com` | ClearPass REST API | After every issuance/renewal |
+| DNS provider API (e.g. `api.cloudflare.com`) | DNS-01 challenge TXT record | Issuance and renewal only |
+| ACME CA (e.g. `acme-v02.api.letsencrypt.org`) | Certificate issuance protocol | Issuance and renewal only |
+| `<CPPM_HOST>` | ClearPass REST API | After every issuance/renewal |
 | `<CPPM_CALLBACK_HOST>:<CPPM_CALLBACK_PORT>` | PKCS12 fetch (inbound from CPPM) | During cert upload only |

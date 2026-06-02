@@ -9,14 +9,20 @@ the project directory.
 
 **Called by:** Docker on container start — never call manually.
 
-Runs the certificate state decision tree, seeds acme.sh state, registers
-the ACME account, and starts supercronic.
-
-Decision order:
-1. `FORCE_RENEW=true` → `issue_cert.sh`
-2. Flat `.cer` file exists → log expiry, start supercronic, nothing else
-3. acme.sh internal cert exists, flat files missing → `install_cert.sh`
-4. No cert anywhere → `issue_cert.sh`
+On startup:
+1. Seeds the acme.sh state directory from the image default.
+2. Runs `migrate_from_env()` — if `servers.json` is empty and legacy `.env`
+   server vars are present, auto-migrates them into `servers.json` (one-time).
+3. Iterates over each server in `servers.json`, exporting per-server
+   environment variables via `eval "$(cppm-servers env <id>)"`.
+4. For each server, runs the certificate state decision tree:
+   - `FORCE_RENEW=true` → `issue_cert.sh`
+   - Flat `.cer` files exist → log expiry, nothing else
+   - acme.sh state exists but flat files missing → `install_cert.sh`
+   - No cert found → `issue_cert.sh`
+5. Seeds `trust-exclusions.conf` to the volume if not already present.
+6. Starts `status_server.py` in the background.
+7. `exec supercronic` (becomes PID 1 subprocess).
 
 ---
 
@@ -24,10 +30,11 @@ Decision order:
 
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/issue_cert.sh`
 
-Runs `acme.sh --issue` with the Cloudflare DNS-01 plugin.
+Runs `acme.sh --issue` with the DNS provider configured for the current
+server (set via `eval "$(cppm-servers env <id>)"` before invocation).
 
 - Exit 0 → new cert issued, calls `install_cert.sh`
-- Exit 2 → cert in acme.sh state, not due — calls `install_cert.sh` without contacting Let's Encrypt
+- Exit 2 → cert in acme.sh state, not due — calls `install_cert.sh` without contacting the ACME CA
 - Other → logs error and exits non-zero
 
 ---
@@ -178,16 +185,17 @@ as a sanity check.
 **Called by:** supercronic every Sunday at 03:00 container-local time.
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh`
 
-Verifies that every required Let's Encrypt CA and intermediate CA certificate
-is present in the ClearPass trust list, and uploads any that are missing —
-without issuing or renewing certificates.
+Iterates over every server in `servers.json`. For each server, verifies that
+every required ACME CA and intermediate CA certificate is present in the
+ClearPass trust list and uploads any that are missing — without issuing or
+renewing certificates.
 
 Behaviour:
-1. Exits cleanly if the domain certificates have not yet been issued.
+1. Skips a server if its domain certificates have not yet been issued.
 2. Calls `clearpass_upload.py --only-trust-check` with both the ECC and RSA
-   CA chain paths, so intermediates unique to either chain (e.g. R13 in the
-   RSA chain) are always checked.
-3. Respects `trust-exclusions.conf` — excluded certs are silently skipped.
+   CA chain paths, so intermediates unique to either chain are always checked.
+3. Applies trust exclusions: per-server exclusions from `servers.json` take
+   precedence; falls back to `trust-exclusions.conf` if none are configured.
 4. Appends output to `/data/certs/.logs/upload.log` and writes a `TRUST`
    entry to `status.log`.
 
@@ -195,7 +203,7 @@ Behaviour:
 
 ## trust-exclusions.conf
 
-**Location (persistent, admin-editable):**
+**Global fallback file (admin-editable):**
 ```
 /opt/cppm-certs/trust-exclusions.conf   (host path)
 /data/certs/trust-exclusions.conf       (container path)
@@ -206,27 +214,33 @@ Behaviour:
 /opt/cppm/acme-ca-certs/trust-exclusions.conf
 ```
 
-Controls which Let's Encrypt CA and intermediate CA certificates are excluded
-from all trust list operations (both post-renewal uploads and weekly checks).
-Excluded certificates are silently skipped — they are never uploaded, never
-patched, and no error is raised if they are absent from the trust list.
+**Priority:** Per-server exclusions configured in the web UI
+(**Servers → Trust Exclusions**) and stored in `servers.json` always take
+precedence. This file is only read when a server has no per-server exclusions
+configured — it acts as a global fallback for backwards compatibility.
+
+Controls which ACME CA and intermediate CA certificates are excluded from all
+trust list operations (both post-renewal uploads and weekly checks). Excluded
+certificates are silently skipped — they are never uploaded, never patched,
+and no error is raised if they are absent from the trust list.
 
 The file is seeded to the persistent volume by `entrypoint.sh` on first start.
-Edit the host-side copy — changes take effect immediately at the next scheduled
-or manual trust check without restarting the container.
+Edit the host-side copy — changes take effect at the next scheduled or manual
+trust check without restarting the container.
 
 **Format:** one entry per line, matched case-insensitively as a partial
 substring against the certificate's Subject CN. Lines starting with `#` are
-comments. See the file's header for full documentation and examples.
+comments.
 
 ```
-# Example: exclude R11 if it is already managed by a separate process
+# Exclude R11 — already managed separately in this environment
 R11
 
-# Example: exclude both ECDSA roots
-ISRG Root X2
+# Exclude ECDSA intermediates — RADIUS uses RSA-only EAP
 E5
 E6
+E7
+E8
 ```
 
 ---
@@ -236,19 +250,81 @@ E6
 **Started by:** `entrypoint.sh` as a background process before `exec supercronic`.
 **Never call manually** — it runs for the lifetime of the container.
 
-Serves a read-only HTTP dashboard on `STATUS_PORT` (default `8080`):
+Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 
-| Endpoint | Description |
-|---|---|
-| `GET /` | HTML dashboard (self-contained, no CDN) |
-| `GET /api/status` | JSON payload consumed by the dashboard |
+| Route | Auth required | Description |
+|---|---|---|
+| `GET /` | No (configurable) | Multi-server certificate dashboard |
+| `GET /server/<id>` | No (configurable) | Per-server detail with connectivity status |
+| `GET /settings` | Yes | ClearPass server list — add, edit, delete |
+| `GET /settings/add` | Yes | Add server form |
+| `GET /settings/edit/<id>` | Yes | Edit server form |
+| `GET /settings/trust-exclusions/<id>` | Yes | Per-server trust exclusion configuration |
+| `GET /admin/users` | Yes | Admin user management |
+| `GET /api/status` | No (configurable) | JSON status payload |
+| `GET /api/status/<id>` | No (configurable) | JSON status for one server |
 
-The JSON payload includes cert details (expiry, issuer, key type, days remaining,
-raw PEM), the next scheduled renewal check time, active configuration (domain,
-DNS provider, ACME CA, ClearPass host), and the last 40 entries from
-`status.log`.
+All server configuration (ClearPass credentials, DNS provider, domain, ACME
+settings, trust exclusions) is stored in `/data/certs/servers.json` and
+managed through these routes. Admin credentials are stored in
+`/data/certs/admin.htpasswd` (bcrypt). Sessions are HMAC-SHA256 signed cookies
+using a secret in `/data/certs/.session-secret`.
 
 Logs to `/data/certs/.logs/status_server.log`.
+
+---
+
+## config_utils.py
+
+**Used by:** `status_server.py`, `cppm_acme_manager_servers.py`, all shell scripts (via `cppm-servers env`).
+**Never call directly.**
+
+Python module providing the `servers.json` CRUD layer:
+
+| Function | Description |
+|---|---|
+| `load_servers()` | Return all server entries as a list |
+| `get_server(id)` | Return a single server entry by UUID |
+| `add_server(entry)` | Validate, check for duplicate host, write |
+| `update_server(id, entry)` | Replace an existing entry |
+| `delete_server(id)` | Remove an entry |
+| `get_server_shell_env(id)` | Return `export KEY='VALUE'` lines for `eval` in shell scripts |
+| `migrate_from_env()` | One-time migration: reads legacy `.env` vars, writes first `servers.json` entry |
+
+---
+
+## cppm_acme_manager_servers.py (cppm-servers)
+
+**Symlinked to:** `/usr/local/bin/cppm-servers`
+**Usage:** `docker exec -it cppm-acme-cert-manager cppm-servers <command>`
+
+CLI tool for managing ClearPass server entries in `servers.json`.
+
+| Command | Description |
+|---|---|
+| `list` | Show all configured servers with ID, label, host, domain, DNS, and ACME CA |
+| `ids` | Print one UUID per line — used internally by shell scripts |
+| `show <id>` | Show full configuration; secrets displayed as `(set)` / `(empty)` |
+| `add` | Interactive prompts to add a new server entry |
+| `edit <id>` | Interactive prompts to edit an existing entry; Enter keeps current value |
+| `delete <id>` | Prompt for confirmation then delete |
+| `env <id>` | Print shell-sourceable `export KEY='VALUE'` lines — used by `entrypoint.sh`, `renew.sh`, `trust_check.sh` |
+
+---
+
+## cppm_acme_manager_users.py (cppm-users)
+
+**Symlinked to:** `/usr/local/bin/cppm-users`
+**Usage:** `docker exec -it cppm-acme-cert-manager cppm-users <command>`
+
+CLI tool for managing web UI admin accounts stored in `admin.htpasswd`.
+
+| Command | Description |
+|---|---|
+| `list` | Show all usernames |
+| `add <username>` | Create a new user (prompts for password twice) |
+| `passwd <username>` | Change an existing user's password |
+| `delete <username>` | Delete a user (cannot delete your own account) |
 
 ---
 
@@ -263,21 +339,43 @@ Provides `status_write LEVEL CATEGORY MESSAGE` which writes to
 
 ## Environment variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DOMAIN` | Yes | — | FQDN for the certificate |
-| `ACME_EMAIL` | Yes | — | Let's Encrypt account email |
-| `ACME_SERVER` | No | `letsencrypt` | ACME CA (`letsencrypt`, `letsencrypt_test`, `zerossl`) |
-| `CF_Token` | Yes | — | Cloudflare scoped API token |
-| `CF_Account_ID` | Yes | — | Cloudflare account ID |
-| `CF_Zone_ID` | Yes | — | Cloudflare zone ID for the domain |
-| `CPPM_HOST` | Yes | — | ClearPass hostname |
-| `CPPM_CLIENT_ID` | Yes | — | ClearPass API client ID |
-| `CPPM_CLIENT_SECRET` | Yes | — | ClearPass API client secret |
-| `CPPM_VERIFY_SSL` | No | `false` | Verify CPPM TLS cert (`true` after install) |
-| `CPPM_CERT_PASSPHRASE` | No | `ChangeMe!` | PKCS12 export passphrase (transient, used in fallback only) |
-| `FORCE_RENEW` | No | `false` | Force re-issue on next start |
-| `SKIP_UPLOAD` | No | `false` | Disable ClearPass upload |
-| `LOG_LEVEL` | No | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `STATUS_PORT` | No | `8080` | Port for the web status dashboard |
-| `TZ` | No | `UTC` | Container timezone (also controls renewal schedule display) |
+Variables are split into two categories depending on where they are configured.
+
+### Set in `.env` — container-level
+
+These control Docker-level behaviour and must be known before the container
+starts. They apply to the whole container, not to individual servers.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TZ` | `UTC` | Container timezone — used in log timestamps and cron scheduling |
+| `STATUS_PORT` | `8080` | Web UI port (must match the host-side port in `docker-compose.yml`) |
+| `CPPM_CALLBACK_PORT` | `8765` | PKCS12 delivery port (must match host-side port in `docker-compose.yml`) |
+| `REQUIRE_AUTH_FOR_STATUS` | `false` | Require login to view the certificate dashboard |
+| `SESSION_LIFETIME_HOURS` | `8` | Web UI session cookie lifetime in hours |
+| `FORCE_RENEW` | `false` | Force certificate re-issuance on the next container start |
+| `SKIP_UPLOAD` | `false` | Issue/renew certificates without uploading to ClearPass |
+| `LOG_LEVEL` | `INFO` | Python log level for `clearpass_upload.py` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+### Set per server in `servers.json` — managed via web UI or CLI
+
+These are stored in `servers.json` and exported into the shell environment
+by `eval "$(cppm-servers env <id>)"` before each server's cert pipeline runs.
+Configure them through the web UI (**Servers → Add/Edit Server**) or via
+`cppm-servers add` / `cppm-servers edit <id>`.
+
+| Variable | Description |
+|---|---|
+| `DOMAIN` | FQDN for the certificate (e.g. `cppm.example.com`) |
+| `ACME_EMAIL` | ACME account contact email |
+| `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass` |
+| `DNS_PROVIDER` | acme.sh DNS plugin selector (e.g. `cloudflare`, `porkbun`, `route53`) |
+| `CPPM_HOST` | ClearPass hostname or IP |
+| `CPPM_CLIENT_ID` | ClearPass API client ID |
+| `CPPM_CLIENT_SECRET` | ClearPass API client secret |
+| `CPPM_VERIFY_SSL` | `true` / `false` — verify CPPM TLS certificate |
+| `CPPM_CERT_PASSPHRASE` | PKCS12 export passphrase (transient — never stored on disk) |
+| `CPPM_CALLBACK_HOST` | Docker host LAN IP that ClearPass can route to |
+| `CPPM_CALLBACK_PORT` | Mirrors the container-level value for per-server use |
+| `TRUST_EXCLUSIONS` | Newline-separated CA CN patterns to exclude from trust list operations |
+| `CF_Token`, `CF_Zone_ID`, … | DNS provider credentials — keys vary by provider |
