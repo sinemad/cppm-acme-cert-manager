@@ -76,19 +76,19 @@ def status_write(level: str, category: str, message: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bundled LE CA certs
+# Bundled ACME CA certs
 # ─────────────────────────────────────────────────────────────────────────────
-LE_CERT_DIR = Path(os.environ.get("LE_CERT_DIR", "/opt/cppm/le-certs"))
+ACME_CA_CERT_DIR = Path(os.environ.get("ACME_CA_CERT_DIR", "/opt/cppm/acme-ca-certs"))
 
-# No hardcoded list — load_bundled_le_certs() scans the whole directory so
-# any intermediate downloaded at image build time is automatically included.
+# No hardcoded list — load_bundled_acme_certs() scans the whole directory so
+# any CA cert downloaded at image build time is automatically included.
 
 # Trust exclusion config — first file found wins.
 # The volume copy at /data/certs/ is seeded by entrypoint.sh and is editable
 # by the admin without rebuilding the image.
 TRUST_EXCLUSIONS_PATHS: list[Path] = [
     Path("/data/certs/trust-exclusions.conf"),       # persistent volume, admin-editable
-    Path("/opt/cppm/le-certs/trust-exclusions.conf"), # image default
+    Path("/opt/cppm/acme-ca-certs/trust-exclusions.conf"), # image default
 ]
 
 
@@ -96,15 +96,25 @@ def load_trust_exclusions() -> set[str]:
     """
     Return the set of lower-case CN patterns to exclude from trust list operations.
 
-    Reads the first trust-exclusions.conf that exists (volume copy preferred over
-    image default).  Each non-comment line is treated as a case-insensitive
-    partial match against the certificate's Subject CN.
+    Checks TRUST_EXCLUSIONS env var first (set per-server via servers.json / eval loop).
+    Falls back to the first trust-exclusions.conf file found on disk for backwards
+    compatibility with manual file-based configuration.
     """
+    env_val = os.environ.get("TRUST_EXCLUSIONS", "").strip()
+    if env_val:
+        exclusions: set[str] = set()
+        for raw in env_val.splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#"):
+                exclusions.add(line.lower())
+                log.info("  Will exclude CN matching (from servers.json): %r", line)
+        return exclusions
+
     for path in TRUST_EXCLUSIONS_PATHS:
         if not path.is_file():
             continue
         log.info("Trust exclusion config: %s", path)
-        exclusions: set[str] = set()
+        exclusions = set()
         try:
             for raw in path.read_text(encoding="utf-8").splitlines():
                 line = raw.strip()
@@ -115,7 +125,7 @@ def load_trust_exclusions() -> set[str]:
         except OSError as exc:
             log.warning("Cannot read trust exclusions from %s: %s", path, exc)
         return exclusions
-    log.debug("No trust-exclusions.conf found; no certs excluded.")
+    log.debug("No trust exclusions configured; no certs excluded.")
     return set()
 
 
@@ -206,22 +216,22 @@ def _normalise_fp(fp: str) -> str:
     return fp.upper()
 
 
-def load_bundled_le_certs() -> dict[str, CertInfo]:
+def load_bundled_acme_certs() -> dict[str, CertInfo]:
     """
-    Load every .pem file in LE_CERT_DIR and return a fingerprint-keyed dict.
+    Load every .pem file in ACME_CA_CERT_DIR and return a fingerprint-keyed dict.
 
     Scanning the directory (rather than a hardcoded list) means any intermediate
     downloaded at image build time — including future batches like R13/R14/E9/E10 —
     is automatically included without code changes.
     """
     required: dict[str, CertInfo] = {}
-    if not LE_CERT_DIR.is_dir():
-        log.error("Bundled LE cert dir not found: %s – rebuild the image.", LE_CERT_DIR)
+    if not ACME_CA_CERT_DIR.is_dir():
+        log.error("Bundled LE cert dir not found: %s – rebuild the image.", ACME_CA_CERT_DIR)
         return required
 
-    pem_files = sorted(LE_CERT_DIR.glob("*.pem"))
+    pem_files = sorted(ACME_CA_CERT_DIR.glob("*.pem"))
     if not pem_files:
-        log.warning("No PEM files found in %s – rebuild the image.", LE_CERT_DIR)
+        log.warning("No PEM files found in %s – rebuild the image.", ACME_CA_CERT_DIR)
         return required
 
     for pem_path in pem_files:
@@ -243,7 +253,7 @@ def load_bundled_le_certs() -> dict[str, CertInfo]:
                           cert.label, pem_path.name, cert.not_after)
 
     log.info("Loaded %d bundled LE CA certs from %s (%d files scanned)",
-             len(required), LE_CERT_DIR, len(pem_files))
+             len(required), ACME_CA_CERT_DIR, len(pem_files))
     return required
 
 
@@ -341,7 +351,7 @@ def ensure_letsencrypt_chain_trusted(
     }
 
     # Build required cert set: bundled image certs + acme.sh chain extras
-    required = load_bundled_le_certs()
+    required = load_bundled_acme_certs()
 
     # Parse every CA chain supplied (ECC + RSA) so intermediates unique to
     # either chain — e.g. R13 in the RSA chain when ECC uses E6 — are all found.
@@ -912,7 +922,7 @@ Note: PATCH /api/server-cert/{id} is NOT used — CPPM returns 405 for PATCH.
     p.add_argument("--radius-fullchain", default=None, help="RSA fullchain (.rsa.fullchain.cer)")
     p.add_argument("--radius-ca",        default=None, help="RSA CA chain (.rsa.ca.cer)")
 
-    p.add_argument("--domain",           default=os.environ.get("DOMAIN", "cppm.sinemalab.com"))
+    p.add_argument("--domain",           default=os.environ.get("DOMAIN", ""))
     p.add_argument("--skip-trust-check", action="store_true",
                    help="Skip Step 0 (trust list pre-flight)")
     p.add_argument("--only-trust-check", action="store_true",
@@ -924,15 +934,14 @@ Note: PATCH /api/server-cert/{id} is NOT used — CPPM returns 405 for PATCH.
 def main() -> int:
     args = parse_args()
 
-    host          = os.environ.get("CPPM_HOST",            "cppm.sinemalab.com")
+    # These env vars are set by the per-server eval loop in entrypoint.sh /
+    # renew.sh from values stored in servers.json — not read from .env directly.
+    host          = os.environ.get("CPPM_HOST",            "")
     client_id     = os.environ.get("CPPM_CLIENT_ID",       "")
     client_secret = os.environ.get("CPPM_CLIENT_SECRET",   "")
     verify_ssl    = os.environ.get("CPPM_VERIFY_SSL",      "false").lower() == "true"
-    passphrase    = os.environ.get("CPPM_CERT_PASSPHRASE", "CppmCert!2024")
-    # CPPM_CALLBACK_HOST: Docker host LAN IP that CPPM can route to.
-    # CPPM needs to fetch the PKCS12 via HTTP during cert upload (JSON-only API).
-    # Set to the IP of the machine running Docker, e.g. 10.1.14.50
-    callback_host = os.environ.get("CPPM_CALLBACK_HOST", "")
+    passphrase    = os.environ.get("CPPM_CERT_PASSPHRASE", "")
+    callback_host = os.environ.get("CPPM_CALLBACK_HOST",   "")
     callback_port = int(os.environ.get("CPPM_CALLBACK_PORT", "8765"))
 
     if not client_id or not client_secret:

@@ -215,6 +215,11 @@ image and is recreated on every `docker compose build`.
 ```
 /opt/cppm-certs/                          ← host directory
 │
+├── servers.json                          ← ClearPass server config (chmod 600, contains secrets)
+├── admin.htpasswd                        ← Web UI admin credentials (bcrypt, chmod 600)
+├── .session-secret                       ← Web UI session signing key (chmod 600)
+├── trust-exclusions.conf                 ← Global CA trust exclusion fallback (see note)
+│
 ├── status.log                            ← human-readable event log
 │
 ├── cppm.example.com.ecc.cer            ← ECC domain cert
@@ -243,6 +248,11 @@ image and is recreated on every `docker compose build`.
     └── cron.log
 ```
 
+> **`trust-exclusions.conf`** is a global fallback only — it applies to servers
+> that have no per-server exclusions configured in `servers.json`. Per-server
+> trust exclusions are configured via the web UI (Servers → Trust Exclusions)
+> and stored inside `servers.json` under each server's `trust_exclusions` field.
+
 ---
 
 ## Image Contents (self-contained)
@@ -251,7 +261,7 @@ image and is recreated on every `docker compose build`.
 |---|---|---|
 | `/usr/local/bin/acme.sh` | acme.sh binary | GitHub (git clone at build time) |
 | `/opt/acme-seed/` | Full acme.sh install (dnsapi/, deploy/) | Copied from clone |
-| `/opt/cppm/le-certs/` | 6 Let's Encrypt CA PEM files | letsencrypt.org (curl at build time) |
+| `/opt/cppm/acme-ca-certs/` | Let's Encrypt CA PEM files + `trust-exclusions.conf` default | letsencrypt.org (curl at build time) |
 | `/opt/cppm/` | All management scripts | COPY from project directory |
 | Python packages | pyclearpass, requests, urllib3 | pip at build time |
 

@@ -2,11 +2,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # setup.sh – One-time host preparation before docker compose build
 #
-# All acme.sh and Let's Encrypt CA downloads now happen inside the Docker
-# build itself, so this script only needs to:
-#   1. Create the host directory for persistent cert storage
-#   2. Confirm Docker and docker compose are available
-#   3. Remind you to fill in .env
+#   1. Verifies Docker and docker compose are available
+#   2. Creates the host directory for persistent storage
+#   3. Copies env-example → .env if .env does not already exist
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -40,14 +38,16 @@ else
     ok "Created $CERT_DIR"
 fi
 
-# ── Check .env ────────────────────────────────────────────────────────────────
+# ── Create .env from env-example if needed ────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "${SCRIPT_DIR}/.env" ]]; then
-    info "Copying .env.example -> .env"
-    cp "${SCRIPT_DIR}/.env.example" "${SCRIPT_DIR}/.env"
-    echo ""
-    echo -e "${YELLOW}  ACTION REQUIRED: fill in your credentials in .env before building:${NC}"
-    echo "    nano ${SCRIPT_DIR}/.env"
+    if [[ -f "${SCRIPT_DIR}/env-example" ]]; then
+        cp "${SCRIPT_DIR}/env-example" "${SCRIPT_DIR}/.env"
+        chmod 600 "${SCRIPT_DIR}/.env"
+        ok ".env created from env-example"
+    else
+        fail "env-example not found in ${SCRIPT_DIR} – re-clone the repository."
+    fi
 else
     ok ".env already exists."
 fi
@@ -57,9 +57,22 @@ echo ""
 echo "=============================================="
 ok "Host setup complete."
 echo ""
+echo "  Minimum required before building:"
+echo "    Review ${SCRIPT_DIR}/.env and set:"
+echo "      TZ                  – container timezone (default: UTC)"
+echo "      CPPM_CALLBACK_HOST  – Docker host LAN IP that ClearPass can reach"
+echo "      CPPM_CALLBACK_PORT  – callback port (default: 8765)"
+echo "      STATUS_PORT         – web UI port (default: 8080)"
+echo ""
+echo "  ClearPass server credentials and DNS provider configuration"
+echo "  are set up through the web UI after the container starts."
+echo ""
 echo "  Next steps:"
-echo "    1. Fill in ${SCRIPT_DIR}/.env  (if not already done)"
+echo "    1. nano ${SCRIPT_DIR}/.env"
 echo "    2. docker compose build --no-cache"
 echo "    3. docker compose up -d"
 echo "    4. docker compose logs -f"
+echo "    5. Open http://<docker-host>:\${STATUS_PORT:-8080}/ in a browser"
+echo "       – follow the Setup link to create the admin account"
+echo "       – go to Servers → Add Server to register your ClearPass server"
 echo "=============================================="

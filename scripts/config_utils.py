@@ -11,6 +11,7 @@ File location: /data/certs/servers.json  (chmod 600 — contains secrets)
 
 import json
 import os
+import shlex
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -125,6 +126,103 @@ def delete_server(server_id: str) -> bool:
     else:
         SERVERS_FILE.unlink(missing_ok=True)
     return True
+
+
+# ── Migration ─────────────────────────────────────────────────────────────────
+
+def migrate_from_env() -> Optional[str]:
+    """
+    One-time backwards-compatibility migration.
+
+    If servers.json is empty/missing AND the container environment contains a
+    recognisable single-server configuration (DOMAIN + CPPM_HOST at minimum),
+    create the first server entry automatically so the cert pipeline has
+    something to work with on the first start after upgrading.
+
+    Returns a human-readable status string if migration occurred, None if
+    servers are already configured or there is nothing to migrate.
+    """
+    if load_servers():
+        return None
+
+    domain   = os.environ.get("DOMAIN",    "").strip()
+    cppm_host = os.environ.get("CPPM_HOST", "").strip()
+    if not domain or not cppm_host:
+        return None
+
+    entry = {
+        "label":                f"ClearPass ({cppm_host})",
+        "cppm_host":            cppm_host,
+        "cppm_client_id":       os.environ.get("CPPM_CLIENT_ID",       ""),
+        "cppm_client_secret":   os.environ.get("CPPM_CLIENT_SECRET",   ""),
+        "cppm_verify_ssl":      os.environ.get("CPPM_VERIFY_SSL", "false").lower() == "true",
+        "cppm_cert_passphrase": os.environ.get("CPPM_CERT_PASSPHRASE", ""),
+        "cppm_callback_host":   os.environ.get("CPPM_CALLBACK_HOST",   ""),
+        "cppm_callback_port":   os.environ.get("CPPM_CALLBACK_PORT",   "8765"),
+        "domain":               domain,
+        "acme_email":           os.environ.get("ACME_EMAIL",           ""),
+        "acme_server":          os.environ.get("ACME_SERVER",          "letsencrypt"),
+        "dns_provider":         os.environ.get("DNS_PROVIDER",         "cloudflare"),
+        "dns_credentials": {k: v for k, v in {
+            "CF_Token":               os.environ.get("CF_Token",               ""),
+            "CF_Account_ID":          os.environ.get("CF_Account_ID",          ""),
+            "CF_Zone_ID":             os.environ.get("CF_Zone_ID",             ""),
+            "CF_Key":                 os.environ.get("CF_Key",                 ""),
+            "CF_Email":               os.environ.get("CF_Email",               ""),
+            "PORKBUN_API_KEY":        os.environ.get("PORKBUN_API_KEY",        ""),
+            "PORKBUN_SECRET_API_KEY": os.environ.get("PORKBUN_SECRET_API_KEY", ""),
+            "AWS_ACCESS_KEY_ID":      os.environ.get("AWS_ACCESS_KEY_ID",      ""),
+            "AWS_SECRET_ACCESS_KEY":  os.environ.get("AWS_SECRET_ACCESS_KEY",  ""),
+            "AWS_DEFAULT_REGION":     os.environ.get("AWS_DEFAULT_REGION",     "us-east-1"),
+            "DO_API_KEY":             os.environ.get("DO_API_KEY",             ""),
+            "GD_Key":                 os.environ.get("GD_Key",                 ""),
+            "GD_Secret":              os.environ.get("GD_Secret",              ""),
+        }.items() if v},
+    }
+
+    server_id = str(uuid.uuid4())
+    entry["id"] = server_id
+    _write([entry])
+    return f"'{entry['label']}' migrated from .env (ID: {server_id})"
+
+
+# ── Shell environment export ───────────────────────────────────────────────────
+
+def get_server_shell_env(server_id: str) -> Optional[str]:
+    """
+    Return a shell-sourceable string of 'export KEY=VALUE' lines for the
+    given server entry, suitable for eval in bash scripts.
+
+    All values are quoted with shlex.quote so special characters in passwords
+    are handled correctly.  Returns None if the server ID is not found.
+    """
+    s = get_server(server_id)
+    if not s:
+        return None
+
+    creds = s.get("dns_credentials") or {}
+
+    trust_excl = s.get("trust_exclusions") or []
+    env: dict[str, str] = {
+        "DOMAIN":               str(s.get("domain",               "")),
+        "ACME_EMAIL":           str(s.get("acme_email",           "")),
+        "ACME_SERVER":          str(s.get("acme_server",          "letsencrypt")),
+        "DNS_PROVIDER":         str(s.get("dns_provider",         "")),
+        "CPPM_HOST":            str(s.get("cppm_host",            "")),
+        "CPPM_CLIENT_ID":       str(s.get("cppm_client_id",       "")),
+        "CPPM_CLIENT_SECRET":   str(s.get("cppm_client_secret",   "")),
+        "CPPM_VERIFY_SSL":      "true" if s.get("cppm_verify_ssl") else "false",
+        "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
+        "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
+        "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
+        "TRUST_EXCLUSIONS":     "\n".join(str(p) for p in trust_excl if p),
+    }
+    # DNS credential keys are already named as env vars in servers.json
+    for k, v in creds.items():
+        env[k] = str(v)
+
+    lines = [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
+    return "\n".join(lines)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

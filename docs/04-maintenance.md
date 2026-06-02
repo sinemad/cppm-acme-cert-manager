@@ -2,8 +2,8 @@
 
 ## Rebuilding the container
 
-Safe to do at any time. The certificate data in `/opt/cppm-certs/` is never
-touched by a rebuild.
+Safe to do at any time. The certificate data and server configuration in
+`/opt/cppm-certs/` are never touched by a rebuild.
 
 ```bash
 docker compose down
@@ -11,17 +11,39 @@ docker compose build --no-cache
 docker compose up -d
 ```
 
-On restart the container sees the existing flat `.cer` file, logs the expiry,
+On restart the container sees the existing flat `.cer` files, logs the expiry,
 and starts crond. No re-issue, no upload — nothing happens until renewal is due.
 
 ---
 
-## Updating credentials
+## Updating server credentials
 
-If you rotate the CPPM API secret, Cloudflare token, or any other `.env` value:
+ClearPass credentials, DNS provider keys, domain, and ACME settings are all
+stored in `servers.json`. Update them through the web UI — no container restart
+is needed for credential changes.
+
+1. Browse to `http://<docker-host>:8080/`
+2. Navigate to **Servers → Edit** on the server you want to update.
+3. Change the relevant fields and click **Save Changes**.
+
+The updated credentials are used on the next cert pipeline run (renewal, manual
+upload, or container restart).
+
+### CLI alternative
 
 ```bash
-nano /opt/cppm-acme-cert-manager/.env
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+```
+
+---
+
+## Updating `.env` settings
+
+`.env` controls container-level behaviour — ports, timezone, and operational
+flags. If you change `STATUS_PORT`, `CPPM_CALLBACK_PORT`, or `TZ`, recreate
+the container to pick up the changes:
+
+```bash
 docker compose up -d --force-recreate
 ```
 
@@ -29,19 +51,17 @@ docker compose up -d --force-recreate
 
 ## Enabling SSL verification
 
-After the Let's Encrypt certificate is installed and CPPM is accessible via
-trusted HTTPS:
+After the certificate is installed and CPPM is accessible via trusted HTTPS:
 
 ```bash
 # Confirm CPPM is serving the new cert
 openssl s_client -connect cppm.example.com:443 \
     -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -dates
-
-# Enable verification
-# Edit .env: CPPM_VERIFY_SSL=true
-docker compose up -d --force-recreate
 ```
+
+Then enable SSL verification in the web UI:
+**Servers → Edit → Verify SSL → enable → Save Changes**
 
 ---
 
@@ -68,7 +88,7 @@ If acme.sh has the cert in its internal state but the flat files are missing
 docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh
 ```
 
-No DNS challenge is performed. No contact with Let's Encrypt.
+No DNS challenge is performed. No contact with the ACME CA.
 
 ---
 
@@ -78,14 +98,14 @@ Use this to rotate the certificate before it is due (e.g. key compromise,
 CPPM migration):
 
 ```bash
-# 1. Set the flag
-#    Edit .env: FORCE_RENEW=true
+# 1. Set the flag in .env
+#    FORCE_RENEW=true
 docker compose up -d --force-recreate
 docker compose logs -f
 # Wait for "New certificate issued" and "Upload succeeded" in the logs
 
 # 2. Clear the flag when done
-#    Edit .env: FORCE_RENEW=false
+#    FORCE_RENEW=false
 docker compose up -d --force-recreate
 ```
 
@@ -93,13 +113,10 @@ docker compose up -d --force-recreate
 
 ## Rotate the PKCS12 export passphrase
 
-The passphrase is only used transiently during the PEM → PKCS12 conversion
-and is never stored on disk. To change it:
+Update the passphrase in the web UI: **Servers → Edit → Cert Passphrase → Save Changes**,
+then re-upload so CPPM receives a PKCS12 encrypted with the new passphrase:
 
 ```bash
-# Edit .env: CPPM_CERT_PASSPHRASE=<new-passphrase>
-docker compose up -d --force-recreate
-# Force a re-upload so CPPM gets the new PKCS12
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
@@ -107,8 +124,8 @@ docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 
 ## Trust list verification
 
-The Let's Encrypt CA and intermediate CA certificates in the ClearPass trust
-list are checked and repaired automatically on two schedules:
+The ACME CA and intermediate CA certificates in the ClearPass trust list are
+checked and repaired automatically on two schedules:
 
 | Schedule | Trigger | What runs |
 |---|---|---|
@@ -124,38 +141,84 @@ docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 Output appends to `/opt/cppm-certs/.logs/upload.log` and records a `TRUST`
 entry in `status.log`.
 
-### Exclude specific CA or intermediate certs from upload
+---
 
-A config file on the persistent volume controls which certs are excluded from
-all trust list operations. It is seeded automatically from the image default
-on first container start:
+## Trust exclusion configuration
+
+You can exclude specific CA or intermediate certificates from trust list
+operations. There are two layers: per-server (primary) and a global file
+(fallback for backwards compatibility).
+
+### Per-server exclusions (recommended)
+
+Configure exclusions in the web UI for each ClearPass server individually:
+
+1. Navigate to **Servers** in the web UI.
+2. Click **Trust Exclusions** on the server row you want to configure.
+3. Check the certificates you want to exclude — the label strikes through to
+   confirm the selection.
+4. Click **Save Exclusions**.
+
+Per-server exclusions are stored in `servers.json` alongside the other server
+configuration and take effect at the next scheduled or manual trust check.
+No container restart is required.
+
+Exclusions are organised by ACME provider for clarity. You can also type
+custom patterns directly in the **Active Exclusions** textarea — one CN pattern
+per line, case-insensitive partial match against the certificate Subject CN.
+
+#### Example use cases
+
+| Goal | What to exclude |
+|---|---|
+| R11 is already imported manually in this CPPM | `R11` |
+| RADIUS uses RSA-only EAP — no ECDSA root needed | `ISRG Root X2` |
+| Exclude all 2024 ECDSA intermediates | `E5`, `E6`, `E7`, `E8`, `E9`, `E10` |
+| Running ZeroSSL — exclude LE roots | `ISRG Root X1`, `ISRG Root X2` |
+
+### Global fallback file
+
+A `trust-exclusions.conf` file on the persistent volume applies to any server
+that has no per-server exclusions configured:
 
 ```
 /opt/cppm-certs/trust-exclusions.conf   (host path — edit this one)
-/data/certs/trust-exclusions.conf       (same file, container path)
+/data/certs/trust-exclusions.conf       (container path)
 ```
 
-Edit it on the host — no container restart required; changes take effect at
-the next scheduled or manual trust check:
+This file is seeded automatically from the image default on first container
+start. Edit it on the host — no container restart required; changes take effect
+at the next scheduled or manual trust check:
 
 ```bash
 nano /opt/cppm-certs/trust-exclusions.conf
 ```
 
-Each non-comment line is matched case-insensitively against the certificate's
-Subject CN. Partial matches are supported:
+**Priority:** per-server exclusions always win. The global file is only
+consulted when a server's per-server exclusion list is empty. Once you
+configure per-server exclusions for a server through the web UI, the global
+file is no longer consulted for that server.
 
+If you delete or corrupt the file, the container restores the image default on
+next restart.
+
+---
+
+## Switching DNS provider or ACME server
+
+To change the DNS provider, ACME certificate authority, or any other per-server
+setting, update the server entry in the web UI:
+
+**Servers → Edit → change the relevant fields → Save Changes**
+
+The existing certificates on the volume are unaffected. Only new issuances and
+renewals use the updated settings.
+
+### CLI alternative
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 ```
-# Exclude Let's Encrypt R11 (already managed separately in this environment)
-R11
-
-# Exclude the ECDSA root — not needed if RADIUS uses RSA-only EAP
-ISRG Root X2
-```
-
-The file has a comprehensive header explaining every option. If you delete or
-corrupt it, the container will restore the default from the image on next
-restart.
 
 ---
 
@@ -180,7 +243,7 @@ operation you will see entries like the following — no action is required.
 
 **Weekly trust list check (Sunday 03:00):**
 ```
-2026-06-08 03:00:07 | OK     | TRUST   | 9 LE CA certs verified – 0 uploaded, 0 patched, 9 already trusted
+2026-06-08 03:00:07 | OK     | TRUST   | 9 CA certs verified – 0 uploaded, 0 patched, 9 already trusted
 ```
 
 The first `OK | RENEW` entry confirms a successful certificate renewal.
@@ -226,12 +289,12 @@ chmod 600) and survive container rebuilds.
 
 ## ClearPass server configuration
 
-Server entries are managed via the **Servers** page in the web UI or the CLI
-(see below). They are stored in `/opt/cppm-certs/servers.json` (chmod 600) and
-persist across container rebuilds alongside the certificates.
+Server entries are managed via the **Servers** page in the web UI or the CLI.
+They are stored in `/opt/cppm-certs/servers.json` (chmod 600) and persist
+across container rebuilds alongside the certificates.
 
 ```bash
-# View current server configurations
+# View current server configurations (credentials stored as plaintext — handle carefully)
 cat /opt/cppm-certs/servers.json
 
 # Back up before changes
@@ -266,6 +329,7 @@ docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
 acme.sh --list                         # show all certs managed by acme.sh
-acme.sh --info -d cppm.example.com   # show detail for this domain
+acme.sh --info -d cppm.example.com     # show detail for this domain
 cat /data/certs/status.log             # view status log
+cat /data/certs/servers.json           # view server configuration
 ```

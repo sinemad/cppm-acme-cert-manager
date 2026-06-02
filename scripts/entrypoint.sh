@@ -9,7 +9,6 @@ ACME_SEED="/opt/acme-seed"
 ACME_STATE="/data/certs/.acme-state"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -31,47 +30,7 @@ die()  { err "$*"; status_write "FAILED" "STARTUP" "$*"; exit 1; }
 ACME_VER=$("$ACME_BIN" --version 2>&1 | head -1)
 log "=== ClearPass Certificate Manager v2.0 ==="
 log "acme.sh : $ACME_VER"
-log "Domain  : ${DOMAIN}"
-log "CPPM    : ${CPPM_HOST:-NOT SET}"
-log "CA      : ${ACME_SERVER:-letsencrypt}"
-status_write "INFO" "STARTUP" "Container started – domain=${DOMAIN} acme=${ACME_VER}"
-
-# ── Validate environment ──────────────────────────────────────────────────────
-REQUIRED_VARS=(DOMAIN ACME_EMAIL DNS_PROVIDER CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET CPPM_CALLBACK_HOST)
-MISSING=0
-for var in "${REQUIRED_VARS[@]}"; do
-    [[ -z "${!var:-}" ]] && { err "Missing required env var: $var"; MISSING=$((MISSING+1)); }
-done
-
-# Validate DNS provider credentials
-case "${DNS_PROVIDER:-cloudflare,,}" in
-    cloudflare|cf)
-        if [[ -z "${CF_Token:-}" && ( -z "${CF_Key:-}" || -z "${CF_Email:-}" ) ]]; then
-            err "Cloudflare credentials missing: set CF_Token (preferred) or CF_Key + CF_Email"
-            MISSING=$((MISSING+1))
-        fi
-        ;;
-    porkbun)
-        [[ -z "${PORKBUN_API_KEY:-}" ]]        && { err "Missing: PORKBUN_API_KEY"; MISSING=$((MISSING+1)); }
-        [[ -z "${PORKBUN_SECRET_API_KEY:-}" ]] && { err "Missing: PORKBUN_SECRET_API_KEY"; MISSING=$((MISSING+1)); }
-        ;;
-    route53|aws|r53)
-        [[ -z "${AWS_ACCESS_KEY_ID:-}" ]]     && { err "Missing: AWS_ACCESS_KEY_ID"; MISSING=$((MISSING+1)); }
-        [[ -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && { err "Missing: AWS_SECRET_ACCESS_KEY"; MISSING=$((MISSING+1)); }
-        ;;
-    digitalocean|do)
-        [[ -z "${DO_API_KEY:-}" ]] && { err "Missing: DO_API_KEY"; MISSING=$((MISSING+1)); }
-        ;;
-    godaddy|gd)
-        [[ -z "${GD_Key:-}" ]]    && { err "Missing: GD_Key"; MISSING=$((MISSING+1)); }
-        [[ -z "${GD_Secret:-}" ]] && { err "Missing: GD_Secret"; MISSING=$((MISSING+1)); }
-        ;;
-    *)
-        log "Custom DNS provider '${DNS_PROVIDER}' – skipping credential pre-check"
-        ;;
-esac
-
-[[ $MISSING -gt 0 ]] && die "$MISSING required environment variable(s) missing – check .env"
+status_write "INFO" "STARTUP" "Container started – acme=${ACME_VER}"
 
 # ── Seed acme.sh state ────────────────────────────────────────────────────────
 log "Checking acme.sh state at ${ACME_STATE}..."
@@ -84,11 +43,6 @@ else
     log "  State present. Refreshing dnsapi scripts from image..."
     cp -r "${ACME_SEED}/dnsapi/." "${ACME_STATE}/dnsapi/"
 fi
-# Ensure the persistent copy of acme.sh uses bash, not sh.
-# acme.sh calls itself internally via LE_WORKING_DIR/acme.sh, so this copy
-# must have the bash shebang or Alpine ash will run it and produce
-# 'sh: DEBUG: out of range' errors. This re-patch guards against volumes
-# seeded before the fix was applied.
 # Patch acme.sh and all plugin scripts to use bash.
 # Covers the main binary, dnsapi/, deploy/, and notify/ scripts.
 # Runs on every start so existing volumes are fixed automatically.
@@ -106,28 +60,39 @@ else
     log "  Symlink in place: /root/.acme.sh -> $(readlink /root/.acme.sh)"
 fi
 
-# ── Register ACME account ─────────────────────────────────────────────────────
-# Unset DEBUG before every acme.sh call.
-# acme.sh uses $DEBUG as a *numeric* log level internally.
-# If the host or container environment has DEBUG set to any non-numeric
-# string (e.g. "DEBUG", "true", "1") the integer comparisons inside
-# acme.sh produce "[: DEBUG: integer expression expected" on every line.
-unset DEBUG
-log "Registering ACME account ($ACME_EMAIL)..."
-"$ACME_BIN" --register-account \
-    -m "$ACME_EMAIL" \
-    --server "${ACME_SERVER:-letsencrypt}" \
-    2>&1 | tee -a "$LOG" || true
+# ── Migrate .env → servers.json (backwards compatibility) ─────────────────────
+log "Checking server configuration..."
+MIGRATE_MSG=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import migrate_from_env
+result = migrate_from_env()
+if result:
+    print(result)
+" 2>&1) || true
+if [[ -n "$MIGRATE_MSG" ]]; then
+    log "  Migrated .env configuration to servers.json: $MIGRATE_MSG"
+fi
 
-# ── Certificate state decision ────────────────────────────────────────────────
-# ECC flat cert is the primary installed indicator.
-# RSA flat cert must also exist for a fully-installed state.
-FLAT_ECC="${CERT_DIR}/${DOMAIN}.ecc.cer"
-FLAT_RSA="${CERT_DIR}/${DOMAIN}.rsa.cer"
-# acme.sh internal state dirs
-ACME_ECC_CERT="${CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
-ACME_RSA_CERT="${CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
+# ── Load server IDs from servers.json ─────────────────────────────────────────
+SERVER_IDS=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import load_servers
+for s in load_servers():
+    sid = s.get('id', '')
+    if sid:
+        print(sid)
+" 2>/dev/null || echo "")
 
+if [[ -z "$SERVER_IDS" ]]; then
+    warn "No servers configured."
+    warn "  Add one via the web UI after startup: http://<host>:${STATUS_PORT:-8080}/settings"
+    warn "  Or via CLI: docker exec -it cppm-acme-cert-manager cppm-servers add"
+    status_write "WARN" "STARTUP" "No servers configured – add one via the web UI or cppm-servers add"
+fi
+
+# ── Helper – run a script and keep the container alive on failure ─────────────
 run_with_guard() {
     local script="$1"
     if "$script" 2>&1 | tee -a "$LOG"; then
@@ -140,51 +105,130 @@ run_with_guard() {
     fi
 }
 
-if [[ "${FORCE_RENEW:-false}" == "true" ]]; then
-    log "FORCE_RENEW=true – forcing full re-issuance..."
-    status_write "INFO" "CERT" "FORCE_RENEW requested – starting re-issuance"
-    run_with_guard /opt/cppm/issue_cert.sh || true
+# ── Validate DNS credentials for a provider ───────────────────────────────────
+validate_dns_creds() {
+    local provider="${DNS_PROVIDER:-}"
+    local missing=0
+    case "${provider,,}" in
+        cloudflare|cf)
+            if [[ -z "${CF_Token:-}" && ( -z "${CF_Key:-}" || -z "${CF_Email:-}" ) ]]; then
+                err "Cloudflare credentials missing: set CF_Token (preferred) or CF_Key + CF_Email"
+                missing=$((missing+1))
+            fi
+            ;;
+        porkbun)
+            [[ -z "${PORKBUN_API_KEY:-}" ]]        && { err "Missing: PORKBUN_API_KEY";        missing=$((missing+1)); }
+            [[ -z "${PORKBUN_SECRET_API_KEY:-}" ]] && { err "Missing: PORKBUN_SECRET_API_KEY"; missing=$((missing+1)); }
+            ;;
+        route53|aws|r53)
+            [[ -z "${AWS_ACCESS_KEY_ID:-}" ]]     && { err "Missing: AWS_ACCESS_KEY_ID";     missing=$((missing+1)); }
+            [[ -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && { err "Missing: AWS_SECRET_ACCESS_KEY"; missing=$((missing+1)); }
+            ;;
+        digitalocean|do)
+            [[ -z "${DO_API_KEY:-}" ]] && { err "Missing: DO_API_KEY"; missing=$((missing+1)); }
+            ;;
+        godaddy|gd)
+            [[ -z "${GD_Key:-}" ]]    && { err "Missing: GD_Key";    missing=$((missing+1)); }
+            [[ -z "${GD_Secret:-}" ]] && { err "Missing: GD_Secret"; missing=$((missing+1)); }
+            ;;
+        *)
+            log "Custom DNS provider '${provider}' – skipping credential pre-check"
+            ;;
+    esac
+    return $missing
+}
 
-elif [[ -f "$FLAT_ECC" && -f "$FLAT_RSA" ]]; then
-    # ── Normal restart – both certs fully installed ───────────────────────────
-    ECC_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_ECC" 2>/dev/null \
-                 | cut -d= -f2 || echo "unknown")
-    ECC_SUBJECT=$(openssl x509 -subject -noout -in "$FLAT_ECC" 2>/dev/null \
-                  | sed 's/subject=//' || echo "unknown")
-    DAYS_LEFT="unknown"
-    EXPIRY_EPOCH=$(date -d "$ECC_EXPIRY" +%s 2>/dev/null || echo 0)
-    if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
-        DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
+# ── Process certificates for each configured server ───────────────────────────
+for SERVER_ID in $SERVER_IDS; do
+    log "--- Server: ${SERVER_ID} ---"
+
+    # Load server-specific env vars (overwrites any previous server's vars)
+    SERVER_ENV=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import get_server_shell_env
+output = get_server_shell_env('${SERVER_ID}')
+if output:
+    print(output)
+" 2>/dev/null) || true
+
+    if [[ -z "$SERVER_ENV" ]]; then
+        err "Failed to load configuration for server ${SERVER_ID} – skipping"
+        continue
     fi
-    RSA_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_RSA" 2>/dev/null \
-                 | cut -d= -f2 || echo "unknown")
-    log "Both ECC and RSA certificates installed – no action needed."
-    log "  ECC Subject : $ECC_SUBJECT"
-    log "  ECC Expires : $ECC_EXPIRY ($DAYS_LEFT days remaining)"
-    log "  RSA Expires : $RSA_EXPIRY"
-    log "  crond will renew automatically when ≤30 days remain."
-    status_write "OK" "CERT" "ECC+RSA valid – expires ${ECC_EXPIRY} (${DAYS_LEFT} days remaining)"
+    eval "$SERVER_ENV"
 
-elif [[ -f "$ACME_ECC_CERT" && -f "$ACME_RSA_CERT" ]]; then
-    # ── acme.sh has both certs but flat files missing ─────────────────────────
-    log "acme.sh state has certs but flat files missing – running install only..."
-    status_write "INFO" "CERT" "Flat files missing – running install-cert (no re-issue needed)"
-    run_with_guard /opt/cppm/install_cert.sh || true
+    log "  Domain : ${DOMAIN:-NOT SET}"
+    log "  CPPM   : ${CPPM_HOST:-NOT SET}"
+    log "  CA     : ${ACME_SERVER:-letsencrypt}"
 
-else
-    # ── First-ever issuance or partial state ──────────────────────────────────
-    log "Certificate(s) not found – issuing for the first time..."
-    status_write "INFO" "CERT" "No certificates found – starting first-time issuance"
-    run_with_guard /opt/cppm/issue_cert.sh || true
-fi
+    # Validate required fields
+    FIELD_MISSING=0
+    for var in DOMAIN ACME_EMAIL DNS_PROVIDER CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET CPPM_CALLBACK_HOST; do
+        [[ -z "${!var:-}" ]] && { err "Server ${SERVER_ID}: missing required field: ${var}"; FIELD_MISSING=$((FIELD_MISSING+1)); }
+    done
+    validate_dns_creds || FIELD_MISSING=$((FIELD_MISSING+1))
+
+    if [[ $FIELD_MISSING -gt 0 ]]; then
+        err "Skipping server ${SERVER_ID} (${FIELD_MISSING} configuration issue(s) — fix via web UI)"
+        continue
+    fi
+
+    # Register ACME account (idempotent — safe to call even if already registered)
+    unset DEBUG
+    log "Registering ACME account (${ACME_EMAIL}) with ${ACME_SERVER:-letsencrypt}..."
+    "$ACME_BIN" --register-account \
+        -m "$ACME_EMAIL" \
+        --server "${ACME_SERVER:-letsencrypt}" \
+        2>&1 | tee -a "$LOG" || true
+
+    # Certificate state decision
+    FLAT_ECC="${CERT_DIR}/${DOMAIN}.ecc.cer"
+    FLAT_RSA="${CERT_DIR}/${DOMAIN}.rsa.cer"
+    ACME_ECC_CERT="${CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
+    ACME_RSA_CERT="${CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
+
+    if [[ "${FORCE_RENEW:-false}" == "true" ]]; then
+        log "FORCE_RENEW=true – forcing full re-issuance for ${DOMAIN}..."
+        status_write "INFO" "CERT" "FORCE_RENEW requested – starting re-issuance for ${DOMAIN}"
+        run_with_guard /opt/cppm/issue_cert.sh || true
+
+    elif [[ -f "$FLAT_ECC" && -f "$FLAT_RSA" ]]; then
+        ECC_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_ECC" 2>/dev/null \
+                     | cut -d= -f2 || echo "unknown")
+        ECC_SUBJECT=$(openssl x509 -subject -noout -in "$FLAT_ECC" 2>/dev/null \
+                      | sed 's/subject=//' || echo "unknown")
+        DAYS_LEFT="unknown"
+        EXPIRY_EPOCH=$(date -d "$ECC_EXPIRY" +%s 2>/dev/null || echo 0)
+        if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
+            DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
+        fi
+        RSA_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_RSA" 2>/dev/null \
+                     | cut -d= -f2 || echo "unknown")
+        log "Both certs installed for ${DOMAIN} – no action needed."
+        log "  ECC Subject : $ECC_SUBJECT"
+        log "  ECC Expires : $ECC_EXPIRY ($DAYS_LEFT days remaining)"
+        log "  RSA Expires : $RSA_EXPIRY"
+        status_write "OK" "CERT" "ECC+RSA valid for ${DOMAIN} – expires ${ECC_EXPIRY} (${DAYS_LEFT} days remaining)"
+
+    elif [[ -f "$ACME_ECC_CERT" && -f "$ACME_RSA_CERT" ]]; then
+        log "acme.sh state present but flat files missing for ${DOMAIN} – running install only..."
+        status_write "INFO" "CERT" "Flat files missing for ${DOMAIN} – running install-cert (no re-issue needed)"
+        run_with_guard /opt/cppm/install_cert.sh || true
+
+    else
+        log "Certificates not found for ${DOMAIN} – issuing for the first time..."
+        status_write "INFO" "CERT" "No certificates found for ${DOMAIN} – starting first-time issuance"
+        run_with_guard /opt/cppm/issue_cert.sh || true
+    fi
+done
 
 # ── Seed trust exclusion config to volume ────────────────────────────────────
 TRUST_EXCL_VOL="${CERT_DIR}/trust-exclusions.conf"
-TRUST_EXCL_IMG="/opt/cppm/le-certs/trust-exclusions.conf"
+TRUST_EXCL_IMG="/opt/cppm/acme-ca-certs/trust-exclusions.conf"
 if [[ ! -f "$TRUST_EXCL_VOL" && -f "$TRUST_EXCL_IMG" ]]; then
     cp "$TRUST_EXCL_IMG" "$TRUST_EXCL_VOL"
     log "  Seeded trust-exclusions.conf → ${TRUST_EXCL_VOL}"
-    log "  Edit /opt/cppm-certs/trust-exclusions.conf on the host to exclude specific certs."
 fi
 
 # ── Start status web server ───────────────────────────────────────────────────
@@ -198,9 +242,4 @@ log "Starting supercronic (renewal checks at 02:00 and 14:00 UTC daily)..."
 status_write "INFO" "STARTUP" "supercronic started – renewal checks at 02:00 and 14:00 UTC"
 log "=== Startup complete ==="
 
-# supercronic is a container-native cron runner:
-#   - No setpgid() required (avoids Docker permission errors)
-#   - Logs to stdout/stderr (visible in docker compose logs)
-#   - Exits cleanly on SIGTERM (proper container shutdown)
-#   - Reads CRON_TZ from the environment for timezone awareness
 exec /usr/local/bin/supercronic /etc/crontabs/root

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # renew.sh – Called by crond twice daily to check and renew certificates
+#            Iterates over all servers configured in servers.json
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -8,65 +9,106 @@ ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/renewal.log"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
-# Log functions write to stdout/stderr unconditionally (always visible in
-# docker logs) then append to the log file as a best-effort — 2>/dev/null
-# prevents BusyBox tee/echo errors from mixing into the output if the log
-# directory is temporarily unavailable.
 log() { local m="[$(ts)] [RENEW] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
 err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 source /opt/cppm/status.sh
 # acme.sh uses $DEBUG as a numeric variable; a non-numeric value from
-# the host environment causes integer comparison errors. Always unset it.
+# the host environment causes integer comparison errors.
 unset DEBUG
 
 log "=== Renewal Check ==="
 
-FLAT_CERT="${CERT_DIR}/${DOMAIN}.cer"
-if [[ ! -f "$FLAT_CERT" ]]; then
-    log "Flat cert missing – delegating to issue_cert.sh..."
-    status_write "WARN" "RENEW" "Flat cert missing at renewal check – re-running issuance"
-    exec /opt/cppm/issue_cert.sh
+# Load server IDs from servers.json
+SERVER_IDS=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import load_servers
+for s in load_servers():
+    sid = s.get('id', '')
+    if sid:
+        print(sid)
+" 2>/dev/null || echo "")
+
+if [[ -z "$SERVER_IDS" ]]; then
+    log "No servers configured – nothing to renew."
+    log "=== Renewal Check Complete ==="
+    exit 0
 fi
 
-EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_CERT" 2>/dev/null \
-         | cut -d= -f2 || echo "unknown")
-DAYS_LEFT="unknown"
-EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
-if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
-    DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
-fi
-log "Current cert expires: $EXPIRY ($DAYS_LEFT days remaining)"
+for SERVER_ID in $SERVER_IDS; do
+    log "--- Server: ${SERVER_ID} ---"
 
-log "Running acme.sh --renew ..."
-RENEW_EXIT=0
-"$ACME_BIN" --renew \
-    --domain    "$DOMAIN" \
-    --server    "${ACME_SERVER:-letsencrypt}" \
-    --home      /root/.acme.sh \
-    --log       "$LOG" \
-    --log-level 2 \
-    2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
+    SERVER_ENV=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import get_server_shell_env
+output = get_server_shell_env('${SERVER_ID}')
+if output:
+    print(output)
+" 2>/dev/null) || true
 
-case $RENEW_EXIT in
-    0)
-        log "Certificate renewed successfully."
-        status_write "OK" "RENEW" "Certificate renewed – running install and upload"
-        /opt/cppm/install_cert.sh
-        ;;
-    2)
-        log "Certificate not due for renewal – no action needed."
-        status_write "INFO" "RENEW" "Not due for renewal – ${DAYS_LEFT} days remaining (next check in 12h)"
-        ;;
-    *)
-        err "acme.sh --renew exited with code $RENEW_EXIT – check ${LOG}"
-        status_write "FAILED" "RENEW" "acme.sh --renew failed with exit code ${RENEW_EXIT} – check renewal.log"
-        exit $RENEW_EXIT
-        ;;
-esac
+    if [[ -z "$SERVER_ENV" ]]; then
+        err "Failed to load configuration for server ${SERVER_ID} – skipping"
+        continue
+    fi
+    eval "$SERVER_ENV"
+
+    log "Domain: ${DOMAIN:-NOT SET}"
+
+    if [[ -z "${DOMAIN:-}" ]]; then
+        err "Server ${SERVER_ID}: DOMAIN is empty – skipping"
+        continue
+    fi
+
+    FLAT_ECC="${CERT_DIR}/${DOMAIN}.ecc.cer"
+    FLAT_RSA="${CERT_DIR}/${DOMAIN}.rsa.cer"
+    if [[ ! -f "$FLAT_ECC" || ! -f "$FLAT_RSA" ]]; then
+        log "Flat cert(s) missing for ${DOMAIN} – delegating to issue_cert.sh..."
+        status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – re-running issuance"
+        /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+            err "issue_cert.sh failed for ${DOMAIN} – check renewal.log"
+        continue
+    fi
+
+    EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_ECC" 2>/dev/null \
+             | cut -d= -f2 || echo "unknown")
+    DAYS_LEFT="unknown"
+    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
+    if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
+        DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
+    fi
+    log "Current cert for ${DOMAIN} expires: $EXPIRY ($DAYS_LEFT days remaining)"
+
+    log "Running acme.sh --renew for ${DOMAIN}..."
+    RENEW_EXIT=0
+    "$ACME_BIN" --renew \
+        --domain    "$DOMAIN" \
+        --server    "${ACME_SERVER:-letsencrypt}" \
+        --home      /root/.acme.sh \
+        --log       "$LOG" \
+        --log-level 2 \
+        2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
+
+    case $RENEW_EXIT in
+        0)
+            log "Certificate renewed for ${DOMAIN}."
+            status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
+            /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "install_cert.sh failed for ${DOMAIN}"
+            ;;
+        2)
+            log "Certificate for ${DOMAIN} not due for renewal – no action needed."
+            status_write "INFO" "RENEW" "Not due for renewal – ${DOMAIN} has ${DAYS_LEFT} days remaining (next check in 12h)"
+            ;;
+        *)
+            err "acme.sh --renew exited with code $RENEW_EXIT for ${DOMAIN} – check ${LOG}"
+            status_write "FAILED" "RENEW" "acme.sh --renew failed (exit ${RENEW_EXIT}) for ${DOMAIN} – check renewal.log"
+            ;;
+    esac
+done
 
 log "=== Renewal Check Complete ==="

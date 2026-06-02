@@ -10,7 +10,7 @@ Run these steps once on the host before the container is ever started.
 | Linux host | Ubuntu 22.04 LTS recommended |
 | DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, GoDaddy, or any acme.sh dnsapi plugin) |
 | CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13, SDK valid for all) |
-| Outbound HTTPS | Container needs access to your DNS provider's API and `cppm.example.com` |
+| Outbound HTTPS | Container needs access to your DNS provider's API and your ACME CA |
 
 ---
 
@@ -23,105 +23,43 @@ chmod +x setup.sh && ./setup.sh
 
 `setup.sh` does three things:
 - Verifies Docker and the Compose plugin are present
-- Creates `/opt/cppm-certs` (the persistent cert directory)
-- Copies `.env.example` to `.env` if it does not already exist
+- Creates `/opt/cppm-certs` (the persistent storage directory)
+- Copies `env-example` to `.env` if `.env` does not already exist
 
 ---
 
-## Step 2 – Create DNS provider credentials
+## Step 2 – Configure `.env`
 
-The container uses the ACME DNS-01 challenge to issue certificates.
-Set `DNS_PROVIDER` in `.env` to your provider, then create the required credentials.
+`.env` controls **container-level behaviour only** — ports, timezone, and operational flags. ClearPass server credentials, DNS provider, domain, and ACME settings are all configured through the web UI after the container starts.
 
-### Cloudflare (default)
+```bash
+nano /opt/cppm-acme-cert-manager/.env
+```
 
-1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens)
-2. **Create Token → Custom token**
-3. Configure:
-   - **Token name:** `acme-cppm-dns`
-   - **Permissions:** `Zone > DNS > Edit`
-   - **Zone Resources:** `Include > Specific zone > example.com`
-4. Copy the token and note your **Account ID** and **Zone ID**
-   (both shown on the Overview page of your zone)
+Required values:
 
 ```ini
-DNS_PROVIDER=cloudflare
-CF_Token=<your-scoped-api-token>
-CF_Account_ID=<account-id>
-CF_Zone_ID=<zone-id>
+# Container timezone — used in log timestamps and cron scheduling
+TZ=America/New_York
+
+# Web UI port — must match the host-side port in docker-compose.yml
+STATUS_PORT=8080
+
+# Callback port — Docker host port CPPM fetches the PKCS12 cert from during upload
+# Must match the host-side port in docker-compose.yml
+CPPM_CALLBACK_PORT=8765
+
+# Set true to require sign-in before the certificate dashboard is visible
+REQUIRE_AUTH_FOR_STATUS=false
 ```
 
-### Porkbun
+Secure the file:
 
-1. Log in to [Porkbun](https://porkbun.com/account/api)
-2. Enable API access and create an API key pair
-3. Ensure **API access** is enabled on the domain under Domain Management
-
-```ini
-DNS_PROVIDER=porkbun
-PORKBUN_API_KEY=pk1_...
-PORKBUN_SECRET_API_KEY=sk1_...
+```bash
+chmod 600 /opt/cppm-acme-cert-manager/.env
 ```
 
-### Route53 / AWS
-
-Create an IAM user with the following inline policy, then generate access keys:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["route53:ChangeResourceRecordSets", "route53:ListHostedZones",
-                 "route53:GetChange", "route53:ListResourceRecordSets"],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-```ini
-DNS_PROVIDER=route53
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=us-east-1
-```
-
-### DigitalOcean
-
-1. Log in to [DigitalOcean](https://cloud.digitalocean.com/account/api/tokens)
-2. Generate a **Personal Access Token** with **Write** scope
-
-```ini
-DNS_PROVIDER=digitalocean
-DO_API_KEY=dop_v1_...
-```
-
-### GoDaddy
-
-1. Log in to [GoDaddy Developer Portal](https://developer.godaddy.com/keys)
-2. Create a Production API key
-
-```ini
-DNS_PROVIDER=godaddy
-GD_Key=...
-GD_Secret=...
-```
-
-### Other providers NOT SUPPORTED AND EXPERIMENTAL
-
-Any acme.sh dnsapi plugin can be used. Set `DNS_PROVIDER` to the plugin name
-without the `dns_` prefix and ensure the plugin's credential variables are set
-in `.env`. For example:
-
-```ini
-DNS_PROVIDER=linode_v4
-LINODE_V4_API_KEY=...
-```
-
-See the [acme.sh dnsapi docs](https://github.com/acmesh-official/acme.sh/wiki/dnsapi)
-for the full list of supported providers and their variable names.
+> **What .env no longer configures:** DNS provider credentials, ClearPass host/credentials, domain, ACME email, and ACME server are all managed through the web UI and stored in `/opt/cppm-certs/servers.json`. See the [full `.env` reference](env-example) for optional flags (`FORCE_RENEW`, `SKIP_UPLOAD`, `LOG_LEVEL`) and the legacy migration section.
 
 ---
 
@@ -146,85 +84,43 @@ for the full list of supported providers and their variable names.
 
 ---
 
-## Step 4 – Fill in `.env`
-
-```bash
-nano /opt/cppm-acme-cert-manager/.env
-```
-
-Required values (example using Cloudflare):
-
-```ini
-# DNS provider
-DNS_PROVIDER=cloudflare
-CF_Token=<your-scoped-api-token>
-CF_Account_ID=<cloudflare-account-id>
-CF_Zone_ID=<zone-id-for-example.com>
-
-# ACME
-ACME_EMAIL=admin@example.com
-ACME_SERVER=letsencrypt
-
-# Domain
-DOMAIN=cppm.example.com
-
-# ClearPass
-CPPM_HOST=cppm.example.com
-CPPM_CLIENT_ID=cppm-acme-cert-manager
-CPPM_CLIENT_SECRET=<secret-from-step-3>
-CPPM_VERIFY_SSL=false       # set true after the cert is installed
-
-# Callback – Docker host LAN IP that CPPM can route to
-CPPM_CALLBACK_HOST=<docker-host-ip>
-CPPM_CALLBACK_PORT=8765
-```
-
-Secure the file:
-
-```bash
-chmod 600 /opt/cppm-acme-cert-manager/.env
-```
-
----
-
-## Step 5 – Build the image
+## Step 4 – Build the image
 
 ```bash
 docker compose build --no-cache
 ```
 
-The build fetches acme.sh from GitHub and downloads all Let's Encrypt
-CA certificates from letsencrypt.org. Both are baked into the image so the
-running container needs no access to either site at runtime.
+The build fetches acme.sh from GitHub and downloads CA certificates from supported ACME providers. Both are baked into the image so the running container needs no access to either site at runtime.
 
 Expected build time: 2–4 minutes depending on network speed.
 
 ---
 
-## Step 6 – Start and verify
+## Step 5 – Start the container
 
 ```bash
 docker compose up -d
 docker compose logs -f
 ```
 
-Watch for these lines to confirm a successful first run:
-
+Watch for:
 ```
-[INFO ] No certificates found – starting first-time issuance
-[ISSUE] Issuing ECC (ec-256) certificate via <provider> DNS-01
-[ISSUE] Issuing RSA (2048) certificate via <provider> DNS-01
-[OK   ] ECC+RSA certificates issued
-[OK   ] ECC+RSA certs installed – expires <date>
-[OK   ] ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
-[INFO ] supercronic started – renewal checks at 02:00 and 14:00 UTC
+[INFO ] Starting status web server on port 8080
+[INFO ] Starting supercronic
+[INFO ] Startup complete
 ```
 
-First-run time including DNS propagation: approximately 2–5 minutes.
+If `servers.json` is empty (first run) you will also see:
+```
+[WARN ] No servers configured.
+[WARN ]   Add one via the web UI after startup: http://<host>:8080/settings
+```
+
+This is expected — the container stays running and waits for you to add a server.
 
 ---
 
-## Step 7 – Web UI first-time setup
+## Step 6 – Web UI first-time setup
 
 Open a browser to `http://<docker-host>:8080/`. On first access the navigation
 bar shows a **Setup** link because no admin accounts exist yet.
@@ -237,29 +133,117 @@ bar shows a **Setup** link because no admin accounts exist yet.
 Once signed in you will see the full navigation bar:
 **Dashboard · Servers · Users · Sign Out**
 
-### Configure your first ClearPass server
-
-1. Click **Servers** in the navigation bar.
-2. Click **+ Add Server**.
-3. Fill in all fields for your ClearPass host, ACME email, certificate
-   authority, and DNS provider credentials, then click **Add Server** to save.
-
-The server configuration is stored in `/opt/cppm-certs/servers.json` on the
-persistent volume alongside the certificates.
-
 ### CLI alternative (no browser needed)
-
-Create the admin account without a browser:
 
 ```bash
 docker exec -it cppm-acme-cert-manager cppm-users add admin
 ```
 
-Add a server without a browser (interactive prompts):
+---
+
+## Step 7 – Add your ClearPass server
+
+All ClearPass server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
+
+1. Click **Servers** in the navigation bar.
+2. Click **+ Add Server**.
+3. Fill in all sections:
+
+| Section | Fields |
+|---|---|
+| **Identity** | Friendly label (e.g. `Production ClearPass`) |
+| **ClearPass** | Host/IP, Client ID, Client Secret (from Step 3), Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority |
+| **DNS Provider** | Provider selector + credentials (see below) |
+
+4. Click **Add Server** to save.
+
+The configuration is stored in `/opt/cppm-certs/servers.json` (chmod 600).
+
+### DNS provider credential reference
+
+| Provider | Required credentials |
+|---|---|
+| **Cloudflare** | API Token + Zone ID (recommended), or Global API Key + Email |
+| **Porkbun** | API Key + Secret API Key |
+| **AWS Route 53** | Access Key ID + Secret Access Key + Region |
+| **DigitalOcean** | API Token |
+| **GoDaddy** | API Key + API Secret |
+
+#### Obtaining Cloudflare credentials
+
+1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens)
+2. **Create Token → Custom token**
+3. Configure:
+   - **Token name:** `acme-cppm-dns`
+   - **Permissions:** `Zone > DNS > Edit`
+   - **Zone Resources:** `Include > Specific zone > example.com`
+4. Copy the token; find your **Account ID** and **Zone ID** on the zone Overview page.
+
+#### Obtaining Porkbun credentials
+
+1. Log in to [Porkbun](https://porkbun.com/account/api) and enable API access.
+2. Ensure **API access** is enabled on the domain under Domain Management.
+
+#### Obtaining Route53 credentials
+
+Create an IAM user with this inline policy, then generate access keys:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["route53:ChangeResourceRecordSets","route53:ListHostedZones",
+               "route53:GetChange","route53:ListResourceRecordSets"],
+    "Resource": "*"
+  }]
+}
+```
+
+#### Obtaining DigitalOcean credentials
+
+Generate a **Personal Access Token** with **Write** scope at
+[cloud.digitalocean.com/account/api/tokens](https://cloud.digitalocean.com/account/api/tokens).
+
+#### Obtaining GoDaddy credentials
+
+Create a Production API key at the
+[GoDaddy Developer Portal](https://developer.godaddy.com/keys).
+
+#### Other / custom providers
+
+Any acme.sh dnsapi plugin can be used. In the **DNS Provider** field enter the
+plugin name without the `dns_` prefix (e.g. `linode_v4`). Add the required
+credential variables in the custom credentials textarea. See the
+[acme.sh dnsapi docs](https://github.com/acmesh-official/acme.sh/wiki/dnsapi)
+for variable names.
+
+### CLI alternative (no browser needed)
 
 ```bash
 docker exec -it cppm-acme-cert-manager cppm-servers add
 ```
+
+Once the first server is saved the container picks it up on the **next startup**.
+Restart to trigger first-run certificate issuance:
+
+```bash
+docker compose restart
+docker compose logs -f
+```
+
+Watch for:
+```
+[INFO ] No certificates found – starting first-time issuance
+[ISSUE] Issuing ECC (ec-256) certificate via <provider> DNS-01
+[ISSUE] Issuing RSA (2048) certificate via <provider> DNS-01
+[OK   ] ECC+RSA certificates issued
+[OK   ] ECC+RSA certs installed – expires <date>
+[OK   ] ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
+```
+
+First-run time including DNS propagation: approximately 2–5 minutes.
 
 ---
 
@@ -272,10 +256,13 @@ new cert:
 # Verify the cert is trusted
 openssl s_client -connect cppm.example.com:443 -servername cppm.example.com \
     </dev/null 2>/dev/null | openssl x509 -noout -subject -dates
+```
 
-# Update .env
-CPPM_VERIFY_SSL=true
+Then edit the server entry in the web UI:
+**Servers → Edit → Verify SSL → enable → Save Changes**
 
-# Recreate the container to pick up the change
-docker compose up -d --force-recreate
+Or via CLI:
+```bash
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+# Toggle Verify SSL to yes
 ```

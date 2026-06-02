@@ -203,7 +203,7 @@ Behaviour:
 
 **Image default (read-only reference):**
 ```
-/opt/cppm/le-certs/trust-exclusions.conf
+/opt/cppm/acme-ca-certs/trust-exclusions.conf
 ```
 
 Controls which Let's Encrypt CA and intermediate CA certificates are excluded

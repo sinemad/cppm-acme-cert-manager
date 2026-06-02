@@ -7,6 +7,8 @@
 # certificates are present in the ClearPass trust list with EAP + Others enabled,
 # and uploads any that are missing — without issuing or renewing certificates.
 #
+# Iterates over all servers configured in servers.json.
+#
 # To run manually:
 #   docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 # ─────────────────────────────────────────────────────────────────────────────
@@ -14,72 +16,95 @@ set -uo pipefail
 
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
 LOG="${LOG_DIR}/upload.log"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 
-# Source status library — this also calls _ensure_cppm_dirs(), which creates
-# /data/certs and /data/certs/.logs, so the source below is both a safety net
-# and the authoritative directory-creation path for all sourced scripts.
 # shellcheck source=status.sh
 source /opt/cppm/status.sh
 
-# Log functions write to stdout/stderr unconditionally so output is always
-# visible in docker logs, then append to the log file as best-effort.
-# 2>/dev/null on the file write prevents BusyBox error messages from mixing
-# into the terminal output if the log directory is temporarily unavailable.
 log()  { local m="[$(ts)] [INFO ] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
 warn() { local m="[$(ts)] [WARN ] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
 err()  { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 log "=== Trust List Verification (weekly) ==="
 
-# ── Guard: certificates must exist before we can check trust ──────────────────
-ECC_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
-RSA_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+SERVER_IDS=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import load_servers
+for s in load_servers():
+    sid = s.get('id', '')
+    if sid:
+        print(sid)
+" 2>/dev/null || echo "")
 
-if [[ ! -f "$ECC_CERT" || ! -f "$RSA_CERT" ]]; then
-    warn "Certificates not yet issued – skipping trust check."
-    warn "  Missing: $( [[ ! -f "$ECC_CERT" ]] && echo "$ECC_CERT" ) $( [[ ! -f "$RSA_CERT" ]] && echo "$RSA_CERT" )"
-    status_write "INFO" "TRUST" "Trust check skipped – certificates not yet issued"
+if [[ -z "$SERVER_IDS" ]]; then
+    log "No servers configured – skipping trust check."
+    status_write "INFO" "TRUST" "Trust check skipped – no servers configured"
     exit 0
 fi
 
-log "Domain  : ${DOMAIN}"
-log "CPPM    : ${CPPM_HOST:-NOT SET}"
+OVERALL_EXIT=0
 
-# ── Run trust-only check via clearpass_upload.py ──────────────────────────────
-# --only-trust-check skips Steps 1–3 (cert upload) and runs only Step 0
-# (trust list pre-flight). Both ECC and RSA CA chain paths are passed so
-# intermediates unique to either chain (e.g. R13 in the RSA chain) are found.
-unset DEBUG
+for SERVER_ID in $SERVER_IDS; do
+    log "--- Server: ${SERVER_ID} ---"
 
-python3 /opt/cppm/clearpass_upload.py \
-    --only-trust-check \
-    --https-cert      "${CERT_DIR}/${DOMAIN}.ecc.cer" \
-    --https-key       "${CERT_DIR}/${DOMAIN}.ecc.key" \
-    --https-fullchain "${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer" \
-    --https-ca        "${CERT_DIR}/${DOMAIN}.ecc.ca.cer" \
-    --radius-cert      "${CERT_DIR}/${DOMAIN}.rsa.cer" \
-    --radius-key       "${CERT_DIR}/${DOMAIN}.rsa.key" \
-    --radius-fullchain "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer" \
-    --radius-ca        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer" \
-    2>&1 | tee -a "$LOG" 2>/dev/null
+    SERVER_ENV=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import get_server_shell_env
+output = get_server_shell_env('${SERVER_ID}')
+if output:
+    print(output)
+" 2>/dev/null) || true
 
-EXIT_CODE="${PIPESTATUS[0]}"
-
-if [[ "$EXIT_CODE" -eq 0 ]]; then
-    log "Trust check completed successfully."
-else
-    err "Trust check failed (exit ${EXIT_CODE})."
-    if [[ -f "$LOG" ]]; then
-        err "Full output written to: ${LOG}"
-    else
-        err "Log file unavailable – confirm /opt/cppm-certs is mounted and writable on the host."
+    if [[ -z "$SERVER_ENV" ]]; then
+        err "Failed to load configuration for server ${SERVER_ID} – skipping"
+        continue
     fi
-fi
+    eval "$SERVER_ENV"
 
-exit "$EXIT_CODE"
+    if [[ -z "${DOMAIN:-}" ]]; then
+        err "Server ${SERVER_ID}: DOMAIN is empty – skipping"
+        continue
+    fi
+
+    ECC_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
+    RSA_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+
+    if [[ ! -f "$ECC_CERT" || ! -f "$RSA_CERT" ]]; then
+        warn "Certificates not yet issued for ${DOMAIN} – skipping."
+        status_write "INFO" "TRUST" "Trust check skipped for ${DOMAIN} – certificates not yet issued"
+        continue
+    fi
+
+    log "Domain : ${DOMAIN}"
+    log "CPPM   : ${CPPM_HOST:-NOT SET}"
+
+    unset DEBUG
+    TRUST_EXIT=0
+    python3 /opt/cppm/clearpass_upload.py \
+        --only-trust-check \
+        --https-cert      "${CERT_DIR}/${DOMAIN}.ecc.cer" \
+        --https-key       "${CERT_DIR}/${DOMAIN}.ecc.key" \
+        --https-fullchain "${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer" \
+        --https-ca        "${CERT_DIR}/${DOMAIN}.ecc.ca.cer" \
+        --radius-cert      "${CERT_DIR}/${DOMAIN}.rsa.cer" \
+        --radius-key       "${CERT_DIR}/${DOMAIN}.rsa.key" \
+        --radius-fullchain "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer" \
+        --radius-ca        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer" \
+        2>&1 | tee -a "$LOG" 2>/dev/null || TRUST_EXIT=$?
+
+    if [[ "$TRUST_EXIT" -eq 0 ]]; then
+        log "Trust check completed for ${DOMAIN}."
+    else
+        err "Trust check failed for ${DOMAIN} (exit ${TRUST_EXIT}) – check ${LOG}"
+        OVERALL_EXIT=$TRUST_EXIT
+    fi
+done
+
+log "=== Trust List Verification Complete ==="
+exit "$OVERALL_EXIT"

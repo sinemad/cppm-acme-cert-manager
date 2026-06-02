@@ -8,8 +8,8 @@ set -euo pipefail
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/upload.log"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
-CPPM_HOST="${CPPM_HOST:-cppm.sinemalab.com}"
+DOMAIN="${DOMAIN:-}"
+CPPM_HOST="${CPPM_HOST:-}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }

@@ -47,15 +47,11 @@ from config_utils import (
 )
 
 # ── Configuration from environment ───────────────────────────────────────────
-CERT_DIR     = Path(os.environ.get("CERT_DIR", "/data/certs"))
-DOMAIN       = os.environ.get("DOMAIN", "unknown")
-DNS_PROVIDER = os.environ.get("DNS_PROVIDER", "unknown")
-ACME_SERVER  = os.environ.get("ACME_SERVER", "letsencrypt")
-CPPM_HOST    = os.environ.get("CPPM_HOST", "unknown")
-STATUS_PORT  = int(os.environ.get("STATUS_PORT", "8080"))
-TZ_NAME      = os.environ.get("TZ", "UTC")
-STATUS_LOG   = CERT_DIR / "status.log"
-COOKIE_NAME  = "cppm_session"
+CERT_DIR    = Path(os.environ.get("CERT_DIR", "/data/certs"))
+STATUS_PORT = int(os.environ.get("STATUS_PORT", "8080"))
+TZ_NAME     = os.environ.get("TZ", "UTC")
+STATUS_LOG  = CERT_DIR / "status.log"
+COOKIE_NAME = "cppm_session"
 # When False (default) the dashboard and /api/status are publicly readable.
 # Set to true to require authentication even for the read-only status page.
 REQUIRE_AUTH_FOR_STATUS = os.environ.get("REQUIRE_AUTH_FOR_STATUS", "false").lower() == "true"
@@ -194,13 +190,13 @@ def next_check_info() -> dict:
 def build_server_status(server: dict) -> dict:
     """Build the full status dict for a single server configuration entry."""
     tz     = _tz()
-    domain = server.get("domain", DOMAIN)
+    domain = server.get("domain", "")
     return {
-        "id":           server.get("id", "env"),
+        "id":           server.get("id", ""),
         "label":        server.get("label", domain),
-        "cppm_host":    server.get("cppm_host", CPPM_HOST),
-        "dns_provider": server.get("dns_provider", DNS_PROVIDER),
-        "acme_server":  server.get("acme_server", ACME_SERVER),
+        "cppm_host":    server.get("cppm_host", ""),
+        "dns_provider": server.get("dns_provider", ""),
+        "acme_server":  server.get("acme_server", ""),
         "domain":       domain,
         "certs": {
             "ecc": parse_cert(CERT_DIR / f"{domain}.ecc.cer"),
@@ -213,30 +209,8 @@ def build_server_status(server: dict) -> dict:
 
 
 def build_all_status() -> list:
-    """Status for every configured server; falls back to env-var config if none."""
-    servers = load_servers()
-    if not servers:
-        servers = [{
-            "id":           "env",
-            "label":        f"ClearPass ({CPPM_HOST})" if CPPM_HOST else "ClearPass",
-            "cppm_host":    CPPM_HOST,
-            "dns_provider": DNS_PROVIDER,
-            "acme_server":  ACME_SERVER,
-            "domain":       DOMAIN,
-        }]
-    return [build_server_status(s) for s in servers]
-
-
-def build_status() -> dict:
-    """Backward-compatible single-server status using env-var configuration."""
-    return build_server_status({
-        "id":           "env",
-        "label":        CPPM_HOST,
-        "cppm_host":    CPPM_HOST,
-        "dns_provider": DNS_PROVIDER,
-        "acme_server":  ACME_SERVER,
-        "domain":       DOMAIN,
-    })
+    """Return status for every server configured in servers.json."""
+    return [build_server_status(s) for s in load_servers()]
 
 
 # ── Health checks ────────────────────────────────────────────────────────────
@@ -251,16 +225,12 @@ _HEALTH_TTL                   = 120  # seconds
 
 def _check_cppm(server: dict = None) -> dict:
     """Attempt an OAuth client_credentials exchange to verify CPPM connectivity."""
-    if server:
-        host          = server.get("cppm_host", "")
-        client_id     = server.get("cppm_client_id", "")
-        client_secret = server.get("cppm_client_secret", "")
-        verify_ssl    = bool(server.get("cppm_verify_ssl", False))
-    else:
-        host          = os.environ.get("CPPM_HOST", "")
-        client_id     = os.environ.get("CPPM_CLIENT_ID", "")
-        client_secret = os.environ.get("CPPM_CLIENT_SECRET", "")
-        verify_ssl    = os.environ.get("CPPM_VERIFY_SSL", "false").lower() == "true"
+    if not server:
+        return {"status": "unknown", "message": "Not configured"}
+    host          = server.get("cppm_host", "")
+    client_id     = server.get("cppm_client_id", "")
+    client_secret = server.get("cppm_client_secret", "")
+    verify_ssl    = bool(server.get("cppm_verify_ssl", False))
     if not host:
         return {"status": "unknown", "message": "Not configured"}
     try:
@@ -291,13 +261,11 @@ def _check_cppm(server: dict = None) -> dict:
 
 def _check_dns(server: dict = None) -> dict:
     """Check DNS provider API connectivity using the configured credentials."""
-    if server:
-        provider = server.get("dns_provider", "")
-        _creds   = server.get("dns_credentials") or {}
-        def g(k): return _creds.get(k, "")
-    else:
-        provider = os.environ.get("DNS_PROVIDER", "")
-        def g(k): return os.environ.get(k, "")
+    if not server:
+        return {"status": "unknown", "message": "Not configured"}
+    provider = server.get("dns_provider", "")
+    _creds   = server.get("dns_credentials") or {}
+    def g(k): return _creds.get(k, "")
 
     if not provider:
         return {"status": "unknown", "message": "Not configured"}
@@ -398,11 +366,11 @@ def _build_health() -> dict:
 
     servers = load_servers()
 
+    if not servers:
+        return {"servers": {}, "checked_at": datetime.datetime.now(_tz()).isoformat()}
+
     # Flatten into (server_id, check_type, server_dict) tasks
-    if servers:
-        tasks = [(s.get("id", "env"), t, s) for s in servers for t in ("cppm", "dns")]
-    else:
-        tasks = [("env", "cppm", None), ("env", "dns", None)]
+    tasks = [(s.get("id", ""), t, s) for s in servers for t in ("cppm", "dns")]
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     per_server: dict = {}
@@ -460,6 +428,11 @@ def _parse_server_form(f: dict) -> dict:
         "acme_server":          f.get("acme_server", "letsencrypt"),
         "dns_provider":         provider,
         "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
+        "trust_exclusions":     [
+            line.strip()
+            for line in f.get("trust_exclusions", "").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ],
     }
 
 
@@ -480,6 +453,7 @@ def _default_server_from_env() -> dict:
         "acme_server":          "letsencrypt",
         "dns_provider":         "cloudflare",
         "dns_credentials":      {},
+        "trust_exclusions":     [],
     }
 
 
@@ -611,6 +585,16 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 @media(max-width:640px){.form-2col{grid-template-columns:1fr}}
 .field select{width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.4rem 0.6rem;color:var(--text);font-size:0.85rem;outline:none;transition:border-color .15s}
 .field select:focus{border-color:var(--accent)}
+
+/* ── Trust exclusions page ── */
+.excl-card{margin-bottom:0.75rem}
+.excl-provider{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:0.75rem;padding-bottom:0.4rem;border-bottom:1px solid var(--border)}
+.excl-row{display:flex;align-items:baseline;gap:0.7rem;padding:0.32rem 0;cursor:pointer;font-size:0.82rem;line-height:1.4}
+.excl-row input[type=checkbox]{accent-color:var(--accent);cursor:pointer;flex-shrink:0;margin-top:0.2rem}
+.excl-cn{font-family:monospace;min-width:16rem;color:var(--text);transition:color .15s,text-decoration .15s}
+.excl-desc{color:var(--muted);font-size:0.75rem;transition:opacity .15s}
+.excl-row.excl-excluded .excl-cn{text-decoration:line-through;color:var(--subtle)}
+.excl-row.excl-excluded .excl-desc{opacity:0.45}
 
 /* ── Overview table ── */
 .overview-table{width:100%;border-collapse:collapse}
@@ -925,6 +909,151 @@ def _server_detail_page(server_id: str, username: str = "") -> str:
                  nav_user=username, active="dashboard", show_nav=True)
 
 
+# ── Known CA patterns per ACME provider ──────────────────────────────────────
+
+_KNOWN_EXCLUSIONS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Let's Encrypt CA Certificate Exclusion", [
+        ("ISRG Root X1", "Root CA — RSA trust anchor"),
+        ("ISRG Root X2", "Root CA — ECDSA trust anchor"),
+        ("R10", "RSA intermediate (2024 batch)"),
+        ("R11", "RSA intermediate (2024 batch)"),
+        ("R12", "RSA intermediate (2024 batch)"),
+        ("R13", "RSA intermediate (2024 batch)"),
+        ("R14", "RSA intermediate (2024 batch)"),
+        ("E5",  "ECDSA intermediate (2024 batch)"),
+        ("E6",  "ECDSA intermediate (2024 batch)"),
+        ("E7",  "ECDSA intermediate (2024 batch)"),
+        ("E8",  "ECDSA intermediate (2024 batch)"),
+        ("E9",  "ECDSA intermediate (2024 batch)"),
+        ("E10", "ECDSA intermediate (2024 batch)"),
+    ]),
+    ("ZeroSSL — Sectigo Chain CA Certificate Exclusion", [
+        ("ZeroSSL RSA Domain Secure Site CA",    "RSA intermediate"),
+        ("ZeroSSL ECC Domain Secure Site CA",    "ECDSA intermediate"),
+        ("USERTrust RSA Certification Authority", "Root CA — RSA"),
+        ("USERTrust ECC Certification Authority", "Root CA — ECDSA"),
+        ("Sectigo AAA Certificate Services",      "Legacy root (cross-signed)"),
+    ]),
+    ("Buypass CA Certificate Exclusion", [
+        ("Buypass Go SSL",          "Intermediate CA"),
+        ("Buypass Class 2 Root CA", "Root CA"),
+    ]),
+]
+
+_ALL_KNOWN_LOWER: set[str] = {
+    p.lower() for _, certs in _KNOWN_EXCLUSIONS for p, _ in certs
+}
+
+
+def _trust_exclusions_page(server: dict, username: str,
+                            flash_type: str = "", flash_msg: str = "") -> str:
+    """Per-server Trust Exclusions configuration page."""
+    sid         = _esc(str(server.get("id", "")))
+    label       = _esc(server.get("label") or server.get("cppm_host", ""))
+    active_list = server.get("trust_exclusions") or []
+    active_lower = {p.lower() for p in active_list}
+
+    flash_html = (
+        f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+        if flash_msg else ""
+    )
+
+    provider_html = ""
+    for provider_name, certs in _KNOWN_EXCLUSIONS:
+        rows = "".join(
+            f'<label class="excl-row">'
+            f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
+            f'{" checked" if p.lower() in active_lower else ""}>'
+            f'<span class="excl-cn">{_esc(p)}</span>'
+            f'<span class="excl-desc">{_esc(d)}</span>'
+            f'</label>'
+            for p, d in certs
+        )
+        provider_html += (
+            f'<div class="card excl-card">'
+            f'<div class="excl-provider">{_esc(provider_name)}</div>'
+            f'{rows}'
+            f'</div>'
+        )
+
+    te_val = _esc("\n".join(active_list))
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">Trust Exclusions</span>
+    <a href="/settings" class="btn btn-ghost">&#8592; Back to Servers</a>
+  </div>
+  <div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.25rem">
+    Server: <strong style="color:var(--text)">{label}</strong>
+  </div>
+  {flash_html}
+  <div class="card" style="margin-bottom:1rem;font-size:0.82rem;color:var(--muted);line-height:1.65">
+    Checked certificates are <strong style="color:var(--text)">excluded</strong> from
+    ClearPass trust list management for this server — they will not be verified or
+    uploaded even if present in the certificate chain. Leave all unchecked to manage
+    all CA certificates automatically (recommended default).
+  </div>
+  <form method="POST" action="/settings/trust-exclusions/{sid}">
+    {provider_html}
+    <div class="card excl-card">
+      <div class="excl-provider">Active Exclusions</div>
+      <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem;line-height:1.5">
+        One CN pattern per line. Case-insensitive partial match against the certificate
+        Subject CN — e.g. <code style="font-size:0.75rem;color:var(--accent)">ISRG Root</code>
+        matches both ISRG Root X1 and X2. Use the checkboxes above or edit directly.
+      </p>
+      <textarea id="trust_exclusions" name="trust_exclusions" rows="4"
+        style="width:100%;background:#0f172a;border:1px solid var(--border2);
+               border-radius:0.4rem;padding:0.5rem 0.75rem;color:var(--text);
+               font-family:monospace;font-size:0.82rem;resize:vertical;outline:none;
+               transition:border-color .15s"
+        onfocus="this.style.borderColor='var(--accent)'"
+        onblur="this.style.borderColor=''"
+        oninput="teSync()"
+        >{te_val}</textarea>
+    </div>
+    <div style="display:flex;gap:0.75rem;margin-top:1.25rem">
+      <button type="submit" class="btn btn-primary">Save Exclusions</button>
+      <a href="/settings" class="btn btn-ghost">Cancel</a>
+    </div>
+  </form>
+</div>"""
+
+    script = """
+<script>
+function teSetStrike(cb) {
+  cb.closest('.excl-row').classList.toggle('excl-excluded', cb.checked);
+}
+function teSync() {
+  var ta = document.getElementById('trust_exclusions');
+  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
+  var active = {};
+  lines.forEach(function(l){active[l.toLowerCase()] = true;});
+  document.querySelectorAll('.excl-row input[type=checkbox]').forEach(function(cb){
+    cb.checked = !!active[cb.value.toLowerCase()];
+    teSetStrike(cb);
+  });
+}
+function teCbChange(cb) {
+  var ta = document.getElementById('trust_exclusions');
+  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
+  if (cb.checked) {
+    if (lines.map(function(l){return l.toLowerCase();}).indexOf(cb.value.toLowerCase()) === -1)
+      lines.push(cb.value);
+  } else {
+    lines = lines.filter(function(l){return l.toLowerCase() !== cb.value.toLowerCase();});
+  }
+  ta.value = lines.join('\\n');
+  teSetStrike(cb);
+}
+document.addEventListener('DOMContentLoaded', teSync);
+</script>"""
+
+    return _base("Trust Exclusions", body + script,
+                 nav_user=username, active="settings", show_nav=True)
+
+
 # ── Settings pages ───────────────────────────────────────────────────────────
 
 def _settings_list_page(servers: list, username: str,
@@ -966,6 +1095,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/trust-exclusions/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Trust Exclusions</a>'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
                 f'{del_btn}'
                 f'</td>'
@@ -1245,6 +1375,7 @@ function switchDns(val) {
   });
 }
 (function() { switchDns(document.getElementById('dns_provider').value); })();
+
 </script>"""
 
     return _base(title, form + script,
@@ -1746,13 +1877,10 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/status/"):
                 server_id = path[len("/api/status/"):].strip("/")
                 try:
-                    servers = load_servers()
-                    if servers:
-                        srv = get_server(server_id)
-                        if srv:
-                            return self._serve_json(build_server_status(srv))
-                        return self._serve_json({"error": "Not found"}, status=404)
-                    return self._serve_json(build_status())
+                    srv = get_server(server_id)
+                    if srv:
+                        return self._serve_json(build_server_status(srv))
+                    return self._serve_json({"error": "Not found"}, status=404)
                 except Exception as e:
                     return self._serve_json({"error": str(e)}, status=500)
 
@@ -1811,6 +1939,18 @@ class Handler(BaseHTTPRequestHandler):
                 _settings_form_page(srv, is_edit=True, username=username)
             )
 
+        if path.startswith("/settings/trust-exclusions/"):
+            server_id = path[len("/settings/trust-exclusions/"):].strip("/")
+            qs    = parse_qs(urlparse(self.path).query)
+            ftype = qs.get("ft", [""])[0]
+            fmsg  = qs.get("fm", [""])[0]
+            srv = get_server(server_id)
+            if srv is None:
+                return self._redirect("/settings?ft=err&fm=Server+not+found")
+            return self._serve_html(
+                _trust_exclusions_page(srv, username, ftype, fmsg)
+            )
+
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1855,6 +1995,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_delete()
         elif path.startswith("/settings/edit/"):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
+        elif path.startswith("/settings/trust-exclusions/"):
+            self._handle_trust_exclusions_save(path[len("/settings/trust-exclusions/"):].strip("/"))
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -1998,6 +2140,34 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/settings?ft=ok&fm=Server+deleted")
         else:
             self._redirect("/settings?ft=err&fm=Server+not+found")
+
+    def _handle_trust_exclusions_save(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        srv = get_server(server_id)
+        if srv is None:
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        f = self._parse_form()
+        patterns = [
+            line.strip()
+            for line in f.get("trust_exclusions", "").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        srv["trust_exclusions"] = patterns
+        try:
+            update_server(server_id, srv)
+            _log.info("trust-exclusions: '%s' saved %d pattern(s) for server '%s'",
+                      username, len(patterns), server_id)
+            self._redirect(
+                f"/settings/trust-exclusions/{server_id}"
+                f"?ft=ok&fm=Trust+exclusions+saved."
+            )
+        except Exception as exc:
+            _log.error("trust-exclusions save failed: %s\n%s", exc, traceback.format_exc())
+            self._serve_html(
+                _trust_exclusions_page(srv, username, "err", f"Save failed: {exc}")
+            )
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.

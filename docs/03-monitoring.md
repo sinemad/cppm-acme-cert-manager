@@ -1,12 +1,10 @@
 # Monitoring
 
-## Web status dashboard
+## Web UI overview
 
-The built-in web dashboard starts automatically with the container and provides
-a real-time view of certificate health, service connectivity, renewal schedule,
-and the activity log.
-
-![Web Status Dashboard](dashboard-screenshot.png)
+The built-in web interface starts automatically with the container. It provides
+a multi-server dashboard, per-server certificate details, service configuration,
+trust exclusion management, and admin user management — all accessible from a browser.
 
 Open in a browser:
 
@@ -16,23 +14,32 @@ http://<docker-host>:8080/
 
 > Change the port by setting `STATUS_PORT` in `.env` (default `8080`).
 
+### Navigation
+
+| Link | Route | Requires sign-in |
+|---|---|---|
+| **Dashboard** | `/` | No (public by default) |
+| **Servers** | `/settings` | Yes |
+| **Users** | `/admin/users` | Yes |
+| **Sign Out** | `/logout` | — |
+
+Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to require sign-in for the
+Dashboard as well. The Servers and Users pages always require authentication.
+
 ---
 
-## First-time setup wizard
+## First-time setup
 
-On first access, no admin accounts exist. The dashboard shows a **Setup** link
-in the navigation bar. Click it — or navigate directly to `/setup` — to create
-the initial administrator account.
+On first access, no admin accounts exist. The navigation bar shows a **Setup**
+link. Click it — or navigate directly to `/setup` — to create the initial
+administrator account.
 
 **Requirements:** username (letters, digits, `-`, `_`, 1–64 chars) and a
 password of at least 8 characters.
 
-After the account is created you are redirected to the sign-in page. Use the
-same credentials to log in.
+After the account is created you are redirected to the sign-in page.
 
 ### CLI alternative
-
-If you prefer to create the first account without a browser:
 
 ```bash
 docker exec -it cppm-acme-cert-manager cppm-users add admin
@@ -48,27 +55,64 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 | **Credential storage** | bcrypt-hashed in `/opt/cppm-certs/admin.htpasswd` (persists across rebuilds) |
 | **Session token** | HMAC-SHA256 signed cookie; secret in `/opt/cppm-certs/.session-secret` |
 | **Public dashboard** | By default the certificate status page is readable without login |
-| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to protect the status page |
-
-The `/admin/*` routes and the Servers page always require an authenticated session,
-regardless of `REQUIRE_AUTH_FOR_STATUS`.
+| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to protect the dashboard |
 
 ---
 
-## Dashboard panels
+## Main dashboard — multi-server overview
+
+The main page (`/`) shows a table with one row per configured ClearPass server.
+
+| Column | What you see |
+|---|---|
+| **ClearPass Server** | Friendly label and host address |
+| **DNS & ACME Provider** | DNS provider name with the ACME certificate authority listed below |
+| **ECC Certificate** | Days remaining (colour-coded), expiry date, service label (HTTPS · Web Interface) |
+| **RSA Certificate** | Days remaining (colour-coded), expiry date, service label (RADIUS · 802.1X) |
+| **Next Renewal Check** | Countdown until the next scheduled renewal check and the cron schedule |
+| *(Details button)* | Opens the per-server detail view |
+
+Certificate day counts are colour-coded:
+
+| Colour | Meaning |
+|---|---|
+| **Green** | More than 30 days remaining |
+| **Amber** | 15–30 days remaining |
+| **Red** | Fewer than 15 days remaining |
+
+The table refreshes automatically every 30 seconds. If no servers have been
+configured yet the table shows a link to add the first one.
+
+Click any row or the **Details →** button to open the per-server detail view.
+
+---
+
+## Per-server detail view
+
+Navigate to a server's detail page by clicking **Details →** on the main
+dashboard, or directly via `/server/<id>`.
+
+### Panels
 
 | Panel | What you see |
 |---|---|
-| **ECC Certificate** | Days remaining (green/amber/red), expiry and issue dates, issuer CN, key type |
-| **RSA Certificate** | Same fields for the RSA cert |
+| **ECC Certificate** | Days remaining, expiry and issue dates, issuer CN, key type and size, SAN list |
+| **RSA Certificate** | Same fields for the RSA certificate |
 | **Renewal Schedule** | Countdown to the next `renew.sh` run (02:00 or 14:00 container-local time) |
-| **Configuration** | Active domain, DNS provider (with status light), ACME CA, ClearPass hostname (with status light) |
-| **Activity Log** | Last 40 `status.log` events, newest first, colour-coded by level |
+| **Configuration** | Domain, DNS provider (with status light), ACME certificate authority, ClearPass host (with status light) |
+| **Activity Log** | Last 40 `status.log` entries for this server, newest first, colour-coded by level |
 
-### Service status lights
+### Certificate details modal
 
-The per-server **Details** page shows a real-time connectivity indicator next
-to the DNS provider and ClearPass host in the Configuration card:
+Click **View Details** on either certificate card to see the full decoded
+certificate: subject CN, SANs, issuer, serial number, key algorithm and size,
+validity window, and the raw PEM with a **Copy** button. Press **Escape** or
+click outside the modal to close it.
+
+### Service connectivity status lights
+
+The Configuration card shows a real-time connectivity indicator next to the
+DNS provider and ClearPass host:
 
 | Colour | Meaning |
 |---|---|
@@ -78,13 +122,12 @@ to the DNS provider and ClearPass host in the Configuration card:
 | **Gray (pulsing)** | Check in progress |
 | **Gray (solid)** | Not configured or provider check not available |
 
-The check runs automatically on page load and repeats every 5 minutes. Hover
-over a dot to see the specific status message. Results are cached server-side
-for 2 minutes so the dashboard never hammers external APIs.
+The check runs on page load and repeats every 5 minutes. Hover over a dot to
+see the specific status message. Results are cached server-side for 2 minutes.
 
-**ClearPass check** — attempts a full OAuth `client_credentials` exchange
-against `/api/oauth`. A green dot confirms the host is reachable and the
-API client credentials are correct.
+**ClearPass check** — attempts an OAuth `client_credentials` exchange against
+`/api/oauth`. A green dot confirms the host is reachable and the API client
+credentials are valid.
 
 **DNS provider checks** — provider-specific:
 
@@ -96,65 +139,63 @@ API client credentials are correct.
 | GoDaddy | `GET /v1/domains` with key:secret |
 | Route 53 | TCP reachability to `route53.amazonaws.com` |
 
-### Certificate Details modal
-
-Click **View Details** on either cert card to see the full decoded certificate:
-subject CN, SANs, issuer, serial number, key algorithm and size, validity
-window, and the raw PEM with a **Copy** button. Press **Escape** or click
-outside the modal to close it.
-
-The page polls `/api/status` every 30 seconds and updates in place. It has
-no external dependencies and works in air-gapped environments.
-
 ---
 
-## Servers page
+## Servers page — ClearPass server configuration
 
-The Servers page (authenticated users only) manages the list of ClearPass
-servers and their associated ACME and DNS configurations.
+The Servers page (`/settings`) manages the list of ClearPass servers and their
+ACME and DNS provider configurations. Sign-in is required.
 
 Navigate to **Servers** in the top navigation bar.
 
+### Server list actions
+
+Each server row shows three action buttons:
+
+| Button | Action |
+|---|---|
+| **Trust Exclusions** | Configure which CA certificates are excluded from trust list management for this server |
+| **Edit** | Modify server credentials, DNS provider, domain, and ACME settings |
+| **Delete** | Remove the server entry (inline two-step confirmation) |
+
 ### Adding a server
 
-Click **+ Add Server**. Fill in all fields for the new server entry.
-
-Each server entry includes:
+Click **+ Add Server** and fill in all fields.
 
 | Section | Fields |
 |---|---|
 | **Identity** | Friendly label |
-| **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL checkbox |
-| **Domain & ACME** | Domain, ACME email, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
-| **DNS Provider** | Provider selector; credential fields update dynamically based on the selected provider |
+| **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL |
+| **Domain & ACME** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
+| **DNS Provider** | Provider selector; credential fields update dynamically for the selected provider |
 
-### DNS provider credential fields
+#### DNS provider credential fields
 
-| Provider | Fields shown |
+| Provider | Fields |
 |---|---|
-| Cloudflare | API Token + Zone ID (recommended), or Global Key + Email |
+| Cloudflare | API Token + Zone ID (recommended), or Global API Key + Email |
 | Porkbun | API Key + Secret API Key |
 | AWS Route 53 | Access Key ID + Secret Access Key + Region |
 | DigitalOcean | API Token |
 | GoDaddy | API Key + API Secret |
 
-Only the credential fields for the selected provider are submitted — fields for
-other providers are disabled in the browser before form submission.
+Only the credential fields for the active provider are submitted — all others
+are disabled in the browser before the form is sent.
 
 ### Editing and deleting
 
 - Click **Edit** on any row to modify an existing server entry.
-- Click **Delete** to initiate an inline two-step confirmation (no browser popup).
+- Click **Delete** to start an inline two-step confirmation — no browser popup.
+
+Each ClearPass host must be unique across all server entries. Attempts to save
+a duplicate host are rejected with an error message.
 
 Server configurations are stored in `/opt/cppm-certs/servers.json` (container
-path `/data/certs/servers.json`), which is chmod 600 and persists across
-container rebuilds alongside the certificates.
+path `/data/certs/servers.json`, chmod 600) and persist across container rebuilds.
 
----
+### CLI alternative
 
-### CLI server management
-
-All server operations are also available via the CLI without a browser:
+All server operations are available without a browser:
 
 ```bash
 # List all configured servers (shows IDs needed for other commands)
@@ -179,21 +220,74 @@ of secret field values.
 
 ---
 
+## Trust Exclusions — per-server CA certificate management
+
+Each ClearPass server has its own trust exclusion configuration. Excluded CA
+certificates are not verified or uploaded to the ClearPass trust list for that
+server, even if they are present in the certificate chain.
+
+**By default no certificates are excluded** — the tool manages all CA and
+intermediate CA certificates automatically.
+
+### Accessing trust exclusions
+
+From the Servers page, click **Trust Exclusions** in the row for the server you
+want to configure.
+
+![Trust Exclusions page](trust-exclusions-screenshot.png)
+
+### Configuring exclusions
+
+The Trust Exclusions page groups known CA certificates by ACME provider:
+
+| Section | Certificates |
+|---|---|
+| **Let's Encrypt CA Certificate Exclusion** | ISRG Root X1/X2 (roots), R10–R14 (RSA intermediates), E5–E10 (ECDSA intermediates) |
+| **ZeroSSL — Sectigo Chain CA Certificate Exclusion** | ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
+| **Buypass CA Certificate Exclusion** | Buypass Go SSL, Buypass Class 2 Root CA |
+
+Check a box to exclude that certificate. The label text strikes through to
+confirm the selection. Unchecking re-enables management for that certificate.
+
+The **Active Exclusions** textarea at the bottom shows exactly what will be
+saved — one CN pattern per line. You can edit it directly for custom patterns
+not in the preset list. Partial CN matching is supported:
+`ISRG Root` matches both `ISRG Root X1` and `ISRG Root X2`.
+
+Exclusions take effect at the next scheduled or manual trust check.
+
+### Global fallback file
+
+A global `trust-exclusions.conf` file on the persistent volume applies to any
+server that has **no per-server exclusions configured**:
+
+```
+/opt/cppm-certs/trust-exclusions.conf   (host path)
+/data/certs/trust-exclusions.conf       (container path)
+```
+
+**Priority:** per-server exclusions (from `servers.json`) always take
+precedence. The file is only consulted when a server's `trust_exclusions` list
+is empty. This means existing installations with a `trust-exclusions.conf` file
+continue to work without any migration — configure per-server exclusions
+through the web UI when you are ready to move to per-server control.
+
+---
+
 ## Admin user management
 
 Navigate to **Users** in the top navigation bar (sign-in required).
 
 | Action | How |
 |---|---|
-| **Add user** | Fill in the Add User form on the left |
-| **Change password** | Select a user from the dropdown in the Change Password form |
+| **Add user** | Fill in the Add User form |
+| **Change password** | Select a user in the Change Password form |
 | **Delete user** | Click Delete on the user row → confirm inline |
 
-You cannot delete your own account while signed in.
+You cannot delete your own account while signed in. If the last user is deleted
+the setup wizard becomes available again on the next page load.
 
-### CLI user management
-
-All user operations are also available via the CLI:
+### CLI alternative
 
 ```bash
 # Add a user
@@ -209,10 +303,9 @@ docker exec -it cppm-acme-cert-manager cppm-users delete <username>
 docker exec -it cppm-acme-cert-manager cppm-users list
 ```
 
-Passwords must be at least 8 characters. If the last user is deleted the
-setup wizard becomes available again on the next page load.
+Passwords must be at least 8 characters.
 
-### Dashboard server log
+### Web service log
 
 ```bash
 # Startup confirmation, HTTP request log, and any errors
@@ -229,11 +322,11 @@ column format:
 
 ```
 TIMESTAMP           | LEVEL  | CATEGORY | MESSAGE
-2026-03-17 10:43:07 | INFO   | STARTUP  | Container started – domain=cppm.example.com
+2026-03-17 10:43:07 | INFO   | STARTUP  | Container started
 2026-03-17 10:43:07 | INFO   | CERT     | No certificates found – starting first-time issuance
 2026-03-17 10:43:34 | OK     | CERT     | New certificates issued (ECC + RSA) via cloudflare DNS-01
 2026-03-17 10:43:34 | OK     | CERT     | ECC+RSA certs installed – expires Jun 15 2026 (89 days remaining)
-2026-03-17 10:43:38 | OK     | TRUST    | 7 LE CA certs verified – 2 uploaded, 5 already trusted
+2026-03-17 10:43:38 | OK     | TRUST    | 7 CA certs verified – 2 uploaded, 5 already trusted
 2026-03-17 10:43:42 | OK     | UPLOAD   | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
 2026-03-17 10:43:42 | INFO   | STARTUP  | supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
@@ -263,17 +356,17 @@ tail -10 /opt/cppm-certs/status.log
 |---|---|
 | `OK` | Task completed successfully |
 | `INFO` | Informational — no action required |
-| `WARN` | Something unexpected but recoverable (e.g. trust cert flags needed patching) |
+| `WARN` | Something unexpected but recoverable |
 | `FAILED` | Task failed — check the detailed log for the corresponding category |
 
 ## Categories
 
 | Category | Written by | Covers |
 |---|---|---|
-| `STARTUP` | `entrypoint.sh` | Container start, supercronic launch, env validation |
+| `STARTUP` | `entrypoint.sh` | Container start, supercronic launch |
 | `CERT` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
 | `RENEW` | `renew.sh` | Daily renewal check results |
-| `TRUST` | `clearpass_upload.py`, `trust_check.sh` | Let's Encrypt trust list pre-flight and weekly check |
+| `TRUST` | `clearpass_upload.py`, `trust_check.sh` | CA trust list pre-flight and weekly check |
 | `UPLOAD` | `deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
 
 ---
@@ -283,7 +376,7 @@ tail -10 /opt/cppm-certs/status.log
 ### Normal restart (both certs already installed)
 
 ```
-2026-03-18 09:00:01 | INFO   | STARTUP | Container started – domain=cppm.example.com
+2026-03-18 09:00:01 | INFO   | STARTUP | Container started
 2026-03-18 09:00:02 | OK     | CERT    | ECC+RSA valid – expires Jun 15 2026 (88 days remaining)
 2026-03-18 09:00:02 | INFO   | STARTUP | supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
@@ -299,50 +392,34 @@ tail -10 /opt/cppm-certs/status.log
 ```
 2026-06-01 02:00:01 | OK     | RENEW   | Certificates renewed – running install and upload
 2026-06-01 02:00:08 | OK     | CERT    | ECC+RSA certs installed – expires Sep 13 2026 (89 days remaining)
-2026-06-01 02:00:11 | OK     | TRUST   | 7 LE CA certs verified – 0 uploaded, 7 already trusted
+2026-06-01 02:00:11 | OK     | TRUST   | 7 CA certs verified – 0 uploaded, 7 already trusted
 2026-06-01 02:00:15 | OK     | UPLOAD  | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
 ```
 
-### Weekly trust list check (no renewal needed)
+### Weekly trust list check (no action needed)
 
 ```
-2026-06-08 03:00:02 | INFO   | TRUST   | Periodic trust list check started
-2026-06-08 03:00:07 | OK     | TRUST   | 9 LE CA certs verified – 0 uploaded, 0 patched, 9 already trusted
-```
-
-### Weekly trust list check (missing cert uploaded)
-
-```
-2026-06-08 03:00:02 | INFO   | TRUST   | Periodic trust list check started
-2026-06-08 03:00:09 | OK     | TRUST   | 9 LE CA certs verified – 1 uploaded, 0 patched, 8 already trusted
-```
-
-### Upload failure
-
-```
-2026-06-01 02:00:15 | FAILED | UPLOAD  | ClearPass upload failed (exit 1) – check upload.log
+2026-06-08 03:00:07 | OK     | TRUST   | 9 CA certs verified – 0 uploaded, 0 patched, 9 already trusted
 ```
 
 ---
 
 ## Detailed logs
 
-The `.logs/` directory contains verbose output for deeper investigation:
-
 ```bash
 # Container startup and cert state decisions
 tail -100 /opt/cppm-certs/.logs/startup.log
 
-# acme.sh issuance and renewal full output (includes DNS provider API calls)
+# acme.sh issuance and renewal full output
 tail -100 /opt/cppm-certs/.logs/renewal.log
 
-# ClearPass API upload detail (OAuth, PKCS12, API responses)
+# ClearPass API upload detail
 tail -100 /opt/cppm-certs/.logs/upload.log
 
 # supercronic execution timestamps
 tail -50 /opt/cppm-certs/.logs/cron.log
 
-# Web dashboard startup, HTTP request log, and errors
+# Web dashboard startup and request log
 tail -50 /opt/cppm-certs/.logs/status_server.log
 ```
 
@@ -376,20 +453,4 @@ openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
 openssl s_client -connect cppm.example.com:443 \
     -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -issuer -dates
-```
-
----
-
-## Check which DNS provider is active
-
-```bash
-docker exec -it cppm-acme-cert-manager sh -c 'echo "DNS_PROVIDER=${DNS_PROVIDER}"'
-```
-
-The renewal log also records the active provider on each issuance:
-
-```
-[ISSUE] Domain: cppm.example.com
-[ISSUE] Provider: porkbun
-[ISSUE] Server:   letsencrypt
 ```

@@ -20,16 +20,26 @@ docker compose logs --tail=50
 
 ## Container exits immediately on start
 
-**Cause:** A required environment variable is missing.
+**Cause:** A required `.env` variable is missing (`TZ`, `STATUS_PORT`, or
+`CPPM_CALLBACK_PORT`) or the acme.sh binary is not found in the image.
 
 ```bash
-docker compose logs | grep "Missing required env var"
+docker compose logs | head -20
 ```
 
-Add the missing variable to `.env` and recreate:
+If the error is about a missing env var, add it to `.env` and recreate:
 ```bash
 docker compose up -d --force-recreate
 ```
+
+If acme.sh is not found, rebuild the image:
+```bash
+docker compose build --no-cache && docker compose up -d
+```
+
+> **Note:** If no servers are configured in `servers.json`, the container logs
+> a warning but stays running — it is waiting for you to add a server via the
+> web UI or CLI. This is expected on a fresh install.
 
 ---
 
@@ -45,24 +55,26 @@ see this, check your host environment or `.env` for a string-valued `DEBUG`.
 
 ## DNS provider credential error
 
-**Symptom:** Container exits at startup with `Missing required env var` or
+**Symptom:** Startup log shows `missing required field` for a server, or
 `<PROVIDER> credentials missing`.
 
-**Cause:** `DNS_PROVIDER` is set but the required credential variables for
-that provider are missing or empty.
+**Cause:** A server entry in `servers.json` is missing required DNS credential
+fields. This is logged as a warning and the container skips that server — it
+does not exit.
 
-| Provider | Required variables |
-|---|---|
-| `cloudflare` | `CF_Token` **or** `CF_Key` + `CF_Email` |
-| `porkbun` | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
-| `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
-| `digitalocean` | `DO_API_KEY` |
-| `godaddy` | `GD_Key` + `GD_Secret` |
+Fix: update the server entry in the web UI (**Servers → Edit**) or CLI:
 
-Fix: add the missing variables to `.env` and recreate:
 ```bash
-docker compose up -d --force-recreate
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 ```
+
+| Provider | Required fields |
+|---|---|
+| Cloudflare | `CF_Token` **or** `CF_Key` + `CF_Email` |
+| Porkbun | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
+| Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| DigitalOcean | `DO_API_KEY` |
+| GoDaddy | `GD_Key` + `GD_Secret` |
 
 ---
 
@@ -92,10 +104,17 @@ tail -100 /opt/cppm-certs/.logs/renewal.log
 
 **Symptom:** `upload.log` contains `HTTP 400 invalid_client`.
 
-**Cause:** `CPPM_CLIENT_SECRET` is wrong, or the API client is disabled.
-Test directly:
+**Cause:** The `Client Secret` stored for the server is wrong, or the API
+client is disabled in CPPM. The credentials are stored in `servers.json`
+and configured via the web UI (**Servers → Edit**).
+
+Test the credentials directly (the container's `eval` loop sets the env vars
+from `servers.json` before this runs):
 
 ```bash
+# First get a shell with the server's env vars set
+eval "$(docker exec cppm-acme-cert-manager cppm-servers env <server-id>)"
+
 docker exec -it cppm-acme-cert-manager python3 -c "
 import os, requests
 r = requests.post(
@@ -112,7 +131,8 @@ print(r.status_code, r.json())
 ```
 
 Fix: verify the client secret in CPPM Admin UI under
-**Administration → API Services → API Clients**.
+**Administration → API Services → API Clients**, then update it in the web UI:
+**Servers → Edit → Client Secret → Save Changes**.
 
 ---
 
@@ -257,25 +277,28 @@ Check the `TRUST` status lines. If any show `FAILED`, add the cert manually:
 
 1. Copy the missing cert from the container:
    ```bash
-   docker cp cppm-acme-cert-manager:/opt/cppm/le-certs/isrg-root-x1.pem .
+   docker cp cppm-acme-cert-manager:/opt/cppm/acme-ca-certs/isrg-root-x1.pem .
    ```
 2. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
 3. Set `cert_usage` to include **EAP** and **Others** → Save.
 
 ---
 
-## Let's Encrypt rate limit
+## ACME rate limit hit
 
 **Symptom:** `renewal.log` contains `too many certificates already issued`.
 
-Switch to staging to test without hitting rate limits:
+Switch to staging to test without hitting rate limits. Update the server entry
+in the web UI: **Servers → Edit → Certificate Authority → Let's Encrypt (Staging) → Save Changes**,
+then force a re-issue:
+
 ```bash
-# Edit .env: ACME_SERVER=letsencrypt_test
+# Edit .env: FORCE_RENEW=true
 docker compose up -d --force-recreate
 ```
 
-Do not use staging certs in production. Switch back to `ACME_SERVER=letsencrypt`
-and wait 7 days before re-issuing.
+Do not use staging certs in production. Switch back to **Let's Encrypt** in
+the server edit form and wait 7 days before re-issuing production certs.
 
 ---
 

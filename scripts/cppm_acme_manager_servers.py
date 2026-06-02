@@ -31,7 +31,9 @@ try:
         add_server,
         delete_server,
         get_server,
+        get_server_shell_env,
         load_servers,
+        migrate_from_env,
         update_server,
     )
 except ImportError as exc:
@@ -198,6 +200,25 @@ def _collect_server(existing: dict = None) -> dict:
 
 # ── Subcommands ───────────────────────────────────────────────────────────────
 
+def cmd_ids() -> int:
+    """Print one server ID per line — used by shell scripts to iterate over servers."""
+    for s in load_servers():
+        sid = s.get("id", "")
+        if sid:
+            print(sid)
+    return 0
+
+
+def cmd_env(server_id: str) -> int:
+    """Print shell-sourceable export statements for a server's configuration."""
+    output = get_server_shell_env(server_id)
+    if output is None:
+        print(f"Server '{server_id}' not found.  Run 'list' to see all IDs.", file=sys.stderr)
+        return 1
+    print(output)
+    return 0
+
+
 def cmd_list() -> int:
     servers = load_servers()
     if not servers:
@@ -331,18 +352,22 @@ def main() -> int:
     if cmd == "list":
         return cmd_list()
 
+    if cmd == "ids":
+        return cmd_ids()
+
     if cmd == "add":
         return cmd_add()
 
-    if cmd in ("show", "edit", "delete"):
+    if cmd in ("show", "edit", "delete", "env"):
         if not rest:
             print(f"Usage: cppm-servers {cmd} <id>")
             print("  Use 'list' to see server IDs.")
             return 1
-        return {"show": cmd_show, "edit": cmd_edit, "delete": cmd_delete}[cmd](rest[0])
+        return {"show": cmd_show, "edit": cmd_edit, "delete": cmd_delete,
+                "env": cmd_env}[cmd](rest[0])
 
     print(f"Unknown command: '{cmd}'")
-    print("Available commands: list, show, add, edit, delete")
+    print("Available commands: list, ids, show, add, edit, delete, env")
     return 1
 
 

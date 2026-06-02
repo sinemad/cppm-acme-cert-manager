@@ -37,7 +37,7 @@ ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/renewal.log"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
+DOMAIN="${DOMAIN:-}"
 DNS_PROVIDER="${DNS_PROVIDER:-cloudflare}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR"

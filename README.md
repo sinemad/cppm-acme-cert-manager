@@ -53,7 +53,7 @@ Two certificates are issued and maintained simultaneously:
 4. [Initial Setup](#initial-setup)
 5. [How It Works](#how-it-works)
 6. [Certificate Files](#certificate-files)
-7. [Web Status Dashboard](#web-status-dashboard)
+7. [Web UI](#web-ui)
 8. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
 9. [Maintenance](#maintenance)
 10. [Troubleshooting](#troubleshooting)
@@ -104,9 +104,7 @@ cppm-acme-cert-manager/
 ├── Dockerfile                  # Alpine + acme.sh + Python image
 ├── docker-compose.yml          # Service definition, volume and port mapping
 ├── env-example                 # Safe-to-commit reference — copy to .env
-├── .env.example                # Annotated local reference
 ├── .gitignore
-├── .dockerignore
 ├── setup.sh                    # One-time host preparation script
 ├── config/
 │   └── crontab                 # Renewal schedule (supercronic, inside container)
@@ -118,10 +116,14 @@ cppm-acme-cert-manager/
 │   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
 │   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
 │   ├── trust_check.sh          # Weekly trust list verification (supercronic, Sunday 03:00)
-│   ├── status_server.py        # Read-only web status dashboard (port STATUS_PORT)
+│   ├── status_server.py        # Web UI and REST API (port STATUS_PORT)
+│   ├── config_utils.py         # ClearPass server config CRUD (/data/certs/servers.json)
+│   ├── auth_utils.py           # Session tokens, bcrypt credential storage
+│   ├── cppm_acme_manager_servers.py  # CLI: manage ClearPass server entries
+│   ├── cppm_acme_manager_users.py    # CLI: manage admin user accounts
 │   └── status.sh               # Shared status logging library
-└── le-certs/
-    └── trust-exclusions.conf   # Default exclusion list for trust list uploads (admin-editable)
+├── acme-ca-certs/
+│   └── trust-exclusions.conf   # Default exclusion list for trust list uploads (admin-editable)
 └── docs/
     ├── 01-initial-setup.md
     ├── 02-how-it-works.md
@@ -137,6 +139,9 @@ cppm-acme-cert-manager/
 ```
 /opt/cppm-certs/                              ← bind-mounted to /data/certs in container
 ├── status.log                                ← one-line-per-event summary log
+├── servers.json                              ← ClearPass server configs (chmod 600)
+├── admin.htpasswd                            ← web UI admin credentials (bcrypt, chmod 600)
+├── .session-secret                           ← HMAC session signing key (chmod 600)
 ├── <domain>.ecc.cer                          ← ECC domain cert (PEM)
 ├── <domain>.ecc.key                          ← ECC private key (chmod 600)
 ├── <domain>.ecc.fullchain.cer                ← ECC cert + intermediates
@@ -148,7 +153,7 @@ cppm-acme-cert-manager/
 ├── <domain>_ecc/                             ← acme.sh ECC internal state
 ├── <domain>/                                 ← acme.sh RSA internal state
 ├── .acme-state/                              ← acme.sh config and account keys
-├── trust-exclusions.conf                         ← CA cert upload exclusion list (admin-editable)
+├── trust-exclusions.conf                     ← CA cert upload exclusion list (admin-editable)
 └── .logs/
     ├── startup.log
     ├── renewal.log
@@ -388,36 +393,100 @@ an ephemeral PKCS12 file written to `/tmp` and deleted immediately after upload.
 
 ---
 
-## Web Status Dashboard
+## Web UI
 
-A read-only HTTP dashboard starts automatically with the container and is
-available on `STATUS_PORT` (default **8080**):
-
-![Web Status Dashboard](docs/dashboard-screenshot.png)
+A full-featured web interface starts automatically with the container on
+`STATUS_PORT` (default **8080**):
 
 ```
 http://<docker-host>:8080/
 ```
 
-### What it shows
+### Pages
 
-| Panel | Contents |
+| Page | Route | Requires sign-in |
+|---|---|---|
+| **Dashboard** — multi-server overview table | `/` | No (public by default) |
+| **Server Detail** — per-server certificate status | `/server/<id>` | No (public by default) |
+| **Servers** — ClearPass server configuration | `/settings` | Yes |
+| **Users** — admin account management | `/admin/users` | Yes |
+| **Setup** — first-time admin account creation | `/setup` | No (only before first user exists) |
+
+Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to require sign-in for the
+Dashboard as well. The Servers and Users pages always require authentication.
+
+### First-time setup
+
+On first access the navigation bar shows a **Setup** link. Create the initial
+admin account there, or via the CLI:
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-users add admin
+```
+
+### Main dashboard
+
+The main page shows a table with one row per configured ClearPass server.
+
+| Column | What you see |
 |---|---|
-| **ECC Certificate** | Days remaining, expiry date, issue date, issuer, key type, CPPM service — color-coded green/amber/red |
-| **RSA Certificate** | Same as above for the RSA cert |
-| **Renewal Schedule** | Countdown to the next renewal check, local time and UTC |
-| **Configuration** | Domain, DNS provider, ACME CA, ClearPass hostname |
-| **Activity Log** | Last 40 events from `status.log`, newest first, with level badges |
-| **Certificate Details** | Click **View Details** on either cert card to see the full decoded cert: subject, SANs, issuer, serial, key info, validity window, and scrollable PEM with a Copy button |
+| **ClearPass Server** | Friendly label and host address |
+| **DNS & ACME Provider** | DNS provider with the ACME certificate authority listed below |
+| **ECC Certificate** | Days remaining (colour-coded), expiry date, HTTPS · Web Interface label |
+| **RSA Certificate** | Days remaining (colour-coded), expiry date, RADIUS · 802.1X label |
+| **Next Renewal Check** | Countdown to the next scheduled renewal run and the cron schedule |
 
-The page auto-refreshes every 30 seconds. It has no external dependencies and
-works in air-gapped environments.
+The table refreshes every 30 seconds. Click any row or **Details →** to open
+the per-server detail view.
+
+### Per-server detail view
+
+Shows the full certificate status for one server: cert cards with days
+remaining, expiry, issuer and key type; renewal schedule; Configuration card
+with service connectivity status lights for the DNS provider and ClearPass host;
+and the last 40 activity log entries. Click **View Details** on a cert card to
+inspect the full decoded certificate with a PEM copy button.
+
+### Servers page — ClearPass server configuration
+
+The **Servers** page (sign-in required) is where you register ClearPass servers
+and configure their ACME and DNS provider settings. Each entry covers:
+
+- **Identity** — friendly label
+- **ClearPass** — host, API client credentials, cert passphrase, callback host/port, SSL verification toggle
+- **Domain & ACME** — domain, ACME contact email, certificate authority (Let's Encrypt / Staging / ZeroSSL / Buypass)
+- **DNS Provider** — provider selection with dynamic credential fields (Cloudflare, Porkbun, Route 53, DigitalOcean, GoDaddy)
+
+Each ClearPass host must be unique. Configurations are stored in
+`/opt/cppm-certs/servers.json` (chmod 600) and survive container rebuilds.
+
+All Servers page operations are also available via the CLI:
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-servers list
+docker exec -it cppm-acme-cert-manager cppm-servers add
+docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
+docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
+```
+
+### Users page
+
+The **Users** page (sign-in required) manages admin accounts — add users,
+change passwords, delete users. Also available via the CLI:
+
+```bash
+docker exec -it cppm-acme-cert-manager cppm-users add <username>
+docker exec -it cppm-acme-cert-manager cppm-users passwd <username>
+docker exec -it cppm-acme-cert-manager cppm-users delete <username>
+```
 
 ### Configuration
 
 ```ini
 # .env
-STATUS_PORT=8080          # Port for the web dashboard (default: 8080)
+STATUS_PORT=8080                  # Port for the web UI (default: 8080)
+REQUIRE_AUTH_FOR_STATUS=false     # Set true to require login for the dashboard
+SESSION_LIFETIME_HOURS=8          # Session cookie lifetime in hours
 ```
 
 The port must be published in `docker-compose.yml` (it is by default):
@@ -429,7 +498,7 @@ ports:
 
 ### Logs
 
-Dashboard startup and any errors are written to:
+Web UI startup, HTTP requests, and errors are written to:
 
 ```
 /opt/cppm-certs/.logs/status_server.log

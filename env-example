@@ -1,147 +1,85 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # ClearPass Certificate Manager – Environment Variable Reference
 #
-# Copy this file to .env and fill in your values before first run:
-#   cp env-example .env
-#   nano .env
+# Copy this file to .env before first run:
+#   cp env-example .env   (setup.sh does this automatically)
+#   chmod 600 .env
 #
-# NEVER commit .env to source control — it contains secrets.
-# This file (env-example) is safe to commit: it contains no real credentials.
+# NEVER commit .env to source control.
+# This file (env-example) is safe to commit: it contains no credentials.
+#
+# ── Configuration model ───────────────────────────────────────────────────────
+#
+# ClearPass server credentials, DNS provider, domain, and ACME settings are
+# managed through the web UI (Servers page) and stored in:
+#   /opt/cppm-certs/servers.json
+#
+# The variables below are the only ones that still need to be in .env — they
+# control container-level behaviour and docker-compose port mappings that must
+# be known before the container starts.
+#
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── General ───────────────────────────────────────────────────────────────────
-# Timezone for the container. Used in log timestamps and cron scheduling.
+
+# ── Timezone ──────────────────────────────────────────────────────────────────
+# Container timezone. Used in log timestamps and cron scheduling.
 # See: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 TZ=America/New_York
 
-# ── Domain ────────────────────────────────────────────────────────────────────
-# The FQDN of the ClearPass server. A certificate will be issued for this name.
-DOMAIN=cppm.example.com
 
-# ── ACME / Let's Encrypt ──────────────────────────────────────────────────────
-# Email address registered with Let's Encrypt for expiry notifications.
-ACME_EMAIL=admin@example.com
-
-# ACME certificate authority.
-# Options: letsencrypt | letsencrypt_test | zerossl | buypass
-# Use letsencrypt_test during initial setup to avoid rate limits.
-ACME_SERVER=letsencrypt
-
-# ── DNS Provider ──────────────────────────────────────────────────────────────
-# The DNS provider used for the ACME DNS-01 challenge.
-# Only one provider's credentials need to be set — the rest can be left blank.
-#
-# Supported values:
-#   cloudflare    (default) – scoped API token or global key
-#   porkbun       – API key + secret
-#   route53       – AWS IAM credentials
-#   digitalocean  – personal access token
-#   godaddy       – API key + secret
-#   NOTE: <any> IS NOT SUPPORTED & EXPERIMENTAL
-#   <any>         – passthrough: treated as the bare acme.sh dnsapi plugin name
-#                   e.g. DNS_PROVIDER=linode_v4 → uses dns_linode_v4
-#                   See: https://github.com/acmesh-official/acme.sh/wiki/dnsapi
-DNS_PROVIDER=cloudflare
-
-# ── Cloudflare (DNS_PROVIDER=cloudflare) ─────────────────────────────────────
-# Option A – Scoped API token (preferred, least privilege)
-#   1. https://dash.cloudflare.com/profile/api-tokens → Create Token
-#   2. Permissions: Zone > DNS > Edit
-#   3. Zone Resources: Include > Specific zone > <your zone>
-#   4. Copy the token, Account ID, and Zone ID (Zone Overview page)
-CF_Token=
-CF_Account_ID=
-CF_Zone_ID=
-
-# Option B – Global API key (broader permissions, use only if Option A unavailable)
-# CF_Key=
-# CF_Email=
-
-# ── Porkbun (DNS_PROVIDER=porkbun) ───────────────────────────────────────────
-#   1. https://porkbun.com/account/api → Create API key
-#   2. Enable API access on the domain under Domain Management
-# PORKBUN_API_KEY=
-# PORKBUN_SECRET_API_KEY=
-
-# ── Route53 / AWS (DNS_PROVIDER=route53) ─────────────────────────────────────
-# IAM policy required:
-#   route53:ChangeResourceRecordSets, route53:ListHostedZones,
-#   route53:GetChange, route53:ListResourceRecordSets
-# AWS_ACCESS_KEY_ID=
-# AWS_SECRET_ACCESS_KEY=
-# AWS_DEFAULT_REGION=us-east-1
-
-# ── DigitalOcean (DNS_PROVIDER=digitalocean) ──────────────────────────────────
-#   https://cloud.digitalocean.com/account/api/tokens → Generate Token (Write scope)
-# DO_API_KEY=
-
-# ── GoDaddy (DNS_PROVIDER=godaddy) ───────────────────────────────────────────
-#   https://developer.godaddy.com/keys → Create Production key
-# GD_Key=
-# GD_Secret=
-
-# ── Aruba ClearPass API ───────────────────────────────────────────────────────
-# Hostname or IP of the ClearPass publisher node.
-CPPM_HOST=cppm.example.com
-
-# API client credentials.
-# Create in CPPM Admin UI:
-#   Administration → API Services → API Clients → Add
-#   Grant type:       client_credentials
-#   Operator Profile: Super Administrator (or custom with Certificate Management)
-#
-# The script performs an OAuth2 client_credentials exchange on each run,
-# fetching a short-lived Bearer token. No static API tokens are used or stored.
-CPPM_CLIENT_ID=cppm-cert-manager
-CPPM_CLIENT_SECRET=
-
-# Set to true once the new certificate is installed and CPPM is accessible
-# via HTTPS with the new cert. Leave false for the initial install.
-CPPM_VERIFY_SSL=false
-
-# PKCS12 export passphrase.
-# Used transiently when converting the cert for upload — never written to disk
-# permanently. Change this to any non-empty value.
-CPPM_CERT_PASSPHRASE=ChangeMe!
-
-# ── ClearPass callback for certificate upload ─────────────────────────────────
-# The ClearPass API accepts server certificate uploads via URL only (JSON-only
-# endpoint). CPPM fetches the PKCS12 from this address during import.
-#
-# CPPM_CALLBACK_HOST must be the LAN IP of the machine running Docker —
-# the address that CPPM can route to. This is NOT the container IP.
-#
-# Find the correct IP:
-#   Linux: ip route get <cppm-ip>   (look for 'src X.X.X.X')
-#   macOS: route get <cppm-ip>
-#
-# CPPM_CALLBACK_PORT must match the host-side port in docker-compose.yml:
-#   ports:
-#     - "8765:8765"
-CPPM_CALLBACK_HOST=
-CPPM_CALLBACK_PORT=8765
-
-# ── Web status dashboard ──────────────────────────────────────────────────────
-# Port for the web status page.
-# Browse to http://<docker-host>:STATUS_PORT/ once the container is running.
-# Must match the host-side port in docker-compose.yml.
+# ── Web UI ────────────────────────────────────────────────────────────────────
+# Port for the web interface.
+# Must match the host-side port in docker-compose.yml (it does by default).
+# Browse to http://<docker-host>:STATUS_PORT/ after the container starts.
 STATUS_PORT=8080
 
-# Set to true to require authentication before the certificate status page and
-# /api/status are visible.  When false (default) the status dashboard is
-# publicly readable by anyone who can reach the port; only the admin user
-# management pages (/admin/*) require a signed-in session.
+# Set to true to require sign-in before the certificate dashboard is visible.
+# The Servers and Users pages always require authentication regardless.
 REQUIRE_AUTH_FOR_STATUS=false
 
+# Web UI session lifetime in hours. Default: 8.
+# SESSION_LIFETIME_HOURS=8
+
+
+# ── Certificate upload callback ───────────────────────────────────────────────
+# Port used by the temporary HTTP server that delivers the PKCS12 to ClearPass
+# during certificate upload. Must match the host-side port in docker-compose.yml.
+#
+# The callback HOST (Docker host LAN IP that ClearPass can route to) is set
+# per-server in the web UI under Servers → Add/Edit Server.
+CPPM_CALLBACK_PORT=8765
+
+
 # ── Operational flags ─────────────────────────────────────────────────────────
-# FORCE_RENEW: set to true to force certificate re-issuance on next start.
-# Reset to false after the container restarts.
+# Force certificate re-issuance on the next container start.
+# Set to true, restart the container, then set back to false.
 FORCE_RENEW=false
 
-# SKIP_UPLOAD: set to true to issue/renew without uploading to ClearPass.
+# Issue/renew certificates without uploading to ClearPass.
 # Useful for testing the issuance workflow independently.
 SKIP_UPLOAD=false
 
-# LOG_LEVEL: Python log level for clearpass_upload.py.
+# Python log level for clearpass_upload.py.
 # Options: DEBUG | INFO | WARNING | ERROR
 LOG_LEVEL=INFO
+
+
+# ── Legacy migration (optional) ───────────────────────────────────────────────
+# These variables are no longer required. If servers.json is empty on first
+# startup and DOMAIN + CPPM_HOST are set here, the container will auto-create
+# the first server entry from these values as a one-time migration.
+# After that, manage everything through the web UI.
+#
+# DOMAIN=cppm.example.com
+# ACME_EMAIL=admin@example.com
+# ACME_SERVER=letsencrypt
+# DNS_PROVIDER=cloudflare
+# CF_Token=
+# CF_Account_ID=
+# CF_Zone_ID=
+# CPPM_HOST=cppm.example.com
+# CPPM_CLIENT_ID=cppm-cert-manager
+# CPPM_CLIENT_SECRET=
+# CPPM_VERIFY_SSL=false
+# CPPM_CERT_PASSPHRASE=ChangeMe!
+# CPPM_CALLBACK_HOST=

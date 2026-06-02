@@ -17,7 +17,7 @@ ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/renewal.log"
-DOMAIN="${DOMAIN:-cppm.sinemalab.com}"
+DOMAIN="${DOMAIN:-}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR"
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
