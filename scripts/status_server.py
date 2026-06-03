@@ -1628,6 +1628,7 @@ def _overview_rows(servers: list) -> str:
 _OVERVIEW_SCRIPT = """
 <script>
 var REFRESH_MS = 30000;
+var HEALTH_MS  = 300000;
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function cls(d){if(d==null)return'none';if(d>30)return'ok';if(d>14)return'warn';return'danger';}
@@ -1681,14 +1682,19 @@ function applyAllHealthDots(){
     });
   });
 }
+var _healthRetry=0;
 async function loadHealth(){
   try{
     var res=await fetch('/api/health');
-    if(!res.ok)return;
-    _ovHealth=await res.json();
-    applyAllHealthDots();
+    if(res.ok){
+      _ovHealth=await res.json();
+      _healthRetry=0;
+      applyAllHealthDots();
+    }
   }catch(e){}
-  setTimeout(loadHealth,120000);
+  var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
+  _healthRetry=Math.min(_healthRetry+1,3);
+  setTimeout(loadHealth,delay);
 }
 
 async function loadStatus(){
