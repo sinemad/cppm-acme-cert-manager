@@ -1,6 +1,6 @@
 # ClearPass ACME Certificate Manager
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](VERSION)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**

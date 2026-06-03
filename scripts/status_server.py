@@ -44,6 +44,7 @@ from auth_utils import (
 )
 from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
+    server_cert_dir,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -74,7 +75,6 @@ _APP_BUILD   = _read_build()
 CERT_DIR    = Path(os.environ.get("CERT_DIR", "/data/certs"))
 STATUS_PORT = int(os.environ.get("STATUS_PORT", "8080"))
 TZ_NAME     = os.environ.get("TZ", "UTC")
-STATUS_LOG  = CERT_DIR / "status.log"
 COOKIE_NAME = "cppm_session"
 # When False (default) the dashboard and /api/status are publicly readable.
 # Set to true to require authentication even for the read-only status page.
@@ -163,12 +163,13 @@ def parse_cert(path: Path) -> dict:
     return result
 
 
-def parse_log(max_entries: int = 40) -> list:
-    if not STATUS_LOG.exists():
+def parse_log(server: dict, max_entries: int = 40) -> list:
+    log_path = server_cert_dir(server) / "status.log"
+    if not log_path.exists():
         return []
     entries = []
     try:
-        lines = STATUS_LOG.read_text(errors="replace").splitlines()
+        lines = log_path.read_text(errors="replace").splitlines()
         for line in reversed(lines):
             line = line.strip()
             if not line or line.startswith("#"):
@@ -213,8 +214,9 @@ def next_check_info() -> dict:
 
 def build_server_status(server: dict) -> dict:
     """Build the full status dict for a single server configuration entry."""
-    tz     = _tz()
-    domain = server.get("domain", "")
+    tz       = _tz()
+    domain   = server.get("domain", "")
+    cert_dir = server_cert_dir(server)
     return {
         "id":              server.get("id", ""),
         "label":           server.get("label", domain),
@@ -225,11 +227,11 @@ def build_server_status(server: dict) -> dict:
         "callback_host":   server.get("cppm_callback_host", ""),
         "callback_port":   str(server.get("cppm_callback_port", "8765")),
         "certs": {
-            "ecc": parse_cert(CERT_DIR / f"{domain}.ecc.cer"),
-            "rsa": parse_cert(CERT_DIR / f"{domain}.rsa.cer"),
+            "ecc": parse_cert(cert_dir / f"{domain}.ecc.cer"),
+            "rsa": parse_cert(cert_dir / f"{domain}.rsa.cer"),
         },
         "schedule":    next_check_info(),
-        "activity":    parse_log(40),
+        "activity":    parse_log(server, 40),
         "server_time": datetime.datetime.now(tz).isoformat(),
     }
 

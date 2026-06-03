@@ -6,7 +6,8 @@
 set -euo pipefail
 
 CERT_DIR="/data/certs"
-LOG_DIR="/data/certs/.logs"
+CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
+LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
 LOG="${LOG_DIR}/upload.log"
 DOMAIN="${DOMAIN:-}"
 CPPM_HOST="${CPPM_HOST:-}"

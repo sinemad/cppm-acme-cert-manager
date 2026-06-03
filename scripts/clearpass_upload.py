@@ -62,7 +62,7 @@ log = logging.getLogger("cppm-upload")
 # ─────────────────────────────────────────────────────────────────────────────
 # Status log
 # ─────────────────────────────────────────────────────────────────────────────
-STATUS_LOG = "/data/certs/status.log"
+STATUS_LOG = os.environ.get("STATUS_LOG", "/data/certs/status.log")
 
 
 def status_write(level: str, category: str, message: str) -> None:

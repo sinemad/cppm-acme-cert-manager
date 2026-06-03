@@ -36,7 +36,9 @@ set -euo pipefail
 
 ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
-LOG_DIR="/data/certs/.logs"
+# Use per-server directory when available (set by get_server_shell_env)
+CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
+LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
 LOG="${LOG_DIR}/renewal.log"
 DOMAIN="${DOMAIN:-}"
 DNS_PROVIDER="${DNS_PROVIDER:-cloudflare}"

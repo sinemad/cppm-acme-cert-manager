@@ -158,6 +158,38 @@ if output:
     fi
     eval "$SERVER_ENV"
 
+    # Switch to per-server cert and log directories (mkdir only — init after migration)
+    mkdir -p "${SERVER_CERT_DIR}/.logs"
+
+    # ── Migrate existing flat-file layout (one-time, per server) ─────────────
+    # Triggers if either cert type exists at the old root level but not yet in
+    # SERVER_CERT_DIR.  Must run before status_server_init so the global
+    # status.log can be seeded into the per-server directory first.
+    if [[ ( -f "${CERT_DIR}/${DOMAIN}.ecc.cer" || -f "${CERT_DIR}/${DOMAIN}.rsa.cer" ) \
+          && ! -f "${SERVER_CERT_DIR}/${DOMAIN}.ecc.cer" \
+          && ! -f "${SERVER_CERT_DIR}/${DOMAIN}.rsa.cer" ]]; then
+        log "  Migrating certs for ${DOMAIN} → ${SERVER_CERT_DIR}/"
+        for ext in ecc.cer ecc.key ecc.fullchain.cer ecc.ca.cer \
+                   rsa.cer rsa.key rsa.fullchain.cer rsa.ca.cer; do
+            [[ -f "${CERT_DIR}/${DOMAIN}.${ext}" ]] \
+                && mv "${CERT_DIR}/${DOMAIN}.${ext}" "${SERVER_CERT_DIR}/" || true
+        done
+        # Move acme.sh state dirs
+        [[ -d "${CERT_DIR}/${DOMAIN}" ]]     && mv "${CERT_DIR}/${DOMAIN}"     "${SERVER_CERT_DIR}/" || true
+        [[ -d "${CERT_DIR}/${DOMAIN}_ecc" ]] && mv "${CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/" || true
+        # Seed per-server logs from global copies (status.log must be copied
+        # before status_server_init creates a new empty one)
+        [[ -f "${CERT_DIR}/status.log" ]] \
+            && cp "${CERT_DIR}/status.log" "${SERVER_CERT_DIR}/status.log" || true
+        for lf in renewal.log upload.log; do
+            [[ -f "${CERT_DIR}/.logs/${lf}" ]] \
+                && cp "${CERT_DIR}/.logs/${lf}" "${SERVER_CERT_DIR}/.logs/${lf}" || true
+        done
+        log "  Migration complete."
+    fi
+
+    status_server_init
+
     log "  Domain : ${DOMAIN:-NOT SET}"
     log "  CPPM   : ${CPPM_HOST:-NOT SET}"
     log "  CA     : ${ACME_SERVER:-letsencrypt}"
@@ -182,36 +214,56 @@ if output:
         --server "${ACME_SERVER:-letsencrypt}" \
         2>&1 | tee -a "$LOG" || true
 
-    # Certificate state decision
-    FLAT_ECC="${CERT_DIR}/${DOMAIN}.ecc.cer"
-    FLAT_RSA="${CERT_DIR}/${DOMAIN}.rsa.cer"
-    ACME_ECC_CERT="${CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
-    ACME_RSA_CERT="${CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
+    # Certificate state decision (use per-server directory)
+    FLAT_ECC="${SERVER_CERT_DIR}/${DOMAIN}.ecc.cer"
+    FLAT_RSA="${SERVER_CERT_DIR}/${DOMAIN}.rsa.cer"
+    ACME_ECC_CERT="${SERVER_CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
+    ACME_RSA_CERT="${SERVER_CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
+
+    # Determine which cert types are expected for this server
+    NEED_ECC="${ISSUE_ECC:-true}"
+    NEED_RSA="${ISSUE_RSA:-true}"
+
+    # Check whether expected flat files are all present
+    FLAT_OK=true
+    [[ "$NEED_ECC" == "true" && ! -f "$FLAT_ECC" ]] && FLAT_OK=false
+    [[ "$NEED_RSA" == "true" && ! -f "$FLAT_RSA" ]] && FLAT_OK=false
+
+    # Check whether expected acme.sh state dirs are all present
+    ACME_STATE_OK=true
+    [[ "$NEED_ECC" == "true" && ! -f "$ACME_ECC_CERT" ]] && ACME_STATE_OK=false
+    [[ "$NEED_RSA" == "true" && ! -f "$ACME_RSA_CERT" ]] && ACME_STATE_OK=false
+
+    # Primary cert for expiry reporting (ECC preferred, else RSA)
+    PRIMARY_FLAT="$FLAT_ECC"
+    [[ "$NEED_ECC" != "true" ]] && PRIMARY_FLAT="$FLAT_RSA"
 
     if [[ "${FORCE_RENEW:-false}" == "true" ]]; then
         log "FORCE_RENEW=true – forcing full re-issuance for ${DOMAIN}..."
         status_write "INFO" "CERT" "FORCE_RENEW requested – starting re-issuance for ${DOMAIN}"
         run_with_guard /opt/cppm/issue_cert.sh || true
 
-    elif [[ -f "$FLAT_ECC" && -f "$FLAT_RSA" ]]; then
-        ECC_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_ECC" 2>/dev/null \
-                     | cut -d= -f2 || echo "unknown")
-        ECC_SUBJECT=$(openssl x509 -subject -noout -in "$FLAT_ECC" 2>/dev/null \
-                      | sed 's/subject=//' || echo "unknown")
+    elif [[ "$FLAT_OK" == "true" ]]; then
+        PRIMARY_EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_FLAT" 2>/dev/null \
+                         | cut -d= -f2 || echo "unknown")
+        PRIMARY_SUBJECT=$(openssl x509 -subject -noout -in "$PRIMARY_FLAT" 2>/dev/null \
+                          | sed 's/subject=//' || echo "unknown")
         DAYS_LEFT="unknown"
-        EXPIRY_EPOCH=$(date -d "$ECC_EXPIRY" +%s 2>/dev/null || echo 0)
+        EXPIRY_EPOCH=$(date -d "$PRIMARY_EXPIRY" +%s 2>/dev/null || echo 0)
         if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
             DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
         fi
-        RSA_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_RSA" 2>/dev/null \
-                     | cut -d= -f2 || echo "unknown")
-        log "Both certs installed for ${DOMAIN} – no action needed."
-        log "  ECC Subject : $ECC_SUBJECT"
-        log "  ECC Expires : $ECC_EXPIRY ($DAYS_LEFT days remaining)"
-        log "  RSA Expires : $RSA_EXPIRY"
-        status_write "OK" "CERT" "ECC+RSA valid for ${DOMAIN} – expires ${ECC_EXPIRY} (${DAYS_LEFT} days remaining)"
+        log "Cert(s) installed for ${DOMAIN} – no action needed."
+        log "  Subject  : $PRIMARY_SUBJECT"
+        log "  Expires  : $PRIMARY_EXPIRY ($DAYS_LEFT days remaining)"
+        if [[ "$NEED_ECC" == "true" && "$NEED_RSA" == "true" ]]; then
+            RSA_EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_RSA" 2>/dev/null \
+                         | cut -d= -f2 || echo "unknown")
+            log "  RSA Expires: $RSA_EXPIRY"
+        fi
+        status_write "OK" "CERT" "Cert(s) valid for ${DOMAIN} – expires ${PRIMARY_EXPIRY} (${DAYS_LEFT} days remaining)"
 
-    elif [[ -f "$ACME_ECC_CERT" && -f "$ACME_RSA_CERT" ]]; then
+    elif [[ "$ACME_STATE_OK" == "true" ]]; then
         log "acme.sh state present but flat files missing for ${DOMAIN} – running install only..."
         status_write "INFO" "CERT" "Flat files missing for ${DOMAIN} – running install-cert (no re-issue needed)"
         run_with_guard /opt/cppm/install_cert.sh || true

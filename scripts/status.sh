@@ -15,7 +15,9 @@
 #   2026-03-17 15:00:00 | FAILED  | UPLOAD  | ClearPass API returned HTTP 401
 # ─────────────────────────────────────────────────────────────────────────────
 
-STATUS_LOG="/data/certs/status.log"
+# Respect a pre-set STATUS_LOG (exported by get_server_shell_env for per-server logs).
+# Falls back to the global path when sourced outside the per-server eval context.
+STATUS_LOG="${STATUS_LOG:-/data/certs/status.log}"
 _CPPM_CERT_DIR="/data/certs"
 _CPPM_LOG_DIR="/data/certs/.logs"
 
@@ -61,6 +63,19 @@ status_init() {
             echo "# $(date '+%Y-%m-%d %H:%M:%S') – Log initialised"
             echo "# Columns: TIMESTAMP | LEVEL | CATEGORY | MESSAGE"
             echo "#"
+        } >> "$STATUS_LOG" 2>/dev/null || true
+    fi
+}
+
+# status_server_init – Switch STATUS_LOG to the per-server path.
+# Call this after eval'ing SERVER_ENV in any script that iterates servers.
+status_server_init() {
+    mkdir -p "$(dirname "$STATUS_LOG")" 2>/dev/null || true
+    if [[ ! -f "$STATUS_LOG" ]]; then
+        {
+            printf '# ClearPass Certificate Manager – Server Status Log\n'
+            printf '# %s – Log initialised\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+            printf '# Columns: TIMESTAMP | LEVEL | CATEGORY | MESSAGE\n#\n'
         } >> "$STATUS_LOG" 2>/dev/null || true
     fi
 }

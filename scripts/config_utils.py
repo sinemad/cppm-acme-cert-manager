@@ -11,6 +11,7 @@ File location: /data/certs/servers.json  (chmod 600 — contains secrets)
 
 import json
 import os
+import re
 import shlex
 import uuid
 from pathlib import Path
@@ -189,6 +190,20 @@ def migrate_from_env() -> Optional[str]:
     return f"'{entry['label']}' migrated from .env (ID: {server_id})"
 
 
+# ── Per-server directory ──────────────────────────────────────────────────────
+
+def server_cert_dir(server: dict) -> Path:
+    """Return the per-server directory path under the data volume root.
+
+    Named by the sanitized ClearPass hostname so the layout is human-readable:
+      /data/certs/cppm.example.com/
+      /data/certs/cppm-lab.example.com/
+    """
+    host = str(server.get("cppm_host", "")).strip()
+    safe = re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
+    return SERVERS_FILE.parent / safe
+
+
 # ── Shell environment export ───────────────────────────────────────────────────
 
 def get_server_shell_env(server_id: str) -> Optional[str]:
@@ -221,6 +236,9 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
         "TRUST_EXCLUSIONS":     "\n".join(str(p) for p in trust_excl if p),
         "ISSUE_ECC":            "true" if "ecc" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
         "ISSUE_RSA":            "true" if "rsa" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
+        "SERVER_CERT_DIR":      str(server_cert_dir(s)),
+        "SERVER_LOG_DIR":       str(server_cert_dir(s) / ".logs"),
+        "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
     }
     # DNS credential keys are already named as env vars in servers.json
     for k, v in creds.items():

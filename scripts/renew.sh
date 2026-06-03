@@ -57,6 +57,13 @@ if output:
     fi
     eval "$SERVER_ENV"
 
+    # Switch to per-server cert and log directories
+    CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
+    LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
+    LOG="${LOG_DIR}/renewal.log"
+    mkdir -p "$LOG_DIR"
+    status_server_init
+
     log "Domain: ${DOMAIN:-NOT SET}"
 
     if [[ -z "${DOMAIN:-}" ]]; then
@@ -101,6 +108,7 @@ if output:
             --domain    "$DOMAIN" \
             --ecc \
             --server    "${ACME_SERVER:-letsencrypt}" \
+            --cert-home "$CERT_DIR" \
             --home      /root/.acme.sh \
             --log       "$LOG" \
             --log-level 2 \
@@ -118,6 +126,7 @@ if output:
         "$ACME_BIN" --renew \
             --domain    "$DOMAIN" \
             --server    "${ACME_SERVER:-letsencrypt}" \
+            --cert-home "$CERT_DIR" \
             --home      /root/.acme.sh \
             --log       "$LOG" \
             --log-level 2 \
