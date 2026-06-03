@@ -90,12 +90,6 @@ and enter credentials when adding or editing a server in the web UI
 | AWS Route 53 | `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | DigitalOcean | `digitalocean` | `DO_API_KEY` |
 | GoDaddy | `godaddy` | `GD_Key` + `GD_Secret` |
-| Any acme.sh dnsapi plugin *(experimental)* | plugin name without `dns_` prefix | Plugin-specific variables |
-
-For custom providers, enter the plugin name (e.g. `linode_v4` for `dns_linode_v4`)
-in the DNS Provider field and add the required credential variables. See the
-[acme.sh dnsapi docs](https://github.com/acmesh-official/acme.sh/wiki/dnsapi)
-for the full list.
 ---
 
 ## Directory Structure
