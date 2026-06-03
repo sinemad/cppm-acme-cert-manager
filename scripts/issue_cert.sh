@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# issue_cert.sh – Issue BOTH an ECC and an RSA certificate via DNS-01 challenge
+# issue_cert.sh – Issue ECC and/or RSA certificates via DNS-01 challenge
 #
+# Certificate types are controlled by ISSUE_ECC and ISSUE_RSA (default: both).
 # ECC (ec-256) → CPPM HTTPS(ECC) service slot
 # RSA (2048)   → CPPM RADIUS service slot
 #
@@ -50,11 +51,17 @@ unset DEBUG
 
 die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
 
-log "=== Certificate Issuance (ECC + RSA) ==="
+ISSUE_ECC="${ISSUE_ECC:-true}"
+ISSUE_RSA="${ISSUE_RSA:-true}"
+CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC + RSA" || \
+               [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
+
+log "=== Certificate Issuance (${CERT_LABEL}) ==="
 log "Domain:   $DOMAIN"
 log "Provider: $DNS_PROVIDER"
 log "Server:   ${ACME_SERVER:-letsencrypt}"
-status_write "INFO" "CERT" "Starting dual issuance – domain=${DOMAIN} provider=${DNS_PROVIDER} server=${ACME_SERVER:-letsencrypt}"
+log "Types:    ${CERT_LABEL}"
+status_write "INFO" "CERT" "Starting issuance (${CERT_LABEL}) – domain=${DOMAIN} provider=${DNS_PROVIDER} server=${ACME_SERVER:-letsencrypt}"
 
 # ── Resolve acme.sh DNS plugin and validate required credentials ───────────
 case "${DNS_PROVIDER,,}" in
@@ -116,31 +123,39 @@ COMMON_ARGS=(
 [[ "${FORCE_RENEW:-false}" == "true" ]] && COMMON_ARGS+=(--force)
 
 # ── Issue ECC cert ─────────────────────────────────────────────────────────
-log "--- Issuing ECC (ec-256) certificate ---"
-ECC_EXIT=0
-"$ACME_BIN" "${COMMON_ARGS[@]}" --keylength ec-256 || ECC_EXIT=$?
+NEWLY_ISSUED=false
 
-case $ECC_EXIT in
-    0) log "ECC certificate issued successfully." ;;
-    2) log "ECC cert exists in acme.sh state – not due for renewal." ;;
-    *) die "acme.sh --issue (ECC) failed with exit code $ECC_EXIT – check ${LOG}" ;;
-esac
+if [[ "$ISSUE_ECC" == "true" ]]; then
+    log "--- Issuing ECC (ec-256) certificate ---"
+    ECC_EXIT=0
+    "$ACME_BIN" "${COMMON_ARGS[@]}" --keylength ec-256 || ECC_EXIT=$?
+    case $ECC_EXIT in
+        0) log "ECC certificate issued successfully."; NEWLY_ISSUED=true ;;
+        2) log "ECC cert exists in acme.sh state – not due for renewal." ;;
+        *) die "acme.sh --issue (ECC) failed with exit code $ECC_EXIT – check ${LOG}" ;;
+    esac
+else
+    log "--- Skipping ECC (ISSUE_ECC=false) ---"
+fi
 
 # ── Issue RSA cert ─────────────────────────────────────────────────────────
-log "--- Issuing RSA (2048) certificate ---"
-RSA_EXIT=0
-"$ACME_BIN" "${COMMON_ARGS[@]}" --keylength 2048 || RSA_EXIT=$?
-
-case $RSA_EXIT in
-    0) log "RSA certificate issued successfully." ;;
-    2) log "RSA cert exists in acme.sh state – not due for renewal." ;;
-    *) die "acme.sh --issue (RSA) failed with exit code $RSA_EXIT – check ${LOG}" ;;
-esac
-
-if [[ $ECC_EXIT -eq 0 || $RSA_EXIT -eq 0 ]]; then
-    status_write "OK" "CERT" "New certificates issued (ECC + RSA) via ${DNS_PROVIDER} DNS-01"
+if [[ "$ISSUE_RSA" == "true" ]]; then
+    log "--- Issuing RSA (2048) certificate ---"
+    RSA_EXIT=0
+    "$ACME_BIN" "${COMMON_ARGS[@]}" --keylength 2048 || RSA_EXIT=$?
+    case $RSA_EXIT in
+        0) log "RSA certificate issued successfully."; NEWLY_ISSUED=true ;;
+        2) log "RSA cert exists in acme.sh state – not due for renewal." ;;
+        *) die "acme.sh --issue (RSA) failed with exit code $RSA_EXIT – check ${LOG}" ;;
+    esac
 else
-    status_write "INFO" "CERT" "Both certs exist in acme.sh state – running install only"
+    log "--- Skipping RSA (ISSUE_RSA=false) ---"
+fi
+
+if [[ "$NEWLY_ISSUED" == "true" ]]; then
+    status_write "OK" "CERT" "New ${CERT_LABEL} certificate(s) issued via ${DNS_PROVIDER} DNS-01"
+else
+    status_write "INFO" "CERT" "${CERT_LABEL} cert(s) exist in acme.sh state – running install only"
 fi
 
 /opt/cppm/install_cert.sh

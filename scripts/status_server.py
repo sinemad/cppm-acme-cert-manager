@@ -192,12 +192,14 @@ def build_server_status(server: dict) -> dict:
     tz     = _tz()
     domain = server.get("domain", "")
     return {
-        "id":           server.get("id", ""),
-        "label":        server.get("label", domain),
-        "cppm_host":    server.get("cppm_host", ""),
-        "dns_provider": server.get("dns_provider", ""),
-        "acme_server":  server.get("acme_server", ""),
-        "domain":       domain,
+        "id":              server.get("id", ""),
+        "label":           server.get("label", domain),
+        "cppm_host":       server.get("cppm_host", ""),
+        "dns_provider":    server.get("dns_provider", ""),
+        "acme_server":     server.get("acme_server", ""),
+        "domain":          domain,
+        "callback_host":   server.get("cppm_callback_host", ""),
+        "callback_port":   str(server.get("cppm_callback_port", "8765")),
         "certs": {
             "ecc": parse_cert(CERT_DIR / f"{domain}.ecc.cer"),
             "rsa": parse_cert(CERT_DIR / f"{domain}.rsa.cer"),
@@ -353,6 +355,92 @@ def _check_dns(server: dict = None) -> dict:
         return {"status": "error", "message": n}
 
 
+def _check_callback(server: dict = None) -> dict:
+    """Verify the PKCS12 callback HTTP service port is bindable and externally reachable.
+
+    Spins up a transient HTTP server on the configured callback port, then
+    attempts an HTTP GET to http://{callback_host}:{port}/ from inside the
+    container.  A successful round-trip confirms Docker port-mapping is working
+    and ClearPass will be able to fetch PKCS12 files during uploads.
+    """
+    if not server:
+        return {"status": "unknown", "message": "Not configured"}
+    callback_host = (server.get("cppm_callback_host") or "").strip()
+    try:
+        callback_port = int(server.get("cppm_callback_port") or 8765)
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "Invalid port number"}
+    if not callback_host:
+        _log.debug("callback-check [%s]: callback host not configured",
+                   server.get("label") or server.get("cppm_host", "?"))
+        return {"status": "unknown", "message": "Callback host not set"}
+
+    label = server.get("label") or server.get("cppm_host", "?")
+    url   = f"http://{callback_host}:{callback_port}/"
+    _log.debug("callback-check [%s]: probing %s", label, url)
+
+    import socket as _sock
+    import errno as _errno
+    import http.server, socketserver, threading
+
+    # Step 1 — test whether the port is currently bindable
+    probe = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    probe.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("0.0.0.0", callback_port))
+    except OSError as e:
+        probe.close()
+        if e.errno in (_errno.EADDRINUSE,):
+            _log.warning("callback-check [%s]: port %d in use (errno EADDRINUSE) — "
+                         "upload in progress or port conflict", label, callback_port)
+            return {"status": "warn",
+                    "message": f"Port {callback_port} in use — upload in progress or port conflict"}
+        _log.error("callback-check [%s]: cannot bind port %d — %s (errno %s)",
+                   label, callback_port, e, e.errno)
+        return {"status": "error",
+                "message": f"Cannot bind port {callback_port}: {e}"}
+    probe.close()
+    _log.debug("callback-check [%s]: port %d is bindable", label, callback_port)
+
+    # Step 2 — spin up a minimal HTTP server and try reaching it via the external URL
+    class _PingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        def log_message(self, *_):
+            pass
+
+    httpd = None
+    try:
+        httpd = socketserver.TCPServer(("0.0.0.0", callback_port), _PingHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        import requests as _req
+        r = _req.get(url, timeout=4)
+        if r.status_code == 200 and r.text.strip() == "ok":
+            _log.debug("callback-check [%s]: round-trip OK — %s", label, url)
+            return {"status": "ok", "message": f"Reachable at {url}"}
+        _log.warning("callback-check [%s]: unexpected HTTP %d from %s",
+                     label, r.status_code, url)
+        return {"status": "warn",
+                "message": f"Unexpected response HTTP {r.status_code} from {url}"}
+    except Exception as exc:
+        n = type(exc).__name__
+        if any(k in n for k in ("ConnectionError", "ConnectTimeout", "Timeout")):
+            _log.warning("callback-check [%s]: port %d bound but %s unreachable — "
+                         "%s: %s — verify Docker port mapping",
+                         label, callback_port, url, n, exc)
+            return {"status": "warn",
+                    "message": (f"Port {callback_port} open but {url} unreachable "
+                                f"— check Docker port mapping")}
+        _log.error("callback-check [%s]: unexpected error — %s: %s",
+                   label, n, exc)
+        return {"status": "error", "message": str(exc)[:100]}
+    finally:
+        if httpd:
+            httpd.shutdown()
+
+
 def _build_health() -> dict:
     """Return cached per-server health status, refreshing if the TTL has expired.
 
@@ -370,14 +458,16 @@ def _build_health() -> dict:
         return {"servers": {}, "checked_at": datetime.datetime.now(_tz()).isoformat()}
 
     # Flatten into (server_id, check_type, server_dict) tasks
-    tasks = [(s.get("id", ""), t, s) for s in servers for t in ("cppm", "dns")]
+    tasks = [(s.get("id", ""), t, s) for s in servers for t in ("cppm", "dns", "callback")]
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     per_server: dict = {}
     with ThreadPoolExecutor(max_workers=max(len(tasks), 1)) as pool:
         fut_map = {}
         for sid, check_type, s in tasks:
-            fn = _check_cppm if check_type == "cppm" else _check_dns
+            fn = (_check_cppm if check_type == "cppm"
+                  else _check_dns if check_type == "dns"
+                  else _check_callback)
             fut_map[pool.submit(fn, s)] = (sid, check_type)
         for fut in as_completed(fut_map):
             sid, check_type = fut_map[fut]
@@ -433,6 +523,8 @@ def _parse_server_form(f: dict) -> dict:
             for line in f.get("trust_exclusions", "").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ],
+        "cert_types": [t for t in ("ecc", "rsa")
+                       if f.get(f"issue_{t}") == "true"] or ["ecc", "rsa"],
     }
 
 
@@ -454,6 +546,7 @@ def _default_server_from_env() -> dict:
         "dns_provider":         "cloudflare",
         "dns_credentials":      {},
         "trust_exclusions":     [],
+        "cert_types":           ["ecc", "rsa"],
     }
 
 
@@ -944,6 +1037,14 @@ _ALL_KNOWN_LOWER: set[str] = {
     p.lower() for _, certs in _KNOWN_EXCLUSIONS for p, _ in certs
 }
 
+# Maps acme_server value → index into _KNOWN_EXCLUSIONS
+_ACME_PROVIDER_EXCL_IDX: dict[str, int] = {
+    "letsencrypt":      0,
+    "letsencrypt_test": 0,
+    "zerossl":          1,
+    "buypass":          2,
+}
+
 
 def _trust_exclusions_page(server: dict, username: str,
                             flash_type: str = "", flash_msg: str = "") -> str:
@@ -958,8 +1059,12 @@ def _trust_exclusions_page(server: dict, username: str,
         if flash_msg else ""
     )
 
+    acme_server  = server.get("acme_server", "letsencrypt")
+    excl_idx     = _ACME_PROVIDER_EXCL_IDX.get(acme_server)
+    excl_sections = [_KNOWN_EXCLUSIONS[excl_idx]] if excl_idx is not None else _KNOWN_EXCLUSIONS
+
     provider_html = ""
-    for provider_name, certs in _KNOWN_EXCLUSIONS:
+    for provider_name, certs in excl_sections:
         rows = "".join(
             f'<label class="excl-row">'
             f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
@@ -982,7 +1087,7 @@ def _trust_exclusions_page(server: dict, username: str,
 <div class="app">
   <div class="page-hdr">
     <span class="page-title">Trust Exclusions</span>
-    <a href="/settings" class="btn btn-ghost">&#8592; Back to Servers</a>
+    <a href="/settings/edit/{sid}" class="btn btn-ghost">&#8592; Back to Edit Server</a>
   </div>
   <div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.25rem">
     Server: <strong style="color:var(--text)">{label}</strong>
@@ -1015,7 +1120,7 @@ def _trust_exclusions_page(server: dict, username: str,
     </div>
     <div style="display:flex;gap:0.75rem;margin-top:1.25rem">
       <button type="submit" class="btn btn-primary">Save Exclusions</button>
-      <a href="/settings" class="btn btn-ghost">Cancel</a>
+      <a href="/settings/edit/{sid}" class="btn btn-ghost">Cancel</a>
     </div>
   </form>
 </div>"""
@@ -1095,7 +1200,6 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
-                f'<a href="/settings/trust-exclusions/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Trust Exclusions</a>'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
                 f'{del_btn}'
                 f'</td>'
@@ -1156,8 +1260,16 @@ def _settings_form_page(server: dict = None, error: str = "",
     def sel(v, t):    return " selected" if v == t else ""
     def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
 
-    acme_srv = s.get("acme_server", "letsencrypt")
-    verify   = " checked" if s.get("cppm_verify_ssl") else ""
+    acme_srv   = s.get("acme_server", "letsencrypt")
+    verify     = " checked" if s.get("cppm_verify_ssl") else ""
+    cert_types = s.get("cert_types") or ["ecc", "rsa"]
+    chk_ecc    = " checked" if "ecc" in cert_types else ""
+    chk_rsa    = " checked" if "rsa" in cert_types else ""
+    te_link  = (
+        f'<div style="margin-top:0.85rem">'
+        f'<a href="/settings/trust-exclusions/{sid}" class="btn btn-ghost">Trust Exclusions</a>'
+        f'</div>'
+    ) if is_edit else ""
 
     # Form body — f-string with all interpolated Python values.
     # JavaScript is in a separate raw string appended below (no {{ }} issues).
@@ -1228,7 +1340,7 @@ def _settings_form_page(server: dict = None, error: str = "",
     </div>
 
     <div class="card" style="margin-bottom:1rem">
-      <div class="form-section-title">Domain &amp; ACME</div>
+      <div class="form-section-title">ACME Provider</div>
       <div class="form-2col">
         <div class="field">
           <label>Domain</label>
@@ -1241,7 +1353,7 @@ def _settings_form_page(server: dict = None, error: str = "",
                  placeholder="admin@example.com">
         </div>
       </div>
-      <div class="field" style="margin-bottom:0">
+      <div class="field">
         <label>Certificate Authority</label>
         <select name="acme_server">
           <option value="letsencrypt"{sel(acme_srv,'letsencrypt')}>Let&apos;s Encrypt</option>
@@ -1250,6 +1362,20 @@ def _settings_form_page(server: dict = None, error: str = "",
           <option value="buypass"{sel(acme_srv,'buypass')}>Buypass</option>
         </select>
       </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Certificate Types</label>
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+          <input type="checkbox" name="issue_ecc" value="true"{chk_ecc}
+                 style="width:auto;margin:0">
+          ECC <span class="hint">— HTTPS / Web Interface</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+          <input type="checkbox" name="issue_rsa" value="true"{chk_rsa}
+                 style="width:auto;margin:0">
+          RSA <span class="hint">— RADIUS / 802.1x</span>
+        </label>
+      </div>
+      {te_link}
     </div>
 
     <div class="card" style="margin-bottom:1.5rem">
@@ -1451,11 +1577,23 @@ def _overview_rows(servers: list) -> str:
         acme = _esc(_ACME_DISPLAY.get(s.get("acme_server", ""), s.get("acme_server", "")))
         ecc  = s.get("certs", {}).get("ecc", {"exists": False})
         rsa  = s.get("certs", {}).get("rsa", {"exists": False})
+        raw_sid = str(s.get("id", ""))
+        def _dot(kind: str) -> str:
+            return (f'<span id="ov-{_esc(raw_sid)}-{kind}" class="sdot checking"'
+                    f' title="checking…" style="margin-right:0.2rem"></span>')
+        dots = (f'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
+                f'{_dot("cppm")}<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'
+                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
+                f'{_dot("dns")}<span style="font-size:0.68rem;color:var(--subtle)">DNS</span>'
+                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
+                f'{_dot("cb")}<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
+                f'</div>')
         rows.append(
             f'<tr class="server-row" onclick="window.location.href=\'/server/{sid}\'">'
             f'<td>'
             f'<div class="srv-label">{_esc(s.get("label", "") or s.get("cppm_host", ""))}</div>'
-            f'<div class="srv-host">{host}</div></td>'
+            f'<div class="srv-host">{host}</div>'
+            f'{dots}</td>'
             f'<td>'
             f'{dns}'
             f'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">{acme}</div>'
@@ -1486,18 +1624,50 @@ function renderMiniCert(cert,label,svc){
   return'<div class="mini-cert '+c+'"><div class="mini-days '+c+'">'+(d!=null?d:'—')+'</div><div class="mini-label">days &middot; '+esc(label)+'</div><div class="mini-exp">'+esc(fmtDate(cert.not_after))+'</div>'+svcHtml+'</div>';
 }
 function renderSched(sc){sc=sc||{};return'<div class="sched-next">'+esc(sc.until||'—')+'</div><div class="sched-label">until next check</div><div class="sched-sub">'+esc(sc.schedule||'—')+'</div>';}
+function ovDot(sid,kind){
+  return'<span id="ov-'+esc(sid)+'-'+kind+'" class="sdot checking" title="checking…" style="margin-right:0.2rem"></span>';
+}
+function renderDots(sid){
+  var sep='<span style="color:var(--border2);margin:0 0.15rem">\xb7</span>';
+  return'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
+    +ovDot(sid,'cppm')+'<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'+sep
+    +ovDot(sid,'dns')+'<span style="font-size:0.68rem;color:var(--subtle)">DNS</span>'+sep
+    +ovDot(sid,'cb')+'<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
+    +'</div>';
+}
 function renderRow(s){
   var sid=s.id||'';
   var ecc=(s.certs&&s.certs.ecc)||{exists:false};
   var rsa=(s.certs&&s.certs.rsa)||{exists:false};
   return'<tr class="server-row" onclick="window.location.href=\'/server/'+esc(sid)+'\'">'
     +'<td><div class="srv-label">'+esc(s.label||s.cppm_host)+'</div>'
-    +'<div class="srv-host">'+esc(s.cppm_host)+'</div></td>'
+    +'<div class="srv-host">'+esc(s.cppm_host)+'</div>'
+    +renderDots(sid)+'</td>'
     +'<td>'+esc(dnsLabel(s.dns_provider))
     +'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">'+esc(acmeLabel(s.acme_server))+'</div></td>'
     +'<td>'+renderMiniCert(ecc,'ECC','HTTPS \xb7 Web Interface')+'</td><td>'+renderMiniCert(rsa,'RSA','RADIUS \xb7 802.1X')+'</td>'
     +'<td>'+renderSched(s.schedule)+'</td>'
     +'<td style="text-align:right"><a href="/server/'+esc(sid)+'" class="btn btn-ghost" onclick="event.stopPropagation()">Details &#8594;</a></td></tr>';
+}
+
+function applyDot(el,h){var s=h.status||'unknown',m=h.message||'';el.className='sdot '+s;el.title=m?(s+': '+m):s;}
+var _ovHealth={};
+async function loadHealth(){
+  try{
+    var res=await fetch('/api/health');
+    if(!res.ok)return;
+    _ovHealth=await res.json();
+    var servers=_ovHealth.servers||{};
+    Object.keys(servers).forEach(function(sid){
+      var sh=servers[sid]||{};
+      ['cppm','dns','callback'].forEach(function(k){
+        var elId='ov-'+sid+'-'+(k==='callback'?'cb':k);
+        var el=document.getElementById(elId);
+        if(el&&sh[k])applyDot(el,sh[k]);
+      });
+    });
+  }catch(e){}
+  setTimeout(loadHealth,120000);
 }
 
 async function loadStatus(){
@@ -1520,6 +1690,7 @@ async function loadStatus(){
 }
 
 setInterval(loadStatus,REFRESH_MS);
+loadHealth();
 </script>
 """
 
@@ -1631,6 +1802,9 @@ function renderInfoCards(data, health){
     +'<div class="row"><span class="lbl">DNS</span><span class="val">'+sdot('d-dot-dns',sh.dns)+esc(dnsLabel(data.dns_provider))+'</span></div>'
     +'<div class="row"><span class="lbl">CA</span><span class="val">'+esc(caLabel(data.acme_server))+'</span></div>'
     +'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>'
+    +(data.callback_host
+      ?'<div class="row"><span class="lbl">Callback</span><span class="val">'+sdot('d-dot-cb',sh.callback)+'http://'+esc(data.callback_host)+':'+esc(data.callback_port)+'/'+'</span></div>'
+      :'')
     +'</div></div>';
   return sched+cfg;
 }
@@ -1684,8 +1858,10 @@ async function loadHealth(){
       var sh=(_healthData.servers&&_healthData.servers[_SERVER_ID])||{};
       var ce=document.getElementById('d-dot-cppm');
       var de=document.getElementById('d-dot-dns');
-      if(ce&&sh.cppm)applyDot(ce,sh.cppm);
-      if(de&&sh.dns) applyDot(de,sh.dns);
+      var cbe=document.getElementById('d-dot-cb');
+      if(ce&&sh.cppm)    applyDot(ce,sh.cppm);
+      if(de&&sh.dns)     applyDot(de,sh.dns);
+      if(cbe&&sh.callback) applyDot(cbe,sh.callback);
     }
   }catch(e){}
   var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;

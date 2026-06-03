@@ -70,6 +70,9 @@ def validate_server(entry: dict) -> None:
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError("Callback port must be a number between 1 and 65535.")
+    cert_types = entry.get("cert_types") or []
+    if not any(t in cert_types for t in ("ecc", "rsa")):
+        raise ValueError("At least one certificate type (ECC or RSA) must be selected.")
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -216,6 +219,8 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
         "TRUST_EXCLUSIONS":     "\n".join(str(p) for p in trust_excl if p),
+        "ISSUE_ECC":            "true" if "ecc" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
+        "ISSUE_RSA":            "true" if "rsa" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
     }
     # DNS credential keys are already named as env vars in servers.json
     for k, v in creds.items():

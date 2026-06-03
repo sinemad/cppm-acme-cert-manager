@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-clearpass_upload.py – Uploads a Let's Encrypt certificate to Aruba ClearPass.
+clearpass_upload.py – Uploads an ACME-issued certificate to Aruba ClearPass.
 
+Supports Let's Encrypt, ZeroSSL, Buypass, and any other acme.sh-compatible CA.
 Uses the official pyclearpass SDK (github.com/aruba/pyclearpass) for all API
 operations. See api_platformcertificates.py in that package for the authoritative
 source of endpoint paths and body schemas.
 
 Steps:
-  0  Trust list pre-flight  – ensure all LE CA certs are trusted (EAP + Others)
-  1  HTTPS server cert      – upload PKCS12 to the HTTPS service slot
-  2  RADIUS service cert    – upload PKCS12 to the RADIUS service slot
+  0  Trust list pre-flight  – ensure all ACME CA certs are trusted (EAP + Others)
+  1  HTTPS server cert      – upload ECC PKCS12 to the HTTPS service slot (skipped with --skip-https)
+  2  RADIUS service cert    – upload RSA PKCS12 to the RADIUS service slot (skipped with --skip-radius)
   3  Verify                 – confirm domain appears in installed cert list
 
 SDK notes
@@ -698,7 +699,7 @@ def _serve_pkcs12_and_upload(
     pfx_url  = f"http://{callback_host}:{callback_port}/{pfx_name}"
 
     class _SilentHandler(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, *args):
+        def log_message(self, *_):
             pass
 
     # Bind on 0.0.0.0 so Docker port mapping reaches us
@@ -928,6 +929,7 @@ Note: PATCH /api/server-cert/{id} is NOT used — CPPM returns 405 for PATCH.
     p.add_argument("--only-trust-check", action="store_true",
                    help="Run Step 0 only (trust list verify/upload) — skip cert upload steps")
     p.add_argument("--skip-radius",      action="store_true")
+    p.add_argument("--skip-https",       action="store_true")
     return p.parse_args()
 
 
@@ -961,22 +963,24 @@ def main() -> int:
         return 1
 
     # Cert files are required for full upload mode; optional for trust-check-only
-    required_files = [
+    https_files = [
         ("https-cert",      args.https_cert),
         ("https-key",       args.https_key),
         ("https-fullchain", args.https_fullchain),
+    ]
+    radius_files = [
         ("radius-cert",     args.radius_cert),
         ("radius-key",      args.radius_key),
         ("radius-fullchain",args.radius_fullchain),
     ]
+    required_files = ([] if args.skip_https else https_files) + \
+                     ([] if args.skip_radius else radius_files)
     if args.only_trust_check:
-        # Only validate files that were explicitly provided
-        for label, path in required_files:
+        for label, path in https_files + radius_files:
             if path and not Path(path).is_file():
                 log.error("File not found (%s): %s", label, path)
                 return 1
     else:
-        # Full mode: all cert files are required
         for label, path in required_files:
             if not path:
                 log.error("Missing required argument: --%s", label)
@@ -1101,27 +1105,30 @@ def main() -> int:
         log.info("== Step 0: SKIPPED ==========================================")
 
     # Step 1 — ECC cert → HTTPS(ECC) slot
-    log.info("== Step 1: HTTPS(ECC) Server Certificate =======================")
-    try:
-        result = upload_https_certificate(
-            api, _token, host,
-            args.https_cert, args.https_key, args.https_fullchain,
-            passphrase, callback_host, callback_port
-        )
-        log.info("HTTPS upload response: %s", json.dumps(result, indent=2)
-                 if isinstance(result, dict) else result)
+    if not args.skip_https:
+        log.info("== Step 1: HTTPS(ECC) Server Certificate =======================")
         try:
-            expiry = _run_openssl(
-                ["x509", "-noout", "-enddate", "-in", args.https_cert]
-            ).strip().split("=", 1)[-1]
-        except Exception:
-            expiry = ""
-        status_write("OK", "UPLOAD",
-                     f"HTTPS(ECC) cert uploaded to {host}"
-                     + (f" – expires {expiry}" if expiry else ""))
-    except Exception as exc:
-        log.error("HTTPS upload FAILED: %s", exc)
-        hard_errors.append(f"HTTPS: {exc}")
+            result = upload_https_certificate(
+                api, _token, host,
+                args.https_cert, args.https_key, args.https_fullchain,
+                passphrase, callback_host, callback_port
+            )
+            log.info("HTTPS upload response: %s", json.dumps(result, indent=2)
+                     if isinstance(result, dict) else result)
+            try:
+                expiry = _run_openssl(
+                    ["x509", "-noout", "-enddate", "-in", args.https_cert]
+                ).strip().split("=", 1)[-1]
+            except Exception:
+                expiry = ""
+            status_write("OK", "UPLOAD",
+                         f"HTTPS(ECC) cert uploaded to {host}"
+                         + (f" – expires {expiry}" if expiry else ""))
+        except Exception as exc:
+            log.error("HTTPS upload FAILED: %s", exc)
+            hard_errors.append(f"HTTPS: {exc}")
+    else:
+        log.info("== Step 1: SKIPPED ==========================================")
 
     # Step 2 — RSA cert → RADIUS slot
     if not args.skip_radius:

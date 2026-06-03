@@ -154,10 +154,11 @@ operations. There are two layers: per-server (primary) and a global file
 Configure exclusions in the web UI for each ClearPass server individually:
 
 1. Navigate to **Servers** in the web UI.
-2. Click **Trust Exclusions** on the server row you want to configure.
-3. Check the certificates you want to exclude — the label strikes through to
+2. Click **Edit** on the server row you want to configure.
+3. In the **ACME Provider** section, click **Trust Exclusions**.
+4. Check the certificates you want to exclude — the label strikes through to
    confirm the selection.
-4. Click **Save Exclusions**.
+5. Click **Save Exclusions**.
 
 Per-server exclusions are stored in `servers.json` alongside the other server
 configuration and take effect at the next scheduled or manual trust check.

@@ -64,9 +64,14 @@ if output:
         continue
     fi
 
-    FLAT_ECC="${CERT_DIR}/${DOMAIN}.ecc.cer"
-    FLAT_RSA="${CERT_DIR}/${DOMAIN}.rsa.cer"
-    if [[ ! -f "$FLAT_ECC" || ! -f "$FLAT_RSA" ]]; then
+    ISSUE_ECC="${ISSUE_ECC:-true}"
+    ISSUE_RSA="${ISSUE_RSA:-true}"
+
+    # Check that flat cert files exist for each enabled type; re-issue if missing
+    NEEDS_ISSUE=false
+    [[ "$ISSUE_ECC" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.ecc.cer" ]] && NEEDS_ISSUE=true
+    [[ "$ISSUE_RSA" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.rsa.cer" ]] && NEEDS_ISSUE=true
+    if [[ "$NEEDS_ISSUE" == "true" ]]; then
         log "Flat cert(s) missing for ${DOMAIN} – delegating to issue_cert.sh..."
         status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – re-running issuance"
         /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
@@ -74,7 +79,10 @@ if output:
         continue
     fi
 
-    EXPIRY=$(openssl x509 -enddate -noout -in "$FLAT_ECC" 2>/dev/null \
+    # Use the primary enabled cert type for expiry display
+    PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.ecc.cer"
+    [[ "$ISSUE_ECC" != "true" ]] && PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+    EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_FLAT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
     DAYS_LEFT="unknown"
     EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
@@ -83,32 +91,55 @@ if output:
     fi
     log "Current cert for ${DOMAIN} expires: $EXPIRY ($DAYS_LEFT days remaining)"
 
-    log "Running acme.sh --renew for ${DOMAIN}..."
-    RENEW_EXIT=0
-    "$ACME_BIN" --renew \
-        --domain    "$DOMAIN" \
-        --server    "${ACME_SERVER:-letsencrypt}" \
-        --home      /root/.acme.sh \
-        --log       "$LOG" \
-        --log-level 2 \
-        2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
+    RENEWED=0
+    RENEW_FAILED=0
 
-    case $RENEW_EXIT in
-        0)
-            log "Certificate renewed for ${DOMAIN}."
-            status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
-            /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
-                err "install_cert.sh failed for ${DOMAIN}"
-            ;;
-        2)
-            log "Certificate for ${DOMAIN} not due for renewal – no action needed."
-            status_write "INFO" "RENEW" "Not due for renewal – ${DOMAIN} has ${DAYS_LEFT} days remaining (next check in 12h)"
-            ;;
-        *)
-            err "acme.sh --renew exited with code $RENEW_EXIT for ${DOMAIN} – check ${LOG}"
-            status_write "FAILED" "RENEW" "acme.sh --renew failed (exit ${RENEW_EXIT}) for ${DOMAIN} – check renewal.log"
-            ;;
-    esac
+    if [[ "$ISSUE_ECC" == "true" ]]; then
+        log "Running acme.sh --renew (ECC) for ${DOMAIN}..."
+        ECC_RENEW_EXIT=0
+        "$ACME_BIN" --renew \
+            --domain    "$DOMAIN" \
+            --ecc \
+            --server    "${ACME_SERVER:-letsencrypt}" \
+            --home      /root/.acme.sh \
+            --log       "$LOG" \
+            --log-level 2 \
+            2>&1 | tee -a "$LOG" 2>/dev/null || ECC_RENEW_EXIT=$?
+        case $ECC_RENEW_EXIT in
+            0) log "ECC certificate renewed for ${DOMAIN}."; RENEWED=$((RENEWED+1)) ;;
+            2) log "ECC cert not due for renewal." ;;
+            *) err "acme.sh --renew (ECC) exited $ECC_RENEW_EXIT for ${DOMAIN}"; RENEW_FAILED=$((RENEW_FAILED+1)) ;;
+        esac
+    fi
+
+    if [[ "$ISSUE_RSA" == "true" ]]; then
+        log "Running acme.sh --renew (RSA) for ${DOMAIN}..."
+        RSA_RENEW_EXIT=0
+        "$ACME_BIN" --renew \
+            --domain    "$DOMAIN" \
+            --server    "${ACME_SERVER:-letsencrypt}" \
+            --home      /root/.acme.sh \
+            --log       "$LOG" \
+            --log-level 2 \
+            2>&1 | tee -a "$LOG" 2>/dev/null || RSA_RENEW_EXIT=$?
+        case $RSA_RENEW_EXIT in
+            0) log "RSA certificate renewed for ${DOMAIN}."; RENEWED=$((RENEWED+1)) ;;
+            2) log "RSA cert not due for renewal." ;;
+            *) err "acme.sh --renew (RSA) exited $RSA_RENEW_EXIT for ${DOMAIN}"; RENEW_FAILED=$((RENEW_FAILED+1)) ;;
+        esac
+    fi
+
+    if [[ $RENEW_FAILED -gt 0 ]]; then
+        status_write "FAILED" "RENEW" "acme.sh --renew failed for ${DOMAIN} – check renewal.log"
+    elif [[ $RENEWED -gt 0 ]]; then
+        log "Certificate(s) renewed for ${DOMAIN}."
+        status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
+        /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+            err "install_cert.sh failed for ${DOMAIN}"
+    else
+        log "Certificate for ${DOMAIN} not due for renewal – no action needed."
+        status_write "INFO" "RENEW" "Not due for renewal – ${DOMAIN} has ${DAYS_LEFT} days remaining (next check in 12h)"
+    fi
 done
 
 log "=== Renewal Check Complete ==="

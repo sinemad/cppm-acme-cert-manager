@@ -215,7 +215,7 @@ Behaviour:
 ```
 
 **Priority:** Per-server exclusions configured in the web UI
-(**Servers → Trust Exclusions**) and stored in `servers.json` always take
+(**Servers → Edit → ACME Provider → Trust Exclusions**) and stored in `servers.json` always take
 precedence. This file is only read when a server has no per-server exclusions
 configured — it acts as a global fallback for backwards compatibility.
 
@@ -259,7 +259,7 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 | `GET /settings` | Yes | ClearPass server list — add, edit, delete |
 | `GET /settings/add` | Yes | Add server form |
 | `GET /settings/edit/<id>` | Yes | Edit server form |
-| `GET /settings/trust-exclusions/<id>` | Yes | Per-server trust exclusion configuration |
+| `GET /settings/trust-exclusions/<id>` | Yes | Per-server trust exclusions (reached via Edit → ACME Provider) |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |

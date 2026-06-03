@@ -160,12 +160,11 @@ Navigate to **Servers** in the top navigation bar.
 
 ### Server list actions
 
-Each server row shows three action buttons:
+Each server row shows two action buttons:
 
 | Button | Action |
 |---|---|
-| **Trust Exclusions** | Configure which CA certificates are excluded from trust list management for this server |
-| **Edit** | Modify server credentials, DNS provider, domain, and ACME settings |
+| **Edit** | Modify server credentials, DNS provider, ACME settings, and trust exclusions |
 | **Delete** | Remove the server entry (inline two-step confirmation) |
 
 ### Adding a server
@@ -178,7 +177,7 @@ Click **+ Add Server** and fill in all fields.
 |---|---|
 | **Identity** | Friendly label |
 | **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL |
-| **Domain & ACME** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
+| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
 | **DNS Provider** | Provider selector; credential fields update dynamically for the selected provider |
 
 #### DNS provider credential fields
@@ -196,7 +195,14 @@ are disabled in the browser before the form is sent.
 
 ### Editing and deleting
 
-- Click **Edit** on any row to modify an existing server entry.
+Click **Edit** on any row to open the edit form.
+
+![Edit Server form](ui-server-edit.png)
+
+The edit form adds a **Trust Exclusions** button in the **ACME Provider** section,
+which links to the per-server trust exclusion configuration page. This button is
+not shown on the Add Server form.
+
 - Click **Delete** to start an inline two-step confirmation — no browser popup.
 
 Each ClearPass host must be unique across all server entries. Attempts to save
@@ -243,20 +249,21 @@ intermediate CA certificates automatically.
 
 ### Accessing trust exclusions
 
-From the Servers page, click **Trust Exclusions** in the row for the server you
-want to configure.
+From the Servers page click **Edit** on the server you want to configure, then
+click **Trust Exclusions** in the **ACME Provider** section of the edit form.
 
 ![Trust Exclusions page](trust-exclusions-screenshot.png)
 
 ### Configuring exclusions
 
-The Trust Exclusions page groups known CA certificates by ACME provider:
+The page shows only the CA certificates relevant to the ACME provider configured
+for that server:
 
-| Section | Certificates |
+| ACME Provider | Section shown |
 |---|---|
-| **Let's Encrypt CA Certificate Exclusion** | ISRG Root X1/X2 (roots), R10–R14 (RSA intermediates), E5–E10 (ECDSA intermediates) |
-| **ZeroSSL — Sectigo Chain CA Certificate Exclusion** | ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
-| **Buypass CA Certificate Exclusion** | Buypass Go SSL, Buypass Class 2 Root CA |
+| Let's Encrypt / Let's Encrypt Staging | **Let's Encrypt CA Certificate Exclusion** — ISRG Root X1/X2, R10–R14, E5–E10 |
+| ZeroSSL | **ZeroSSL — Sectigo Chain CA Certificate Exclusion** — ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
+| Buypass | **Buypass CA Certificate Exclusion** — Buypass Go SSL, Buypass Class 2 Root CA |
 
 Check a box to exclude that certificate. The label text strikes through to
 confirm the selection. Unchecking re-enables management for that certificate.

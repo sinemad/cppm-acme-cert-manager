@@ -145,7 +145,7 @@ docker exec -it cppm-acme-cert-manager bash
 
 ```bash
 # Configure per-server exclusions (recommended) — web UI
-# Servers → Trust Exclusions (on the server row) → check boxes → Save Exclusions
+# Servers → Edit (for a server) → ACME Provider section → Trust Exclusions → check boxes → Save Exclusions
 
 # Global fallback file — applies to servers with no per-server exclusions configured
 nano /opt/cppm-certs/trust-exclusions.conf   # takes effect at next trust check, no restart needed
