@@ -211,6 +211,26 @@ def next_check_info() -> dict:
     }
 
 
+_ALLOWED_RAW_LOGS = {"acme_renewal", "cppm_upload"}
+
+def read_raw_log(server: dict, log_name: str, max_lines: int = 500) -> dict:
+    """Return the last max_lines lines of a per-server raw log file."""
+    if log_name not in _ALLOWED_RAW_LOGS:
+        return {"lines": [], "exists": False, "truncated": False, "total": 0}
+    path = server_cert_dir(server) / ".logs" / f"{log_name}.log"
+    if not path.exists():
+        return {"lines": [], "exists": False, "truncated": False, "total": 0}
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+        total = len(lines)
+        truncated = total > max_lines
+        return {"lines": lines[-max_lines:], "exists": True,
+                "truncated": truncated, "total": total}
+    except Exception as exc:
+        return {"lines": [f"Error reading log: {exc}"], "exists": True,
+                "truncated": False, "total": 0}
+
+
 def build_server_status(server: dict) -> dict:
     """Build the full status dict for a single server configuration entry."""
     tz       = _tz()
@@ -245,9 +265,38 @@ def build_all_status() -> list:
 # external APIs.  Checks run in the calling thread (ThreadingHTTPServer handles
 # concurrency), protected by a lock to avoid duplicate simultaneous checks.
 
-_health_lock:  threading.Lock = threading.Lock()
-_health_cache: dict           = {}
-_HEALTH_TTL                   = 120  # seconds
+_health_lock:        threading.Lock = threading.Lock()
+_health_cache:       dict           = {}
+_HEALTH_TTL                         = 120  # seconds
+_health_prev_states: dict           = {}   # {server_id: {check_type: status_str}}
+
+# Level map for health check results → status.log level column
+_HEALTH_LEVEL: dict[str, str] = {
+    "ok":      "OK",
+    "warn":    "WARN",
+    "error":   "FAILED",
+    "unknown": "INFO",
+}
+# Category label per check type
+_HEALTH_CATEGORY: dict[str, str] = {
+    "cppm":     "CPPM",
+    "dns":      "DNS",
+    "callback": "CALLBACK",
+}
+
+
+def _write_server_status_log(server: dict, level: str,
+                              category: str, message: str) -> None:
+    """Append one line to the per-server status.log in the standard pipe-delimited format."""
+    try:
+        path = server_cert_dir(server) / "status.log"
+        ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts} | {level:<6} | {category:<7} | {message}\n"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception as exc:
+        _log.debug("status log write failed for %s: %s",
+                   server.get("cppm_host", "?"), exc)
 
 
 def _check_cppm(server: dict = None) -> dict:
@@ -484,6 +533,8 @@ def _build_health() -> dict:
 
     # Flatten into (server_id, check_type, server_dict) tasks
     tasks = [(s.get("id", ""), t, s) for s in servers for t in ("cppm", "dns", "callback")]
+    # Keep a lookup so we can resolve server dicts when logging state changes
+    sid_to_server = {s.get("id", ""): s for s in servers}
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     per_server: dict = {}
@@ -507,6 +558,22 @@ def _build_health() -> dict:
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     with _health_lock:
+        # Log state changes (and first-time checks) to each server's status.log
+        for sid, checks in per_server.items():
+            srv  = sid_to_server.get(sid)
+            if not srv:
+                continue
+            prev = _health_prev_states.get(sid, {})
+            for check_type, result_dict in checks.items():
+                curr = result_dict.get("status", "unknown")
+                if curr != prev.get(check_type):
+                    level    = _HEALTH_LEVEL.get(curr, "INFO")
+                    category = _HEALTH_CATEGORY.get(check_type, check_type.upper())
+                    message  = result_dict.get("message", curr)
+                    _write_server_status_log(srv, level, category, message)
+            _health_prev_states[sid] = {
+                ct: r.get("status", "unknown") for ct, r in checks.items()
+            }
         _health_cache["data"] = result
         _health_cache["ts"]   = time.time()
     return result
@@ -636,8 +703,16 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .big-val{font-size:1.6rem;font-weight:700;color:var(--accent);line-height:1}
 .sub-val{font-size:0.78rem;color:var(--muted);margin-top:0.2rem;margin-bottom:0.85rem}
 .log-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow)}
-.log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem}
-.log-count{font-size:0.72rem;color:var(--subtle)}
+.log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;gap:0.5rem}
+.log-tabs{display:flex;gap:0.25rem;flex:1;flex-wrap:wrap}
+.log-tab{padding:0.28rem 0.7rem;font-size:0.74rem;font-weight:500;color:var(--muted);cursor:pointer;border:1px solid var(--border);border-radius:0.35rem;background:transparent;white-space:nowrap}
+.log-tab:hover:not(.active){color:var(--text);border-color:var(--border2)}
+.log-tab.active{color:var(--accent);background:rgba(56,189,248,.08);border-color:rgba(56,189,248,.3)}
+.log-count{font-size:0.72rem;color:var(--subtle);white-space:nowrap}
+.raw-log{font-family:monospace;font-size:0.71rem;line-height:1.55;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:440px;overflow-y:auto;padding:0.1rem 0}
+.raw-log-wrap{position:relative}
+.raw-log-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem}
+.raw-log-hint{font-size:0.68rem;color:var(--subtle);font-style:italic}
 .log-table{width:100%;border-collapse:collapse}
 .log-table tr:hover td{background:rgba(255,255,255,.025)}
 .log-table td{padding:0.32rem 0.5rem;border-bottom:1px solid rgba(51,65,85,.5);vertical-align:top}
@@ -1028,7 +1103,9 @@ def _overview_page(username: str = "") -> str:
 
 def _server_detail_page(server_id: str, username: str = "") -> str:
     """Per-server drill-down (existing dashboard panels, accessed at /server/<id>)."""
-    sid_js = f'<script>var SERVER_ID = "{_esc(server_id)}";</script>'
+    is_auth  = "true" if username else "false"
+    sid_js   = (f'<script>var SERVER_ID="{_esc(server_id)}";'
+                f'var IS_AUTH={is_auth};</script>')
     return _base("Server Details", _DETAIL_BODY + sid_js + _DETAIL_SCRIPT,
                  nav_user=username, active="dashboard", show_nav=True)
 
@@ -1785,14 +1862,41 @@ _DETAIL_BODY = """
 
 <div class="log-card">
   <div class="log-hdr">
-    <span class="card-title" style="margin:0">Activity Log</span>
+    <div class="log-tabs" id="log-tabs">
+      <button class="log-tab active" data-tab="activity" onclick="switchLogTab(this,'activity')">Activity Log</button>
+      <button class="log-tab" data-tab="renewal" id="log-tab-renewal" onclick="switchLogTab(this,'renewal')">ACME Renewal</button>
+      <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">ClearPass Upload</button>
+    </div>
     <span class="log-count" id="log-count"></span>
   </div>
-  <table class="log-table">
-    <tbody id="log-body">
-      <tr><td colspan="4"><div class="empty">Loading&hellip;</div></td></tr>
-    </tbody>
-  </table>
+
+  <div id="log-pane-activity">
+    <table class="log-table">
+      <tbody id="log-body">
+        <tr><td colspan="4"><div class="empty">Loading&hellip;</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div id="log-pane-renewal" style="display:none">
+    <div class="raw-log-wrap">
+      <div class="raw-log-toolbar">
+        <span class="raw-log-hint" id="renewal-hint"></span>
+        <button class="btn btn-ghost" style="font-size:0.7rem;padding:0.2rem 0.5rem" onclick="reloadRawLog('renewal')">&#8635; Refresh</button>
+      </div>
+      <div class="raw-log" id="raw-log-renewal">Loading&hellip;</div>
+    </div>
+  </div>
+
+  <div id="log-pane-upload" style="display:none">
+    <div class="raw-log-wrap">
+      <div class="raw-log-toolbar">
+        <span class="raw-log-hint" id="upload-hint"></span>
+        <button class="btn btn-ghost" style="font-size:0.7rem;padding:0.2rem 0.5rem" onclick="reloadRawLog('upload')">&#8635; Refresh</button>
+      </div>
+      <div class="raw-log" id="raw-log-upload">Loading&hellip;</div>
+    </div>
+  </div>
 </div>
 
 </div>
@@ -1890,8 +1994,10 @@ function render(data){
   document.getElementById('cert-cards').innerHTML=renderCertCard(ecc,'ECC Certificate','HTTPS(ECC)','ecc')+renderCertCard(rsa,'RSA Certificate','RADIUS','rsa');
   document.getElementById('info-cards').innerHTML=renderInfoCards(data,_healthData);
   document.getElementById('log-body').innerHTML=renderLog(data.activity);
-  var cnt=(data.activity||[]).length;
-  document.getElementById('log-count').textContent=cnt+' event'+(cnt!==1?'s':'');
+  if(_activeLogTab==='activity'){
+    var cnt=(data.activity||[]).length;
+    document.getElementById('log-count').textContent=cnt+' event'+(cnt!==1?'s':'');
+  }
 }
 
 function showCert(key){
@@ -1971,6 +2077,75 @@ function copyPEM(){
   navigator.clipboard.writeText(pre.textContent).then(function(){var orig=btn.textContent;btn.textContent='Copied!';setTimeout(function(){btn.textContent=orig;},2000);}).catch(function(){var r=document.createRange();r.selectNode(pre);window.getSelection().removeAllRanges();window.getSelection().addRange(r);});
 }
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+
+// ── Log tabs ──────────────────────────────────────────────────────────────────
+var _activeLogTab='activity';
+var _rawLogLoaded={renewal:false,upload:false};
+var _logNameMap={renewal:'acme_renewal',upload:'cppm_upload'};
+
+(function initLogTabs(){
+  var isAuth=(typeof IS_AUTH!=='undefined')?IS_AUTH:false;
+  if(!isAuth){
+    var r=document.getElementById('log-tab-renewal');
+    var u=document.getElementById('log-tab-upload');
+    if(r)r.style.display='none';
+    if(u)u.style.display='none';
+  }
+})();
+
+function switchLogTab(btn,tab){
+  document.querySelectorAll('.log-tab').forEach(function(b){b.classList.remove('active');});
+  ['activity','renewal','upload'].forEach(function(t){
+    var p=document.getElementById('log-pane-'+t);
+    if(p)p.style.display=(t===tab?'':'none');
+  });
+  btn.classList.add('active');
+  _activeLogTab=tab;
+  if(tab==='activity'){
+    var cnt=(_statusData&&_statusData.activity||[]).length;
+    document.getElementById('log-count').textContent=cnt+' event'+(cnt!==1?'s':'');
+  }else{
+    document.getElementById('log-count').textContent='';
+    if(!_rawLogLoaded[tab])loadRawLog(tab);
+  }
+}
+
+function reloadRawLog(tab){
+  _rawLogLoaded[tab]=false;
+  loadRawLog(tab);
+}
+
+async function loadRawLog(tab){
+  var logName=_logNameMap[tab]||tab;
+  var el=document.getElementById('raw-log-'+tab);
+  var hint=document.getElementById(tab+'-hint');
+  if(el)el.textContent='Loading…';
+  if(hint)hint.textContent='';
+  try{
+    var res=await fetch('/api/logs/'+_SERVER_ID+'/'+logName);
+    if(res.status===401){
+      if(el)el.textContent='Sign in to view this log.';
+      return;
+    }
+    if(!res.ok){
+      if(el)el.textContent='Failed to load log (HTTP '+res.status+').';
+      return;
+    }
+    var data=await res.json();
+    if(!data.lines||!data.lines.length){
+      if(el)el.textContent='(log is empty or does not exist yet)';
+      return;
+    }
+    if(el)el.textContent=data.lines.join('\\n');
+    if(hint)hint.textContent=data.truncated
+      ?'Showing last '+data.lines.length+' of '+data.total+' lines'
+      :data.total+' lines';
+    _rawLogLoaded[tab]=true;
+    if(el)el.scrollTop=el.scrollHeight;
+  }catch(e){
+    if(el)el.textContent='Error: '+e.message;
+  }
+}
 </script>
 """
 
@@ -2151,7 +2326,27 @@ class Handler(BaseHTTPRequestHandler):
 
         username = self._get_session_user()
         if not username:
+            # Return JSON 401 for API calls so JS can handle it cleanly;
+            # redirect to login only for browser page requests.
+            if path.startswith("/api/"):
+                return self._serve_json({"error": "Unauthorized"}, status=401)
             return self._redirect("/login")
+
+        # ── Raw log API — authenticated only, regardless of REQUIRE_AUTH_FOR_STATUS
+        if path.startswith("/api/logs/"):
+            parts = path[len("/api/logs/"):].strip("/").split("/")
+            if len(parts) == 2:
+                log_server_id, log_name = parts
+                if log_name not in _ALLOWED_RAW_LOGS:
+                    return self._serve_json({"error": "Unknown log name"}, status=404)
+                srv = get_server(log_server_id)
+                if not srv:
+                    return self._serve_json({"error": "Server not found"}, status=404)
+                try:
+                    return self._serve_json(read_raw_log(srv, log_name))
+                except Exception as e:
+                    return self._serve_json({"error": str(e)}, status=500)
+            return self._serve_json({"error": "Not found"}, status=404)
 
         if path == "/admin/users":
             qs     = parse_qs(urlparse(self.path).query)
