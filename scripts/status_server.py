@@ -46,6 +46,21 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
 )
 
+# ── Version ───────────────────────────────────────────────────────────────────
+def _read_version() -> str:
+    for p in (
+        Path("/opt/cppm/VERSION"),
+        Path(__file__).parent / "VERSION",
+        Path(__file__).parent.parent / "VERSION",
+    ):
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return "unknown"
+
+_APP_VERSION = _read_version()
+
 # ── Configuration from environment ───────────────────────────────────────────
 CERT_DIR    = Path(os.environ.get("CERT_DIR", "/data/certs"))
 STATUS_PORT = int(os.environ.get("STATUS_PORT", "8080"))
@@ -778,6 +793,9 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 <body>
 {nav}
 {body}
+<footer style="text-align:center;padding:1.5rem 1rem;font-size:0.68rem;color:var(--subtle)">
+  ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)}
+</footer>
 </body>
 </html>"""
 
@@ -1652,20 +1670,23 @@ function renderRow(s){
 
 function applyDot(el,h){var s=h.status||'unknown',m=h.message||'';el.className='sdot '+s;el.title=m?(s+': '+m):s;}
 var _ovHealth={};
+function applyAllHealthDots(){
+  var servers=(_ovHealth&&_ovHealth.servers)||{};
+  Object.keys(servers).forEach(function(sid){
+    var sh=servers[sid]||{};
+    ['cppm','dns','callback'].forEach(function(k){
+      var elId='ov-'+sid+'-'+(k==='callback'?'cb':k);
+      var el=document.getElementById(elId);
+      if(el&&sh[k])applyDot(el,sh[k]);
+    });
+  });
+}
 async function loadHealth(){
   try{
     var res=await fetch('/api/health');
     if(!res.ok)return;
     _ovHealth=await res.json();
-    var servers=_ovHealth.servers||{};
-    Object.keys(servers).forEach(function(sid){
-      var sh=servers[sid]||{};
-      ['cppm','dns','callback'].forEach(function(k){
-        var elId='ov-'+sid+'-'+(k==='callback'?'cb':k);
-        var el=document.getElementById(elId);
-        if(el&&sh[k])applyDot(el,sh[k]);
-      });
-    });
+    applyAllHealthDots();
   }catch(e){}
   setTimeout(loadHealth,120000);
 }
@@ -1681,6 +1702,7 @@ async function loadStatus(){
     if(Array.isArray(data)&&data.length){
       document.getElementById('servers-body').innerHTML=data.map(renderRow).join('');
       document.getElementById('last-updated').textContent='Updated '+new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      applyAllHealthDots();
     }
   }catch(e){
     document.getElementById('last-updated').textContent='Refresh error: '+e.message;
@@ -1690,6 +1712,7 @@ async function loadStatus(){
 }
 
 setInterval(loadStatus,REFRESH_MS);
+loadStatus();
 loadHealth();
 </script>
 """

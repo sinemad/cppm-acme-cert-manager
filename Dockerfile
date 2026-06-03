@@ -1,8 +1,11 @@
 FROM alpine:3.19
 
-LABEL maintainer="Network Engineering"
-LABEL description="Self-contained acme.sh certificate manager for Aruba ClearPass CPPM"
-LABEL version="2.1"
+ARG VERSION=1.0.0
+LABEL org.opencontainers.image.title="ClearPass ACME Certificate Manager" \
+      org.opencontainers.image.description="Automated TLS certificate management for Aruba ClearPass Policy Manager via acme.sh DNS-01" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      maintainer="Network Engineering"
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apk add --no-cache \
@@ -143,6 +146,7 @@ RUN mkdir -p /opt/cppm/acme-ca-certs \
 # ── Copy application scripts ──────────────────────────────────────────────────
 RUN mkdir -p /opt/cppm
 COPY scripts/ /opt/cppm/
+COPY VERSION  /opt/cppm/VERSION
 COPY config/crontab /etc/crontabs/root
 # Merge the acme-ca-certs project directory (contains trust-exclusions.conf default)
 # into the directory already populated by the ACME CA cert download RUN block above.
