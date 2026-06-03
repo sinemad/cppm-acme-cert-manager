@@ -196,8 +196,8 @@ Behaviour:
    CA chain paths, so intermediates unique to either chain are always checked.
 3. Applies trust exclusions: per-server exclusions from `servers.json` take
    precedence; falls back to `trust-exclusions.conf` if none are configured.
-4. Appends output to `/data/certs/.logs/upload.log` and writes a `TRUST`
-   entry to `status.log`.
+4. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
+   and writes a `TRUST` entry to the per-server `status.log`.
 
 ---
 
@@ -332,8 +332,10 @@ CLI tool for managing web UI admin accounts stored in `admin.htpasswd`.
 
 Sourced by all scripts (`source /opt/cppm/status.sh`). Never call directly.
 
-Provides `status_write LEVEL CATEGORY MESSAGE` which writes to
-`/data/certs/status.log`.
+Provides `status_write LEVEL CATEGORY MESSAGE` which writes to the per-server
+`/data/certs/<cppm_host>/status.log` (after `eval "$SERVER_ENV"` switches the
+`STATUS_LOG` variable to the per-server path). Container-level startup events
+write to the global `/data/certs/status.log`.
 
 ---
 

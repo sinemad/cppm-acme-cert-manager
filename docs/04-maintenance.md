@@ -138,8 +138,8 @@ checked and repaired automatically on two schedules:
 docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 ```
 
-Output appends to `/opt/cppm-certs/.logs/upload.log` and records a `TRUST`
-entry in `status.log`.
+Output appends to each server's `/opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log`
+and records a `TRUST` entry in the per-server `status.log`.
 
 ---
 
@@ -234,8 +234,16 @@ docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 
 ## Automatic log review
 
-`status.log` records the outcome of every scheduled operation. During normal
-operation you will see entries like the following — no action is required.
+Each ClearPass server has its own `status.log` at `/opt/cppm-certs/<cppm_host>/status.log`
+(also viewable in the web UI under **Activity Log**). During normal operation
+you will see entries like the following — no action is required.
+
+**Connectivity health (on first check and whenever status changes):**
+```
+2026-06-03 01:00:00 | OK     | CPPM     | Connected
+2026-06-03 01:00:00 | OK     | DNS      | Token valid
+2026-06-03 01:00:00 | OK     | CALLBACK | Reachable at http://192.168.1.100:8765/
+```
 
 **Daily renewal checks (02:00 and 14:00):**
 ```
@@ -247,8 +255,10 @@ operation you will see entries like the following — no action is required.
 2026-06-08 03:00:07 | OK     | TRUST   | 9 CA certs verified – 0 uploaded, 0 patched, 9 already trusted
 ```
 
-The first `OK | RENEW` entry confirms a successful certificate renewal.
-The weekly `OK | TRUST` entry confirms the ClearPass trust list is complete.
+For detailed acme.sh renewal output see `acme_renewal.log`; for full ClearPass
+API upload logs see `cppm_upload.log`. Both are in
+`/opt/cppm-certs/<cppm_host>/.logs/` and are also accessible in the web UI
+(sign-in required) on the server detail page.
 
 ---
 

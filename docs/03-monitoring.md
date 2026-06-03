@@ -107,8 +107,36 @@ dashboard, or directly via `/server/<id>`.
 | **ECC Certificate** | Days remaining, expiry and issue dates, issuer CN, key type and size, SAN list |
 | **RSA Certificate** | Same fields for the RSA certificate |
 | **Renewal Schedule** | Countdown to the next `renew.sh` run (02:00 or 14:00 container-local time) |
-| **Configuration** | Domain, DNS provider (with status light), ACME certificate authority, ClearPass host (with status light) |
-| **Activity Log** | Last 40 `status.log` entries for this server, newest first, colour-coded by level |
+| **Configuration** | Domain, DNS provider (with status dot), ACME CA, ClearPass host (with status dot), callback URL (with status dot) |
+| **Logs** | Tabbed log viewer — see below |
+
+### Log viewer tabs
+
+The log section at the bottom of the server detail page provides three tabs:
+
+![Server detail — Activity Log tab (authenticated)](ui-server-detail.png)
+
+| Tab | Log file | Who can view |
+|---|---|---|
+| **Activity Log** | `<server>/status.log` | Everyone (no sign-in required) |
+| **ACME Renewal** | `<server>/.logs/acme_renewal.log` | Signed-in users only |
+| **ClearPass Upload** | `<server>/.logs/cppm_upload.log` | Signed-in users only |
+
+Non-authenticated users see only the Activity Log tab:
+
+![Server detail — Activity Log only (not signed in)](ui-server-detail-noauth.png)
+
+**Activity Log** — one line per event, newest first, colour-coded by level (`OK` green, `WARN` yellow, `FAILED` red, `INFO` grey). Covers cert issuance/renewal, ClearPass upload outcomes, and health check state changes (CPPM, DNS, Callback).
+
+**ACME Renewal** — full `acme.sh` output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA, and callback URL.
+
+![ACME Renewal log tab](ui-server-logs-renewal.png)
+
+**ClearPass Upload** — complete ClearPass REST API upload log, including OAuth token exchange, trust list pre-flight, PKCS12 serving, HTTPS(ECC) and RADIUS(RSA) cert upload steps, and verification.
+
+![ClearPass Upload log tab](ui-server-logs-upload.png)
+
+Each raw-log tab loads lazily (fetched only when first clicked) and includes a **↻ Refresh** button to reload without switching tabs.
 
 ### Certificate details modal
 
@@ -335,39 +363,47 @@ tail -50 /opt/cppm-certs/.logs/status_server.log
 
 ---
 
-## status.log — the quick view
+## status.log — per-server activity log
 
-`status.log` lives directly in `/opt/cppm-certs/` and is readable on the host
-without `docker exec`. It records one line per significant event using a fixed
-column format:
+Each ClearPass server has its own `status.log` at:
+
+```
+/opt/cppm-certs/<cppm_host>/status.log    ← host path
+/data/certs/<cppm_host>/status.log        ← container path
+```
+
+It records one line per significant event in a fixed column format and is what
+the web UI's **Activity Log** tab reads. It is publicly readable (no sign-in
+required):
 
 ```
 TIMESTAMP           | LEVEL  | CATEGORY | MESSAGE
-2026-03-17 10:43:07 | INFO   | STARTUP  | Container started
-2026-03-17 10:43:07 | INFO   | CERT     | No certificates found – starting first-time issuance
-2026-03-17 10:43:34 | OK     | CERT     | New certificates issued (ECC + RSA) via cloudflare DNS-01
-2026-03-17 10:43:34 | OK     | CERT     | ECC+RSA certs installed – expires Jun 15 2026 (89 days remaining)
-2026-03-17 10:43:38 | OK     | TRUST    | 7 CA certs verified – 2 uploaded, 5 already trusted
-2026-03-17 10:43:42 | OK     | UPLOAD   | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
-2026-03-17 10:43:42 | INFO   | STARTUP  | supercronic started – renewal checks at 02:00 and 14:00 UTC
+2026-06-15 10:43:00 | INFO   | CERT     | No certificates found – starting first-time issuance
+2026-06-15 10:43:34 | OK     | CERT     | New certificates issued (ECC + RSA) via cloudflare DNS-01
+2026-06-15 10:43:38 | OK     | TRUST    | 7 CA certs verified – 2 uploaded, 5 already trusted
+2026-06-15 10:43:42 | OK     | UPLOAD   | ECC→HTTPS + RSA→RADIUS uploaded to cppm.example.com
+2026-06-03 01:00:00 | OK     | CPPM     | Connected
+2026-06-03 01:00:00 | OK     | DNS      | Token valid
+2026-06-03 01:00:00 | OK     | CALLBACK | Reachable at http://192.168.1.100:8765/
+2026-06-03 02:00:01 | INFO   | RENEW    | Not due for renewal – 72 days remaining (next check in 12h)
 ```
 
 ```bash
-# View on the host
-cat /opt/cppm-certs/status.log
+# View on the host (replace cppm.example.com with your ClearPass hostname)
+cat /opt/cppm-certs/cppm.example.com/status.log
 
 # Live tail
-tail -f /opt/cppm-certs/status.log
+tail -f /opt/cppm-certs/cppm.example.com/status.log
 
 # Show only failures
-grep FAILED /opt/cppm-certs/status.log
+grep FAILED /opt/cppm-certs/cppm.example.com/status.log
 
 # Show only upload events
-grep UPLOAD /opt/cppm-certs/status.log
-
-# Show last 10 events
-tail -10 /opt/cppm-certs/status.log
+grep UPLOAD /opt/cppm-certs/cppm.example.com/status.log
 ```
+
+A global `status.log` at `/opt/cppm-certs/status.log` records container-level
+startup and shutdown events only (not per-server cert or upload activity).
 
 ---
 
@@ -382,13 +418,18 @@ tail -10 /opt/cppm-certs/status.log
 
 ## Categories
 
-| Category | Written by | Covers |
-|---|---|---|
-| `STARTUP` | `entrypoint.sh` | Container start, supercronic launch |
-| `CERT` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
-| `RENEW` | `renew.sh` | Daily renewal check results |
-| `TRUST` | `clearpass_upload.py`, `trust_check.sh` | CA trust list pre-flight and weekly check |
-| `UPLOAD` | `deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
+| Category | Written to | Written by | Covers |
+|---|---|---|---|
+| `STARTUP` | Global `status.log` | `entrypoint.sh` | Container start, supercronic launch |
+| `CERT` | Per-server `status.log` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
+| `RENEW` | Per-server `status.log` | `renew.sh` | Daily renewal check results |
+| `TRUST` | Per-server `status.log` | `clearpass_upload.py`, `trust_check.sh` | CA trust list pre-flight and weekly check |
+| `UPLOAD` | Per-server `status.log` | `deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
+| `CPPM` | Per-server `status.log` | `status_server.py` | ClearPass API connectivity state changes |
+| `DNS` | Per-server `status.log` | `status_server.py` | DNS provider credential state changes |
+| `CALLBACK` | Per-server `status.log` | `status_server.py` | Callback HTTP service reachability changes |
+
+`CPPM`, `DNS`, and `CALLBACK` entries are written only when the status **changes** (e.g., green → red, or red → green), so they mark incidents and recoveries rather than every periodic check.
 
 ---
 
@@ -427,22 +468,28 @@ tail -10 /opt/cppm-certs/status.log
 
 ## Detailed logs
 
+Per-server logs are in `/opt/cppm-certs/<cppm_host>/.logs/`:
+
+```bash
+# acme.sh issuance and renewal full output (per server)
+tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
+
+# ClearPass API upload full output (per server)
+tail -100 /opt/cppm-certs/cppm.example.com/.logs/cppm_upload.log
+```
+
+Container-level logs are in `/opt/cppm-certs/.logs/`:
+
 ```bash
 # Container startup and cert state decisions
 tail -100 /opt/cppm-certs/.logs/startup.log
 
-# acme.sh issuance and renewal full output
-tail -100 /opt/cppm-certs/.logs/renewal.log
-
-# ClearPass API upload detail
-tail -100 /opt/cppm-certs/.logs/upload.log
-
-# supercronic execution timestamps
-tail -50 /opt/cppm-certs/.logs/cron.log
-
 # Web dashboard startup and request log
 tail -50 /opt/cppm-certs/.logs/status_server.log
 ```
+
+These same logs are also accessible in the web UI on the server detail page —
+**ACME Renewal** and **ClearPass Upload** tabs (sign-in required).
 
 ---
 
@@ -464,11 +511,11 @@ docker compose logs --since="2026-03-17T10:00:00"
 ## Verify the certificates directly
 
 ```bash
-# Check expiry of the installed ECC cert
-openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -subject -dates
+# Check expiry of the installed ECC cert (replace hostname as needed)
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.ecc.cer -noout -subject -dates
 
 # Check expiry of the installed RSA cert
-openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.rsa.cer -noout -subject -dates
 
 # Verify what CPPM is actually serving over HTTPS
 openssl s_client -connect cppm.example.com:443 \

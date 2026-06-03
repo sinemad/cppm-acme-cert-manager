@@ -133,28 +133,28 @@ cppm-acme-cert-manager/
 
 ```
 /opt/cppm-certs/                              ← bind-mounted to /data/certs in container
-├── status.log                                ← one-line-per-event summary log
-├── servers.json                              ← ClearPass server configs (chmod 600)
-├── admin.htpasswd                            ← web UI admin credentials (bcrypt, chmod 600)
+├── servers.json                              ← All ClearPass server configs (chmod 600)
+├── admin.htpasswd                            ← Web UI admin credentials (bcrypt, chmod 600)
 ├── .session-secret                           ← HMAC session signing key (chmod 600)
-├── <domain>.ecc.cer                          ← ECC domain cert (PEM)
-├── <domain>.ecc.key                          ← ECC private key (chmod 600)
-├── <domain>.ecc.fullchain.cer                ← ECC cert + intermediates
-├── <domain>.ecc.ca.cer                       ← ECC CA chain
-├── <domain>.rsa.cer                          ← RSA domain cert (PEM)
-├── <domain>.rsa.key                          ← RSA private key (chmod 600)
-├── <domain>.rsa.fullchain.cer                ← RSA cert + intermediates
-├── <domain>.rsa.ca.cer                       ← RSA CA chain
-├── <domain>_ecc/                             ← acme.sh ECC internal state
-├── <domain>/                                 ← acme.sh RSA internal state
-├── .acme-state/                              ← acme.sh config and account keys
-├── trust-exclusions.conf                     ← CA cert upload exclusion list (admin-editable)
-└── .logs/
-    ├── startup.log
-    ├── renewal.log
-    ├── upload.log
-    ├── cron.log
-    └── status_server.log
+├── trust-exclusions.conf                     ← Global CA exclusion fallback (admin-editable)
+├── status.log                                ← Container-level startup events
+├── .acme-state/                              ← Shared acme.sh account keys
+├── .logs/
+│   ├── startup.log                           ← Container boot log
+│   └── status_server.log                     ← Web UI process log
+│
+├── cppm.example.com/                         ← Per-server directory (one per ClearPass host)
+│   ├── status.log                            ← Activity log (web UI Activity tab, public)
+│   ├── <domain>.ecc.cer / .ecc.key / ...     ← ECC cert files
+│   ├── <domain>.rsa.cer / .rsa.key / ...     ← RSA cert files
+│   ├── <domain>_ecc/                         ← acme.sh ECC state
+│   ├── <domain>/                             ← acme.sh RSA state
+│   └── .logs/
+│       ├── acme_renewal.log                  ← acme.sh issuance/renewal detail (auth required)
+│       └── cppm_upload.log                   ← ClearPass API upload detail (auth required)
+│
+└── cppm-lab.example.com/                     ← Second server (same structure)
+    └── ...
 ```
 
 ---
@@ -531,11 +531,11 @@ openssl s_client -connect cppm.example.com:443 \
     -servername cppm.example.com </dev/null 2>/dev/null \
     | openssl x509 -noout -subject -issuer -dates
 
-# Check installed ECC flat file
-openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -subject -dates
+# Check installed ECC flat file (replace hostname as needed)
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.ecc.cer -noout -subject -dates
 
 # Check installed RSA flat file
-openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.rsa.cer -noout -subject -dates
 ```
 
 ---
@@ -548,14 +548,16 @@ openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -subject -dates
 # Web dashboard (easiest — open in a browser)
 # http://<docker-host>:8080/
 
-# Quick status overview (CLI)
-cat /opt/cppm-certs/status.log
-grep FAILED /opt/cppm-certs/status.log
+# Per-server activity log (replace hostname)
+cat /opt/cppm-certs/cppm.example.com/status.log
+grep FAILED /opt/cppm-certs/cppm.example.com/status.log
 
-# Detailed logs
+# Detailed per-server logs (also viewable in the web UI — sign-in required)
+tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
+tail -100 /opt/cppm-certs/cppm.example.com/.logs/cppm_upload.log
+
+# Container-level logs
 tail -100 /opt/cppm-certs/.logs/startup.log
-tail -100 /opt/cppm-certs/.logs/renewal.log
-tail -100 /opt/cppm-certs/.logs/upload.log
 tail -50  /opt/cppm-certs/.logs/status_server.log   # web dashboard startup/errors
 
 # Docker container output
@@ -683,7 +685,7 @@ acme.sh cannot poll for propagation.
 
 Check the full acme.sh output:
 ```bash
-tail -100 /opt/cppm-certs/.logs/renewal.log
+tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
 ```
 
 ### ClearPass API authentication fails (400 invalid_client)

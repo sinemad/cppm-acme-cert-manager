@@ -212,8 +212,11 @@ acme.sh stores each type in a separate directory:
 
 | Type | acme.sh state dir | Flat files |
 |---|---|---|
-| ECC | `/data/certs/<domain>_ecc/` | `<domain>.ecc.cer`, `.ecc.key`, `.ecc.fullchain.cer`, `.ecc.ca.cer` |
-| RSA | `/data/certs/<domain>/` | `<domain>.rsa.cer`, `.rsa.key`, `.rsa.fullchain.cer`, `.rsa.ca.cer` |
+| ECC | `/data/certs/<cppm_host>/<domain>_ecc/` | `<domain>.ecc.cer`, `.ecc.key`, `.ecc.fullchain.cer`, `.ecc.ca.cer` |
+| RSA | `/data/certs/<cppm_host>/<domain>/` | `<domain>.rsa.cer`, `.rsa.key`, `.rsa.fullchain.cer`, `.rsa.ca.cer` |
+
+All cert files for a given ClearPass server live inside `/data/certs/<cppm_host>/`,
+where `<cppm_host>` is the sanitized ClearPass hostname (e.g. `cppm.example.com`).
 
 ---
 
@@ -223,39 +226,44 @@ Only `/data/certs` is mounted from the host. Everything else lives in the
 image and is recreated on every `docker compose build`.
 
 ```
-/opt/cppm-certs/                          ← host directory
+/opt/cppm-certs/                          ← host directory (bind-mounted to /data/certs)
 │
-├── servers.json                          ← ClearPass server config (chmod 600, contains secrets)
+├── servers.json                          ← All ClearPass server configs (chmod 600, contains secrets)
 ├── admin.htpasswd                        ← Web UI admin credentials (bcrypt, chmod 600)
 ├── .session-secret                       ← Web UI session signing key (chmod 600)
-├── trust-exclusions.conf                 ← Global CA trust exclusion fallback (see note)
+├── trust-exclusions.conf                 ← Global CA trust exclusion fallback
+├── status.log                            ← Container-level startup events only
 │
-├── status.log                            ← human-readable event log
-│
-├── cppm.example.com.ecc.cer            ← ECC domain cert
-├── cppm.example.com.ecc.key            ← ECC private key (chmod 600)
-├── cppm.example.com.ecc.fullchain.cer  ← ECC cert + intermediates
-├── cppm.example.com.ecc.ca.cer         ← ECC CA chain
-│
-├── cppm.example.com.rsa.cer            ← RSA domain cert
-├── cppm.example.com.rsa.key            ← RSA private key (chmod 600)
-├── cppm.example.com.rsa.fullchain.cer  ← RSA cert + intermediates
-├── cppm.example.com.rsa.ca.cer         ← RSA CA chain
-│
-├── cppm.example.com_ecc/               ← acme.sh ECC internal state
-├── cppm.example.com/                   ← acme.sh RSA internal state
-│
-├── .acme-state/                          ← acme.sh config home
+├── .acme-state/                          ← Shared acme.sh account home (all servers)
 │   ├── ca/
 │   ├── dnsapi/
-│   ├── deploy/
 │   └── account.conf
 │
-└── .logs/
-    ├── startup.log
-    ├── renewal.log
-    ├── upload.log
-    └── cron.log
+├── .logs/                                ← Container-level logs
+│   ├── startup.log                       ← entrypoint.sh boot log
+│   └── status_server.log                 ← Web UI process log
+│
+├── cppm.example.com/                     ← Per-server directory (named by ClearPass hostname)
+│   ├── status.log                        ← Per-server activity log (web UI Activity tab)
+│   ├── cppm.example.com.ecc.cer          ← ECC domain cert
+│   ├── cppm.example.com.ecc.key          ← ECC private key (chmod 600)
+│   ├── cppm.example.com.ecc.fullchain.cer
+│   ├── cppm.example.com.ecc.ca.cer
+│   ├── cppm.example.com.rsa.cer          ← RSA domain cert
+│   ├── cppm.example.com.rsa.key          ← RSA private key (chmod 600)
+│   ├── cppm.example.com.rsa.fullchain.cer
+│   ├── cppm.example.com.rsa.ca.cer
+│   ├── cppm.example.com_ecc/             ← acme.sh ECC internal state
+│   ├── cppm.example.com/                 ← acme.sh RSA internal state
+│   └── .logs/
+│       ├── acme_renewal.log              ← acme.sh issuance/renewal detail (web UI ACME Renewal tab)
+│       └── cppm_upload.log               ← ClearPass API upload detail (web UI ClearPass Upload tab)
+│
+└── cppm-lab.example.com/                 ← Second server (same structure)
+    ├── status.log
+    └── .logs/
+        ├── acme_renewal.log
+        └── cppm_upload.log
 ```
 
 > **`trust-exclusions.conf`** is a global fallback only — it applies to servers

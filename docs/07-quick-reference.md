@@ -38,12 +38,12 @@ live in `servers.json` and are managed through the web UI.
 # Web dashboard — easiest way to check status (open in browser)
 # http://<docker-host>:8080/
 
-# Check current status (CLI)
-cat /opt/cppm-certs/status.log
+# Check per-server activity log (replace hostname)
+cat /opt/cppm-certs/cppm.example.com/status.log
 
 # Check cert expiry (ECC and RSA)
-openssl x509 -in /opt/cppm-certs/cppm.example.com.ecc.cer -noout -dates
-openssl x509 -in /opt/cppm-certs/cppm.example.com.rsa.cer -noout -dates
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.ecc.cer -noout -dates
+openssl x509 -in /opt/cppm-certs/cppm.example.com/cppm.example.com.rsa.cer -noout -dates
 
 # View live logs
 docker compose logs -f
@@ -182,12 +182,12 @@ No container restart is needed after updating server credentials.
 | What | Where |
 |---|---|
 | Web dashboard | `http://<docker-host>:8080/` |
-| Status summary | `/opt/cppm-certs/status.log` |
-| Startup detail | `/opt/cppm-certs/.logs/startup.log` |
-| Renewal detail | `/opt/cppm-certs/.logs/renewal.log` |
-| Upload + trust check detail | `/opt/cppm-certs/.logs/upload.log` |
-| Cron log | `/opt/cppm-certs/.logs/cron.log` |
-| Dashboard log | `/opt/cppm-certs/.logs/status_server.log` |
+| Per-server activity log | `/opt/cppm-certs/<cppm_host>/status.log` |
+| Per-server acme.sh renewal detail | `/opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log` |
+| Per-server ClearPass upload detail | `/opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log` |
+| Container startup detail | `/opt/cppm-certs/.logs/startup.log` |
+| Web UI process log | `/opt/cppm-certs/.logs/status_server.log` |
+| Container-level startup events | `/opt/cppm-certs/status.log` |
 | ClearPass server config | `/opt/cppm-certs/servers.json` |
 | Global trust exclusion config | `/opt/cppm-certs/trust-exclusions.conf` |
 | Admin credentials | `/opt/cppm-certs/admin.htpasswd` |
