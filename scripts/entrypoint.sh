@@ -18,9 +18,17 @@ mkdir -p "$LOG_DIR" "$CERT_DIR"
 LOG="${LOG_DIR}/startup.log"
 touch "$LOG"
 
-# Source status library (writes to /data/certs/status.log)
+# Source status library. Container-level events write to the global status.log;
+# per-server events write to <SERVER_CERT_DIR>/status.log after eval.
 # shellcheck source=status.sh
 source /opt/cppm/status.sh
+GLOBAL_STATUS_LOG="$STATUS_LOG"
+
+# acme.sh uses $DEBUG as a numeric variable; a non-numeric value inherited
+# from the host environment (e.g. DEBUG=true) causes Alpine ash to throw
+# "sh: DEBUG: out of range" on every acme.sh call. Unset it globally here
+# so no acme.sh invocation in this script or its children is affected.
+unset DEBUG
 
 log()  { echo "[$(ts)] [INFO ] $*" | tee -a "$LOG"; }
 warn() { echo "[$(ts)] [WARN ] $*" | tee -a "$LOG"; }
@@ -181,9 +189,17 @@ if output:
         # before status_server_init creates a new empty one)
         [[ -f "${CERT_DIR}/status.log" ]] \
             && cp "${CERT_DIR}/status.log" "${SERVER_CERT_DIR}/status.log" || true
-        for lf in renewal.log upload.log; do
-            [[ -f "${CERT_DIR}/.logs/${lf}" ]] \
-                && cp "${CERT_DIR}/.logs/${lf}" "${SERVER_CERT_DIR}/.logs/${lf}" || true
+        # Copy logs to per-server dir, applying new filenames
+        for task in "renewal.log:acme_renewal.log" "upload.log:cppm_upload.log"; do
+            old="${task%%:*}"; new="${task##*:}"
+            [[ -f "${CERT_DIR}/.logs/${old}" && ! -f "${SERVER_CERT_DIR}/.logs/${new}" ]] \
+                && cp "${CERT_DIR}/.logs/${old}" "${SERVER_CERT_DIR}/.logs/${new}" || true
+        done
+        # Rename if a previous migration already copied under old names
+        for task in "renewal.log:acme_renewal.log" "upload.log:cppm_upload.log"; do
+            old="${task%%:*}"; new="${task##*:}"
+            [[ -f "${SERVER_CERT_DIR}/.logs/${old}" && ! -f "${SERVER_CERT_DIR}/.logs/${new}" ]] \
+                && mv "${SERVER_CERT_DIR}/.logs/${old}" "${SERVER_CERT_DIR}/.logs/${new}" || true
         done
         log "  Migration complete."
     fi
@@ -207,7 +223,6 @@ if output:
     fi
 
     # Register ACME account (idempotent — safe to call even if already registered)
-    unset DEBUG
     log "Registering ACME account (${ACME_EMAIL}) with ${ACME_SERVER:-letsencrypt}..."
     "$ACME_BIN" --register-account \
         -m "$ACME_EMAIL" \
@@ -274,6 +289,10 @@ if output:
         run_with_guard /opt/cppm/issue_cert.sh || true
     fi
 done
+
+# Restore global STATUS_LOG so post-loop container-level messages go to the
+# right place regardless of how many servers were processed.
+STATUS_LOG="$GLOBAL_STATUS_LOG"
 
 # ── Seed trust exclusion config to volume ────────────────────────────────────
 TRUST_EXCL_VOL="${CERT_DIR}/trust-exclusions.conf"

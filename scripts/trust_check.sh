@@ -16,7 +16,7 @@ set -uo pipefail
 
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
-LOG="${LOG_DIR}/upload.log"   # startup log until per-server dir is known
+LOG="${LOG_DIR}/cppm_upload.log"   # startup log until per-server dir is known
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -70,7 +70,7 @@ if output:
     # Switch to per-server cert and log directories
     CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
     LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
-    LOG="${LOG_DIR}/upload.log"
+    LOG="${LOG_DIR}/cppm_upload.log"
     mkdir -p "$LOG_DIR"
     status_server_init
 
@@ -92,8 +92,12 @@ if output:
         continue
     fi
 
-    log "Domain : ${DOMAIN}"
-    log "CPPM   : ${CPPM_HOST:-NOT SET}"
+    log "=== Trust List Verification ==="
+    log "  Domain   : ${DOMAIN}"
+    log "  ClearPass: ${CPPM_HOST:-NOT SET}"
+    log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
+    log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+    log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 
     unset DEBUG
     TRUST_EXIT=0

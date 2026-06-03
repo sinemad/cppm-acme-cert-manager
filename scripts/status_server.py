@@ -72,7 +72,6 @@ _APP_VERSION = _read_version()
 _APP_BUILD   = _read_build()
 
 # ── Configuration from environment ───────────────────────────────────────────
-CERT_DIR    = Path(os.environ.get("CERT_DIR", "/data/certs"))
 STATUS_PORT = int(os.environ.get("STATUS_PORT", "8080"))
 TZ_NAME     = os.environ.get("TZ", "UTC")
 COOKIE_NAME = "cppm_session"

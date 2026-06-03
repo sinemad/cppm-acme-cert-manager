@@ -8,7 +8,7 @@ set -euo pipefail
 ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
-LOG="${LOG_DIR}/renewal.log"
+LOG="${LOG_DIR}/acme_renewal.log"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
@@ -60,11 +60,16 @@ if output:
     # Switch to per-server cert and log directories
     CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
     LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
-    LOG="${LOG_DIR}/renewal.log"
+    LOG="${LOG_DIR}/acme_renewal.log"
     mkdir -p "$LOG_DIR"
     status_server_init
 
-    log "Domain: ${DOMAIN:-NOT SET}"
+    log "=== Renewal Check ==="
+    log "  Domain   : ${DOMAIN:-NOT SET}"
+    log "  CPPM     : ${CPPM_HOST:-NOT SET}"
+    log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
+    log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+    log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 
     if [[ -z "${DOMAIN:-}" ]]; then
         err "Server ${SERVER_ID}: DOMAIN is empty – skipping"
@@ -82,7 +87,7 @@ if output:
         log "Flat cert(s) missing for ${DOMAIN} – delegating to issue_cert.sh..."
         status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – re-running issuance"
         /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
-            err "issue_cert.sh failed for ${DOMAIN} – check renewal.log"
+            err "issue_cert.sh failed for ${DOMAIN} – check acme_renewal.log"
         continue
     fi
 
@@ -139,7 +144,7 @@ if output:
     fi
 
     if [[ $RENEW_FAILED -gt 0 ]]; then
-        status_write "FAILED" "RENEW" "acme.sh --renew failed for ${DOMAIN} – check renewal.log"
+        status_write "FAILED" "RENEW" "acme.sh --renew failed for ${DOMAIN} – check acme_renewal.log"
     elif [[ $RENEWED -gt 0 ]]; then
         log "Certificate(s) renewed for ${DOMAIN}."
         status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"

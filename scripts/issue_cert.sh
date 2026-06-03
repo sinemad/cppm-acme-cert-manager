@@ -39,7 +39,7 @@ CERT_DIR="/data/certs"
 # Use per-server directory when available (set by get_server_shell_env)
 CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
 LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
-LOG="${LOG_DIR}/renewal.log"
+LOG="${LOG_DIR}/acme_renewal.log"
 DOMAIN="${DOMAIN:-}"
 DNS_PROVIDER="${DNS_PROVIDER:-cloudflare}"
 
@@ -59,10 +59,12 @@ CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "E
                [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
 
 log "=== Certificate Issuance (${CERT_LABEL}) ==="
-log "Domain:   $DOMAIN"
-log "Provider: $DNS_PROVIDER"
-log "Server:   ${ACME_SERVER:-letsencrypt}"
-log "Types:    ${CERT_LABEL}"
+log "  Domain   : $DOMAIN"
+log "  CPPM     : ${CPPM_HOST:-NOT SET}"
+log "  DNS      : $DNS_PROVIDER"
+log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+log "  Types    : ${CERT_LABEL}"
+log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 status_write "INFO" "CERT" "Starting issuance (${CERT_LABEL}) – domain=${DOMAIN} provider=${DNS_PROVIDER} server=${ACME_SERVER:-letsencrypt}"
 
 # ── Resolve acme.sh DNS plugin and validate required credentials ───────────

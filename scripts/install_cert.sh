@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# install_cert.sh – Install BOTH ECC and RSA certs from acme.sh state
+# install_cert.sh – Install ECC and/or RSA certs from acme.sh state
 #                   to flat paths, then trigger ClearPass upload.
 #
-# Flat file layout:
-#   ECC: /data/certs/<domain>.ecc.cer  / .ecc.key / .ecc.fullchain.cer / .ecc.ca.cer
-#   RSA: /data/certs/<domain>.rsa.cer  / .rsa.key / .rsa.fullchain.cer / .rsa.ca.cer
+# Flat file layout (per-server directory, e.g. /data/certs/cppm.example.com/):
+#   ECC: <SERVER_CERT_DIR>/<domain>.ecc.cer  / .ecc.key / .ecc.fullchain.cer / .ecc.ca.cer
+#   RSA: <SERVER_CERT_DIR>/<domain>.rsa.cer  / .rsa.key / .rsa.fullchain.cer / .rsa.ca.cer
 #
-# acme.sh state directories:
-#   ECC: /data/certs/<domain>_ecc/<domain>.cer   (--ecc flag required)
-#   RSA: /data/certs/<domain>/<domain>.cer
+# acme.sh state directories (also inside SERVER_CERT_DIR):
+#   ECC: <SERVER_CERT_DIR>/<domain>_ecc/<domain>.cer   (--ecc flag required)
+#   RSA: <SERVER_CERT_DIR>/<domain>/<domain>.cer
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -17,7 +17,7 @@ ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
 LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
-LOG="${LOG_DIR}/renewal.log"
+LOG="${LOG_DIR}/acme_renewal.log"
 DOMAIN="${DOMAIN:-}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR"
@@ -36,7 +36,9 @@ CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "E
                [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
 
 log "=== Install Cert Files (${CERT_LABEL}) ==="
-log "Domain: $DOMAIN"
+log "  Domain : $DOMAIN"
+log "  CPPM   : ${CPPM_HOST:-NOT SET}"
+log "  Types  : ${CERT_LABEL}"
 
 # ── Install ECC cert ───────────────────────────────────────────────────────
 if [[ "$ISSUE_ECC" == "true" ]]; then

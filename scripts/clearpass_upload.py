@@ -608,7 +608,7 @@ def ensure_letsencrypt_chain_trusted(
                      f"{len(summary['already_trusted'])} already trusted")
     else:
         status_write("WARN", "TRUST",
-                     f"{fail_count}/{total} LE CA cert(s) failed – check upload.log")
+                     f"{fail_count}/{total} LE CA cert(s) failed – check cppm_upload.log")
     return summary
 
 
@@ -1001,6 +1001,20 @@ def main() -> int:
         if args.radius_cert else ""
     )
     ca_paths = [p for p in [https_ca, radius_ca] if p]
+
+    # ── Session header — written to cppm_upload.log for easy troubleshooting ──
+    log.info("=" * 62)
+    log.info("ClearPass ACME Upload Session")
+    log.info("  Host     : %s", host)
+    log.info("  Domain   : %s", args.domain)
+    log.info("  Callback : http://%s:%d/", callback_host, callback_port)
+    log.info("  DNS      : %s", os.environ.get("DNS_PROVIDER", "unknown"))
+    log.info("  ACME CA  : %s", os.environ.get("ACME_SERVER", "letsencrypt"))
+    if not args.skip_https:
+        log.info("  HTTPS cert: %s", args.https_cert or "(not provided)")
+    if not args.skip_radius:
+        log.info("  RADIUS cert: %s", args.radius_cert or "(not provided)")
+    log.info("=" * 62)
 
     if not verify_ssl:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

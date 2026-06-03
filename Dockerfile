@@ -1,6 +1,6 @@
 FROM alpine:3.19
 
-ARG VERSION=1.0.0
+ARG VERSION=1.1.0
 LABEL org.opencontainers.image.title="ClearPass ACME Certificate Manager" \
       org.opencontainers.image.description="Automated TLS certificate management for Aruba ClearPass Policy Manager via acme.sh DNS-01" \
       org.opencontainers.image.version="${VERSION}" \

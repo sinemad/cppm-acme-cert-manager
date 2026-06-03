@@ -8,9 +8,13 @@ set -euo pipefail
 CERT_DIR="/data/certs"
 CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
 LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
-LOG="${LOG_DIR}/upload.log"
+LOG="${LOG_DIR}/cppm_upload.log"
 DOMAIN="${DOMAIN:-}"
 CPPM_HOST="${CPPM_HOST:-}"
+CPPM_CALLBACK_HOST="${CPPM_CALLBACK_HOST:-}"
+CPPM_CALLBACK_PORT="${CPPM_CALLBACK_PORT:-8765}"
+DNS_PROVIDER="${DNS_PROVIDER:-unknown}"
+ACME_SERVER="${ACME_SERVER:-letsencrypt}"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
@@ -23,6 +27,11 @@ ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
 
 log "=== Deploy Hook ==="
+log "  ClearPass: ${CPPM_HOST}"
+log "  Domain   : ${DOMAIN}"
+log "  Callback : http://${CPPM_CALLBACK_HOST}:${CPPM_CALLBACK_PORT}/"
+log "  DNS      : ${DNS_PROVIDER}"
+log "  ACME CA  : ${ACME_SERVER}"
 
 # ── Build cert path args and validate files ───────────────────────────────
 UPLOAD_ARGS=()
@@ -83,7 +92,7 @@ if [[ $UPLOAD_EXIT -eq 0 ]]; then
     status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} – expires ${EXPIRY}"
 else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"
-    status_write "FAILED" "UPLOAD" "ClearPass upload failed (exit ${UPLOAD_EXIT}) – check upload.log"
+    status_write "FAILED" "UPLOAD" "ClearPass upload failed (exit ${UPLOAD_EXIT}) – check cppm_upload.log"
 fi
 
 log "=== Deploy Hook Complete ==="
