@@ -148,6 +148,8 @@ RUN mkdir -p /opt/cppm
 COPY scripts/ /opt/cppm/
 COPY VERSION  /opt/cppm/VERSION
 COPY config/crontab /etc/crontabs/root
+# Stamp build time — readable by status_server.py for display in the UI footer
+RUN date -u +'%Y%m%d.%H%M%S' > /opt/cppm/BUILD
 # Merge the acme-ca-certs project directory (contains trust-exclusions.conf default)
 # into the directory already populated by the ACME CA cert download RUN block above.
 COPY acme-ca-certs/ /opt/cppm/acme-ca-certs/

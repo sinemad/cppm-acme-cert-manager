@@ -59,7 +59,16 @@ def _read_version() -> str:
             pass
     return "unknown"
 
+def _read_build() -> str:
+    for p in (Path("/opt/cppm/BUILD"), Path(__file__).parent / "BUILD"):
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return "dev"
+
 _APP_VERSION = _read_version()
+_APP_BUILD   = _read_build()
 
 # ── Configuration from environment ───────────────────────────────────────────
 CERT_DIR    = Path(os.environ.get("CERT_DIR", "/data/certs"))
@@ -595,8 +604,9 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .hdr-logo{font-size:1rem;font-weight:700;color:var(--accent);letter-spacing:-.01em}
 .hdr-domain{font-size:0.8rem;color:var(--muted);font-family:monospace;background:rgba(56,189,248,.08);padding:0.15rem 0.5rem;border-radius:4px;border:1px solid rgba(56,189,248,.15)}
 .hdr-right{display:flex;align-items:center;gap:0.6rem;font-size:0.78rem;color:var(--subtle)}
-.pulse{width:8px;height:8px;border-radius:50%;background:var(--subtle);transition:background .3s}
-.pulse.active{background:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.2)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.pulse{display:inline-block;font-size:0.95rem;line-height:1;color:var(--subtle);cursor:default;user-select:none;transition:color .2s}
+.pulse.active{color:var(--accent);animation:spin 0.7s linear}
 .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-bottom:1rem}
 @media(max-width:700px){.grid-2{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow)}
@@ -726,7 +736,9 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 @media(max-width:700px){.overview-table th:nth-child(4),.overview-table td:nth-child(4){display:none}}
 
 /* ── Status dots (health indicators) ── */
-.sdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:0.3rem;vertical-align:middle;flex-shrink:0;cursor:default}
+.sdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:0.3rem;vertical-align:middle;flex-shrink:0;cursor:default;position:relative}
+.sdot::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--card);color:var(--text);padding:0.3rem 0.6rem;border-radius:0.35rem;font-size:0.7rem;font-family:system-ui,-apple-system,sans-serif;font-weight:400;white-space:nowrap;pointer-events:none;border:1px solid var(--border2);opacity:0;transition:opacity .15s;z-index:200}
+.sdot:hover::after{opacity:1}
 .sdot.ok{background:var(--ok);box-shadow:0 0 0 2px rgba(34,197,94,.2)}
 .sdot.warn{background:var(--warn);box-shadow:0 0 0 2px rgba(245,158,11,.2)}
 .sdot.error{background:var(--danger);box-shadow:0 0 0 2px rgba(239,68,68,.2)}
@@ -794,7 +806,7 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 {nav}
 {body}
 <footer style="text-align:center;padding:1.5rem 1rem;font-size:0.68rem;color:var(--subtle)">
-  ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)}
+  ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
 </footer>
 </body>
 </html>"""
@@ -991,7 +1003,7 @@ def _overview_page(username: str = "") -> str:
 <div class="page-hdr" style="margin-bottom:1rem">
   <span class="page-title">Certificate Manager Overview</span>
   <div style="display:flex;align-items:center;gap:0.75rem">
-    <span class="pulse" id="pulse"></span>
+    <span class="pulse" id="pulse" title="Auto-refreshes every 30s">&#8635;</span>
     <span id="last-updated" style="font-size:0.75rem;color:var(--muted)">Live</span>
   </div>
 </div>
@@ -1644,7 +1656,12 @@ function renderMiniCert(cert,label,svc){
 }
 function renderSched(sc){sc=sc||{};return'<div class="sched-next">'+esc(sc.until||'—')+'</div><div class="sched-label">until next check</div><div class="sched-sub">'+esc(sc.schedule||'—')+'</div>';}
 function ovDot(sid,kind){
-  return'<span id="ov-'+esc(sid)+'-'+kind+'" class="sdot checking" title="checking…" style="margin-right:0.2rem"></span>';
+  var sh=(_ovHealth&&_ovHealth.servers&&_ovHealth.servers[sid])||{};
+  var hkey=kind==='cb'?'callback':kind;
+  var h=sh[hkey]||null;
+  var state=h?(h.status||'unknown'):'checking';
+  var tip=h?(state+(h.message?': '+h.message:'')):'checking…';
+  return'<span id="ov-'+esc(sid)+'-'+kind+'" class="sdot '+state+'" data-tooltip="'+esc(tip)+'" style="margin-right:0.2rem"></span>';
 }
 function renderDots(sid){
   var sep='<span style="color:var(--border2);margin:0 0.15rem">\xb7</span>';
@@ -1654,11 +1671,12 @@ function renderDots(sid){
     +ovDot(sid,'cb')+'<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
     +'</div>';
 }
+function nav(el){window.location.href='/server/'+el.dataset.sid;}
 function renderRow(s){
   var sid=s.id||'';
   var ecc=(s.certs&&s.certs.ecc)||{exists:false};
   var rsa=(s.certs&&s.certs.rsa)||{exists:false};
-  return'<tr class="server-row" onclick="window.location.href=\'/server/'+esc(sid)+'\'">'
+  return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
     +'<td><div class="srv-label">'+esc(s.label||s.cppm_host)+'</div>'
     +'<div class="srv-host">'+esc(s.cppm_host)+'</div>'
     +renderDots(sid)+'</td>'
@@ -1669,7 +1687,7 @@ function renderRow(s){
     +'<td style="text-align:right"><a href="/server/'+esc(sid)+'" class="btn btn-ghost" onclick="event.stopPropagation()">Details &#8594;</a></td></tr>';
 }
 
-function applyDot(el,h){var s=h.status||'unknown',m=h.message||'';el.className='sdot '+s;el.title=m?(s+': '+m):s;}
+function applyDot(el,h){var s=h.status||'unknown',m=h.message||'';el.className='sdot '+s;var tip=m?(s+': '+m):s;el.title=tip;el.dataset.tooltip=tip;}
 var _ovHealth={};
 function applyAllHealthDots(){
   var servers=(_ovHealth&&_ovHealth.servers)||{};
@@ -1684,33 +1702,51 @@ function applyAllHealthDots(){
 }
 var _healthRetry=0;
 async function loadHealth(){
+  console.log('[overview] loadHealth fired, retry='+_healthRetry);
+  var ok=false;
   try{
     var res=await fetch('/api/health');
+    console.log('[overview] /api/health status='+res.status);
     if(res.ok){
       _ovHealth=await res.json();
-      _healthRetry=0;
+      var sids=Object.keys((_ovHealth&&_ovHealth.servers)||{});
+      console.log('[overview] health data received, servers='+JSON.stringify(sids));
       applyAllHealthDots();
+      ok=true;
+    }else{
+      var body=await res.text().catch(function(){return'';});
+      console.warn('[overview] /api/health error '+res.status+': '+body.slice(0,200));
     }
-  }catch(e){}
-  var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
-  _healthRetry=Math.min(_healthRetry+1,3);
-  setTimeout(loadHealth,delay);
+  }catch(e){
+    console.error('[overview] loadHealth exception: '+e);
+  }
+  if(ok){
+    _healthRetry=0;
+    setTimeout(loadHealth,HEALTH_MS);
+  }else{
+    var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
+    _healthRetry=Math.min(_healthRetry+1,3);
+    setTimeout(loadHealth,delay);
+  }
 }
 
 async function loadStatus(){
   var pulse=document.getElementById('pulse');
+  console.log('[overview] loadStatus fired, pulse='+(pulse?'found':'NOT FOUND'));
   try{
     if(pulse)pulse.classList.add('active');
     var res=await fetch('/api/status');
+    console.log('[overview] /api/status status='+res.status);
     if(res.status===401){window.location.href='/login';return;}
     if(!res.ok)throw new Error('HTTP '+res.status);
     var data=await res.json();
+    console.log('[overview] status data: isArray='+Array.isArray(data)+' len='+(Array.isArray(data)?data.length:'n/a'));
     if(Array.isArray(data)&&data.length){
       document.getElementById('servers-body').innerHTML=data.map(renderRow).join('');
       document.getElementById('last-updated').textContent='Updated '+new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-      applyAllHealthDots();
     }
   }catch(e){
+    console.error('[overview] loadStatus exception: '+e);
     document.getElementById('last-updated').textContent='Refresh error: '+e.message;
   }finally{
     if(pulse)setTimeout(function(){pulse.classList.remove('active');},800);
@@ -1738,7 +1774,7 @@ _DETAIL_BODY = """
     <span class="hdr-domain" id="hdr-domain">&hellip;</span>
   </div>
   <div class="hdr-right">
-    <span class="pulse" id="pulse"></span>
+    <span class="pulse" id="pulse" title="Auto-refreshes every 30s">&#8635;</span>
     <span id="last-updated">Loading&hellip;</span>
   </div>
 </div>
@@ -1811,11 +1847,11 @@ function renderCertCard(cert,label,service,key){
     +'</div>';
 }
 
-function applyDot(el,h){var s=h.status||'unknown',msg=h.message||'';el.className='sdot '+s;el.title=msg?(s+': '+msg):s;}
+function applyDot(el,h){var s=h.status||'unknown',msg=h.message||'';el.className='sdot '+s;var tip=msg?(s+': '+msg):s;el.title=tip;el.dataset.tooltip=tip;}
 function sdot(id,h){
   var s=(h&&h.status)||'checking',m=(h&&h.message)||'';
-  var tip=m?(s+': '+m):s;
-  return '<span id="'+id+'" class="sdot '+s+'" title="'+esc(tip)+'"></span>';
+  var tip=m?(s+': '+m):(s==='checking'?'Checking…':s);
+  return '<span id="'+id+'" class="sdot '+s+'" data-tooltip="'+esc(tip)+'"></span>';
 }
 function renderInfoCards(data, health){
   health=health||{};
