@@ -1077,7 +1077,6 @@ def _overview_page(username: str = "") -> str:
     body = f"""
 <div class="app">
 <div class="page-hdr" style="margin-bottom:1rem">
-  <span class="page-title">Certificate Manager Overview</span>
   <div style="display:flex;align-items:center;gap:0.75rem">
     <span class="pulse" id="pulse" title="Auto-refreshes every 30s">&#8635;</span>
     <span id="last-updated" style="font-size:0.75rem;color:var(--muted)">Live</span>
