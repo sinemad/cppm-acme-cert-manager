@@ -107,6 +107,48 @@ supercronic runs renew.sh at 02:00 and 14:00 UTC every day
 
 ---
 
+## ACME Provider Abstraction
+
+The ACME operations (issue, renew, install, revoke) are expressed as a Python
+provider interface alongside the existing shell scripts. This is prework for an
+eventual transition from `acme.sh` to [Lego](https://github.com/go-acme/lego).
+
+```
+acme_provider.py          ← Abstract base class: AcmeProvider
+                               issue_cert / renew_cert / install_cert / revoke_cert / register_account
+                               Shared types: IssueResult, KeyTypeResult, AcmeError
+        │
+        ├── acme_sh_provider.py   ← AcmeShProvider: wraps acme.sh CLI subprocess calls
+        │                              DNS plugin mapping (cloudflare → dns_cf, etc.)
+        │                              Mirrors behaviour of issue_cert.sh / renew.sh / install_cert.sh
+        │
+        └── lego_provider.py      ← LegoProvider: stub (NotImplementedError)
+                                       Documents key differences vs acme.sh for future implementer
+```
+
+The shell scripts remain the active code path. The Python provider layer is a
+parallel implementation that is ready to replace them incrementally. Callers
+switch providers via the factory:
+
+```python
+from acme_provider import get_provider
+
+provider = get_provider("acme_sh")   # current default
+# provider = get_provider("lego")   # future
+```
+
+### Key differences between acme.sh and Lego (for future migration)
+
+| Aspect | acme.sh | Lego |
+|---|---|---|
+| DNS plugin names | `dns_cf`, `dns_porkbun`, `dns_aws`, … | `cloudflare`, `porkbun`, `route53`, … |
+| Key-type flag | `--keylength ec-256` / `2048` | `--key-type ec256` / `rsa2048` |
+| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/.lego/certificates/` |
+| Install step | Separate `--install-cert` required | Files written directly on issue/renew |
+| Account registration | Explicit `--register-account` | Implicit on first `run` |
+
+---
+
 ## ClearPass REST API — SDK and Endpoints
 
 All ClearPass API calls use the **official Aruba pyclearpass SDK**

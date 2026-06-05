@@ -274,6 +274,97 @@ Logs to `/data/certs/.logs/status_server.log`.
 
 ---
 
+## acme_provider.py
+
+**Used by:** `acme_sh_provider.py`, `lego_provider.py`. Not called directly.
+
+Abstract base class and shared result types that define the common interface
+for all ACME certificate providers.
+
+### Types
+
+| Type | Description |
+|---|---|
+| `AcmeError` | Exception raised by all provider operations on failure |
+| `KeyTypeResult(key_type, issued)` | Outcome for a single key type (`"ecc"` or `"rsa"`). `issued=True` = new cert issued; `issued=False` = skipped (not due / already exists) |
+| `IssueResult(results)` | Combined result from an issue or renew call. `.newly_issued` is `True` if any key type produced a new cert |
+
+### AcmeProvider interface
+
+| Method | Description |
+|---|---|
+| `register_account(email, server)` | Register or verify an ACME account (idempotent) |
+| `issue_cert(*, domain, acme_server, cert_dir, key_types, dns_provider, dns_env, log_file, force)` | Issue new certificates via DNS-01 challenge |
+| `renew_cert(*, domain, acme_server, cert_dir, key_types, log_file)` | Renew existing certificates; attempts all key types before raising |
+| `install_cert(*, domain, cert_dir, key_types, log_file)` | Copy provider-managed state to flat `.cer`/`.key` files; verifies all expected files exist |
+| `revoke_cert(*, domain, cert_dir, key_types, log_file)` | Revoke issued certificates; attempts all key types before raising |
+
+### Factory
+
+```python
+from acme_provider import get_provider
+
+provider = get_provider("acme_sh")   # AcmeShProvider (current default)
+provider = get_provider("lego")      # LegoProvider (stub — not yet implemented)
+```
+
+All path arguments must be absolute. `key_types` is a list containing any combination of `"ecc"` and `"rsa"`. `dns_env` is a dict of DNS provider credential env vars (e.g. `{"CF_Token": "..."}`) merged into the subprocess environment so credentials are never globally exported.
+
+---
+
+## acme_sh_provider.py
+
+**Used by:** future Python callers replacing the shell scripts. Not called directly.
+
+Concrete `AcmeProvider` implementation backed by the `acme.sh` CLI at
+`/usr/local/bin/acme.sh`. All ACME operations that the shell scripts currently
+perform are mirrored here as Python methods.
+
+### DNS plugin mapping
+
+Translates the `dns_provider` value from `servers.json` to the acme.sh dnsapi plugin name:
+
+| `dns_provider` value | acme.sh plugin |
+|---|---|
+| `cloudflare`, `cf` | `dns_cf` |
+| `porkbun` | `dns_porkbun` |
+| `route53`, `aws`, `r53` | `dns_aws` |
+| `digitalocean`, `do` | `dns_dgon` |
+| `godaddy`, `gd` | `dns_gd` |
+| anything else | `dns_{provider}` (passthrough) |
+
+### Behaviour notes
+
+- **`register_account`** — mirrors `entrypoint.sh`'s `|| true`; any non-zero exit is tolerated (idempotent, transient CA errors are non-fatal).
+- **`issue_cert`** — raises `AcmeError` immediately on failure (consistent with `die` in `issue_cert.sh`). acme.sh exit 2 (cert exists, not due) maps to `issued=False`, not an error.
+- **`renew_cert`** — tries all requested key types before raising, matching `renew.sh`'s `RENEW_FAILED` accumulator pattern. An ECC failure does not prevent RSA from being attempted.
+- **`install_cert`** — verifies all expected flat files exist after `--install-cert` returns exit 0, mirroring the post-install check in `install_cert.sh`.
+- **`DEBUG` env var** — stripped from the subprocess environment before every acme.sh call to prevent Alpine ash integer-range errors (same as `unset DEBUG` in all shell scripts).
+- **Subprocess timeout** — defaults to 600 seconds (10 minutes) to accommodate DNS propagation delays. `subprocess.TimeoutExpired` is caught and re-raised as `AcmeError`.
+
+---
+
+## lego_provider.py
+
+**Status:** Stub — not yet implemented.
+
+Placeholder `AcmeProvider` for an eventual transition from `acme.sh` to
+[Lego](https://github.com/go-acme/lego). All methods raise `NotImplementedError`.
+The file serves as the starting point for the migration and documents the key
+differences to address during implementation:
+
+| Aspect | acme.sh (current) | Lego (future) |
+|---|---|---|
+| Binary | `acme.sh` | `lego` |
+| DNS plugin names | `dns_cf`, `dns_porkbun`, `dns_aws`, … | `cloudflare`, `porkbun`, `route53`, … |
+| Key-type flag | `--keylength ec-256` / `2048` | `--key-type ec256` / `rsa2048` |
+| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/.lego/certificates/` |
+| Install step | Separate `--install-cert` required | Files written directly on issue/renew |
+| Account registration | Explicit `--register-account` | Implicit on first `run` |
+| ACME server flag | `--server` | `--server` (same) |
+
+---
+
 ## config_utils.py
 
 **Used by:** `status_server.py`, `cppm_acme_manager_servers.py`, all shell scripts (via `cppm-servers env`).
