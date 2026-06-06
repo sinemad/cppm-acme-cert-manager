@@ -47,9 +47,15 @@ PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
 [[ "$ISSUE_ECC" != "true" ]] && PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
 EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
          | cut -d= -f2 || echo "unknown")
-DAYS_LEFT="unknown"
-EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
-[[ "$EXPIRY_EPOCH" -gt 0 ]] && DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
+DAYS_LEFT=$(python3 -c "
+import sys, datetime, re
+s = re.sub(r'\s+', ' ', sys.argv[1].strip())
+try:
+    d = datetime.datetime.strptime(s, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    print((d - datetime.datetime.now(datetime.timezone.utc)).days)
+except Exception:
+    print('unknown')
+" "$EXPIRY" 2>/dev/null || echo "unknown")
 log "Certificate expires ${EXPIRY} (${DAYS_LEFT} days)"
 if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
     RSA_EXPIRY=$(openssl x509 -enddate -noout -in "${CERT_DIR}/${DOMAIN}.rsa.cer" 2>/dev/null \
