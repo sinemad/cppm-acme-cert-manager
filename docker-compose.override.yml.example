@@ -24,7 +24,43 @@ services:
       # Sets the timezone for log timestamps and cron scheduling (02:00 and
       # 14:00 daily renewal checks run in this timezone).
       # Default: UTC
-      # Find your value: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      #
+      # Common values:
+      #   UTC                      Coordinated Universal Time
+      #
+      #   America/New_York         US Eastern    (UTC-5 / UTC-4 DST)
+      #   America/Chicago          US Central    (UTC-6 / UTC-5 DST)
+      #   America/Denver           US Mountain   (UTC-7 / UTC-6 DST)
+      #   America/Los_Angeles      US Pacific    (UTC-8 / UTC-7 DST)
+      #   America/Anchorage        US Alaska     (UTC-9 / UTC-8 DST)
+      #   America/Honolulu         US Hawaii     (UTC-10, no DST)
+      #   America/Toronto          Canada Eastern
+      #   America/Vancouver        Canada Pacific
+      #   America/Sao_Paulo        Brazil Eastern
+      #
+      #   Europe/London            UK            (UTC+0 / UTC+1 BST)
+      #   Europe/Paris             Central Europe (UTC+1 / UTC+2 CEST)
+      #   Europe/Berlin            Germany
+      #   Europe/Amsterdam         Netherlands
+      #   Europe/Stockholm         Sweden
+      #   Europe/Helsinki          Finland / Baltics (UTC+2 / UTC+3 EEST)
+      #   Europe/Athens            Greece
+      #   Europe/Moscow            Russia Moscow  (UTC+3, no DST)
+      #
+      #   Asia/Dubai               UAE           (UTC+4, no DST)
+      #   Asia/Kolkata             India         (UTC+5:30, no DST)
+      #   Asia/Bangkok             SE Asia       (UTC+7, no DST)
+      #   Asia/Singapore           Singapore     (UTC+8, no DST)
+      #   Asia/Shanghai            China         (UTC+8, no DST)
+      #   Asia/Tokyo               Japan         (UTC+9, no DST)
+      #   Asia/Seoul               South Korea   (UTC+9, no DST)
+      #
+      #   Australia/Perth          WA            (UTC+8, no DST)
+      #   Australia/Adelaide       SA            (UTC+9:30 / UTC+10:30 DST)
+      #   Australia/Sydney         NSW / VIC     (UTC+10 / UTC+11 DST)
+      #   Pacific/Auckland         New Zealand   (UTC+12 / UTC+13 DST)
+      #
+      # Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
       TZ: America/New_York
 
       # ── Web UI port ───────────────────────────────────────────────────────────
