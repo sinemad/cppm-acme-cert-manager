@@ -79,6 +79,7 @@ def _log_file(cert_dir: str) -> str:
 def cmd_issue(args: argparse.Namespace) -> None:
     domain = _require("DOMAIN")
     cert_dir = _require("SERVER_CERT_DIR")
+    _require("ACME_EMAIL")
     acme_server = os.environ.get("ACME_SERVER", "letsencrypt")
     dns_provider = _require("DNS_PROVIDER")
     key_types = _key_types()
@@ -105,6 +106,7 @@ def cmd_issue(args: argparse.Namespace) -> None:
 def cmd_renew(_args: argparse.Namespace) -> None:
     domain = _require("DOMAIN")
     cert_dir = _require("SERVER_CERT_DIR")
+    _require("ACME_EMAIL")
     acme_server = os.environ.get("ACME_SERVER", "letsencrypt")
     dns_provider = _require("DNS_PROVIDER")
     key_types = _key_types()

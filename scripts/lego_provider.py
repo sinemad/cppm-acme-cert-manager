@@ -148,6 +148,7 @@ class LegoProvider(AcmeProvider):
                 "--server",   server_url,
                 "--key-type", _KEY_TYPE_MAP[kt],
                 "run",
+                "--accept-tos",
             ]
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
