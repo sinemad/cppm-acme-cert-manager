@@ -1150,6 +1150,7 @@ _ACME_PROVIDER_EXCL_IDX: dict[str, int] = {
     "letsencrypt_test": 0,
     "zerossl":          1,
     "buypass":          2,
+    "buypass_test":     2,
 }
 
 
@@ -1467,6 +1468,7 @@ def _settings_form_page(server: dict = None, error: str = "",
           <option value="letsencrypt_test"{sel(acme_srv,'letsencrypt_test')}>Let&apos;s Encrypt (Staging)</option>
           <option value="zerossl"{sel(acme_srv,'zerossl')}>ZeroSSL</option>
           <option value="buypass"{sel(acme_srv,'buypass')}>Buypass</option>
+          <option value="buypass_test"{sel(acme_srv,'buypass_test')}>Buypass (Staging)</option>
         </select>
       </div>
       <div class="field" style="margin-bottom:0">
@@ -1628,6 +1630,7 @@ _ACME_DISPLAY = {
     "letsencrypt_test": "Let's Encrypt (Staging)",
     "zerossl":          "ZeroSSL",
     "buypass":          "Buypass",
+    "buypass_test":     "Buypass (Staging)",
 }
 
 
@@ -1723,7 +1726,7 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 function cls(d){if(d==null)return'none';if(d>30)return'ok';if(d>14)return'warn';return'danger';}
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy'};return m[p]||p||'—';}
-function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass'};return m[s]||s||'—';}
+function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||s||'—';}
 
 function renderMiniCert(cert,label,svc){
   var svcHtml=svc?'<div class="mini-svc">'+esc(svc)+'</div>':'';
@@ -1930,7 +1933,7 @@ function cls(d) {
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function fmtDT(iso){if(!iso)return'—';try{return new Date(iso).toLocaleString('en-US',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});}catch(e){return iso;}}
 function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy'};return m[p]||p;}
-function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass'};return m[s]||s;}
+function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||s;}
 function lvlBadge(l){var c={OK:'lvl-ok',WARN:'lvl-warn',FAILED:'lvl-failed',INFO:'lvl-info'}[l]||'lvl-info';return'<span class="lvl '+c+'">'+esc(l)+'</span>';}
 function keyLabel(cert){if(!cert.key_type)return'—';if(cert.key_type==='ECDSA'&&cert.key_curve)return cert.key_type+' ('+cert.key_curve+')';if(cert.key_size)return cert.key_type+' '+cert.key_size+'-bit';return cert.key_type;}
 
@@ -2021,11 +2024,11 @@ async function loadStatus(){
 }
 var _healthRetry=0;
 async function loadHealth(){
+  var ok=false;
   try{
     var res=await fetch('/api/health');
     if(res.ok){
       _healthData=await res.json();
-      _healthRetry=0;
       var sh=(_healthData.servers&&_healthData.servers[_SERVER_ID])||{};
       var ce=document.getElementById('d-dot-cppm');
       var de=document.getElementById('d-dot-dns');
@@ -2033,11 +2036,17 @@ async function loadHealth(){
       if(ce&&sh.cppm)    applyDot(ce,sh.cppm);
       if(de&&sh.dns)     applyDot(de,sh.dns);
       if(cbe&&sh.callback) applyDot(cbe,sh.callback);
+      ok=true;
     }
   }catch(e){}
-  var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
-  _healthRetry=Math.min(_healthRetry+1,3);
-  setTimeout(loadHealth,delay);
+  if(ok){
+    _healthRetry=0;
+    setTimeout(loadHealth,HEALTH_MS);
+  }else{
+    var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
+    _healthRetry=Math.min(_healthRetry+1,3);
+    setTimeout(loadHealth,delay);
+  }
 }
 setInterval(loadStatus,REFRESH_MS);
 loadStatus();
@@ -2591,6 +2600,7 @@ class Handler(BaseHTTPRequestHandler):
             if line.strip() and not line.strip().startswith("#")
         ]
         srv["trust_exclusions"] = patterns
+        srv.setdefault("cert_types", ["ecc", "rsa"])
         try:
             update_server(server_id, srv)
             _log.info("trust-exclusions: '%s' saved %d pattern(s) for server '%s'",

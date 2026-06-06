@@ -167,6 +167,7 @@ def migrate_from_env() -> Optional[str]:
         "acme_email":           os.environ.get("ACME_EMAIL",           ""),
         "acme_server":          os.environ.get("ACME_SERVER",          "letsencrypt"),
         "dns_provider":         os.environ.get("DNS_PROVIDER",         "cloudflare"),
+        "cert_types": ["ecc", "rsa"],
         "dns_credentials": {k: v for k, v in {
             "CF_Token":               os.environ.get("CF_Token",               ""),
             "CF_Account_ID":          os.environ.get("CF_Account_ID",          ""),
