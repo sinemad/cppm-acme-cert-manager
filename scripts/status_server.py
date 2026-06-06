@@ -20,6 +20,8 @@ import datetime
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -760,6 +762,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .flash{padding:0.6rem 0.9rem;border-radius:0.4rem;font-size:0.8rem;margin-bottom:1rem}
 .flash-err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--danger)}
 .flash-ok{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--ok)}
+.flash-warn{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:var(--warn)}
 .auth-cli{margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border);font-size:0.72rem;color:var(--subtle)}
 .auth-cli code{display:block;margin-top:0.35rem;font-family:monospace;background:#0a0f1a;padding:0.35rem 0.5rem;border-radius:3px;color:var(--muted);word-break:break-all}
 
@@ -795,6 +798,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .excl-desc{color:var(--muted);font-size:0.75rem;transition:opacity .15s}
 .excl-row.excl-excluded .excl-cn{text-decoration:line-through;color:var(--subtle)}
 .excl-row.excl-excluded .excl-desc{opacity:0.45}
+.excl-chain-warn{font-size:0.68rem;font-weight:600;color:var(--warn);background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.25);border-radius:999px;padding:0.1rem 0.45rem;white-space:nowrap;cursor:help;flex-shrink:0}
 
 /* ── Overview table ── */
 .overview-table{width:100%;border-collapse:collapse}
@@ -1160,6 +1164,51 @@ _ACME_PROVIDER_EXCL_IDX: dict[str, int] = {
 }
 
 
+def _chain_cns_for_server(server: dict) -> set[str]:
+    """
+    Parse the currently-issued CA chain files for this server and return
+    the set of certificate CNs (lower-case) found in them.
+
+    Reads both .ecc.ca.cer and .rsa.ca.cer so intermediates unique to either
+    chain are captured.  Returns an empty set if no certs have been issued yet
+    or if openssl is unavailable.
+    """
+    cert_dir = server_cert_dir(server)
+    domain   = server.get("domain", "")
+    cns: set[str] = set()
+    for suffix in (".ecc.ca.cer", ".rsa.ca.cer"):
+        ca_path = cert_dir / f"{domain}{suffix}"
+        if not ca_path.is_file():
+            continue
+        try:
+            pem_text = ca_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for block in re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            pem_text, re.DOTALL,
+        ):
+            try:
+                result = subprocess.run(
+                    ["openssl", "x509", "-noout", "-subject", "-nameopt", "compat"],
+                    input=block.encode(), capture_output=True, timeout=5,
+                )
+                subj = result.stdout.decode().strip().removeprefix("subject=").strip()
+                if "CN=" in subj:
+                    cn = subj.split("CN=")[-1].split(",")[0].strip().lower()
+                    if cn:
+                        cns.add(cn)
+            except Exception:
+                pass
+    return cns
+
+
+def _pattern_hits_chain(pattern: str, chain_cns: set[str]) -> bool:
+    """Return True if this exclusion pattern would match a cert in the current chain."""
+    p = pattern.lower()
+    return any(p in cn for cn in chain_cns)
+
+
 def _trust_exclusions_page(server: dict, username: str,
                             flash_type: str = "", flash_msg: str = "") -> str:
     """Per-server Trust Exclusions configuration page."""
@@ -1177,17 +1226,32 @@ def _trust_exclusions_page(server: dict, username: str,
     excl_idx     = _ACME_PROVIDER_EXCL_IDX.get(acme_server)
     excl_sections = [_KNOWN_EXCLUSIONS[excl_idx]] if excl_idx is not None else _KNOWN_EXCLUSIONS
 
+    chain_cns    = _chain_cns_for_server(server)
+    any_chain_warn = False
+
     provider_html = ""
     for provider_name, certs in excl_sections:
-        rows = "".join(
-            f'<label class="excl-row">'
-            f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
-            f'{" checked" if p.lower() in active_lower else ""}>'
-            f'<span class="excl-cn">{_esc(p)}</span>'
-            f'<span class="excl-desc">{_esc(d)}</span>'
-            f'</label>'
-            for p, d in certs
-        )
+        rows = ""
+        for p, d in certs:
+            in_chain = bool(chain_cns) and _pattern_hits_chain(p, chain_cns)
+            if in_chain:
+                any_chain_warn = True
+            warn_badge = (
+                '<span class="excl-chain-warn" '
+                'title="This CA is in your currently issued certificate chain. '
+                'Excluding it will stop the tool from uploading it to ClearPass, '
+                'which may break EAP / 802.1X authentication.">'
+                '&#9888; in active chain</span>'
+            ) if in_chain else ""
+            rows += (
+                f'<label class="excl-row">'
+                f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
+                f'{" checked" if p.lower() in active_lower else ""}>'
+                f'<span class="excl-cn">{_esc(p)}</span>'
+                f'{warn_badge}'
+                f'<span class="excl-desc">{_esc(d)}</span>'
+                f'</label>'
+            )
         provider_html += (
             f'<div class="card excl-card">'
             f'<div class="excl-provider">{_esc(provider_name)}</div>'
@@ -1196,6 +1260,17 @@ def _trust_exclusions_page(server: dict, username: str,
         )
 
     te_val = _esc("\n".join(active_list))
+
+    chain_warn_banner = ""
+    if any_chain_warn:
+        chain_warn_banner = """
+  <div class="flash flash-warn" style="margin-bottom:1rem">
+    <strong>&#9888; Active chain detected.</strong>
+    Certificates marked <em>in active chain</em> are used by the currently issued
+    certificate for this server. Excluding them prevents this tool from uploading
+    or verifying those CA certs in ClearPass, which may break EAP / 802.1X
+    authentication. Only exclude them if they are already managed outside this tool.
+  </div>"""
 
     body = f"""
 <div class="app">
@@ -1207,6 +1282,7 @@ def _trust_exclusions_page(server: dict, username: str,
     Server: <strong style="color:var(--text)">{label}</strong>
   </div>
   {flash_html}
+  {chain_warn_banner}
   <div class="card" style="margin-bottom:1rem;font-size:0.82rem;color:var(--muted);line-height:1.65">
     Checked certificates are <strong style="color:var(--text)">excluded</strong> from
     ClearPass trust list management for this server — they will not be verified or
