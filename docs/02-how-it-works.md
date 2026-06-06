@@ -4,7 +4,7 @@
 
 Every time the container starts, `entrypoint.sh` runs a one-time migration
 check (`migrate_from_env`) to auto-populate `servers.json` from any legacy
-`.env` configuration, then iterates over every server in `servers.json`.
+environment configuration, then iterates over every server in `servers.json`.
 
 ```
 Container starts
@@ -15,16 +15,16 @@ Container starts
 │
 └─ For each server in servers.json:
        │
-       ├─ FORCE_RENEW=true in .env?
+       ├─ FORCE_RENEW=true in docker-compose.override.yml?
        │    YES → Issue both certs (--force) → Install flat files → Upload to CPPM
        │
        ├─ <domain>.ecc.cer AND <domain>.rsa.cer both exist?
        │    YES → Log subject + expiry. NOTHING ELSE.
        │          This is the normal path on every restart after initial setup.
        │
-       ├─ acme.sh internal state has both certs but flat files are missing?
-       │   (happens after a container rebuild before --install-cert ran)
-       │    YES → --install-cert only → Upload to CPPM
+       ├─ Lego internal state has both certs but flat files are missing?
+       │   (happens after a container rebuild before install ran)
+       │    YES → install only → Upload to CPPM
        │          No DNS challenge. No contact with the ACME CA.
        │
        └─ No certificates found (true first run or partial state)
@@ -40,53 +40,59 @@ Container starts
 entrypoint.sh
     └── issue_cert.sh
             │
-            ├── acme.sh --issue --keylength ec-256   ECC via <provider> DNS-01
-            ├── acme.sh --issue --keylength 2048      RSA via <provider> DNS-01
-            │
-            └── install_cert.sh
+            └── acme_cli.py issue
                     │
-                    ├── acme.sh --install-cert --ecc  ECC → <domain>.ecc.*
-                    ├── acme.sh --install-cert        RSA → <domain>.rsa.*
+                    ├── lego run --key-type ec256    ECC via <provider> DNS-01
+                    │     → lego-ecc/certificates/<domain>.crt
+                    ├── lego run --key-type rsa2048   RSA via <provider> DNS-01
+                    │     → lego-rsa/certificates/<domain>.crt
                     │
-                    └── deploy_hook.sh
+                    └── install_cert.sh
                             │
-                            └── clearpass_upload.py  (pyclearpass SDK)
+                            └── acme_cli.py install
                                     │
-                                    ├── Step 0: Trust List Pre-flight
-                                    │     ├── Load bundled ACME CA certs from image
-                                    │     ├── Parse acme.sh ECC CA chain
-                                    │     ├── Apply trust exclusions (per-server from
-                                    │     │   servers.json, or global trust-exclusions.conf)
-                                    │     ├── Compute SHA-256 fingerprints from
-                                    │     │   cert_file PEM in each trust list entry
-                                    │     ├── get_cert_trust_list()
-                                    │     ├── new_cert_trust_list()        (missing certs)
-                                    │     │     body: cert_file=<PEM string>
-                                    │     │           cert_usage=["EAP","Others"]
-                                    │     │           enabled=true
-                                    │     └── update_cert_trust_list_...() (flags wrong)
+                                    ├── lego-ecc/.../<domain>.crt   → <domain>.ecc.*
+                                    ├── lego-rsa/.../<domain>.crt   → <domain>.rsa.*
                                     │
-                                    ├── Step 1: HTTPS(ECC) Server Certificate
-                                    │     ├── get_cluster_server_by_uuid("publisher")
-                                    │     │     GET /api/cluster/server/publisher
-                                    │     ├── get_server_cert()   (find HTTPS(ECC) service_name)
-                                    │     └── PUT /api/server-cert/name/{uuid}/HTTPS(ECC)
-                                    │           PKCS12 served via CPPM_CALLBACK_HOST
-                                    │
-                                    ├── Step 2: RADIUS (RSA) Service Certificate
-                                    │     ├── get_cluster_server_by_uuid("publisher")
-                                    │     ├── get_server_cert()   (find RADIUS service_name)
-                                    │     └── PUT /api/server-cert/name/{uuid}/RADIUS
-                                    │           PKCS12 served via CPPM_CALLBACK_HOST
-                                    │
-                                    └── Step 3: get_server_cert()  (verify domain present)
+                                    └── deploy_hook.sh
+                                            │
+                                            └── clearpass_upload.py  (pyclearpass SDK)
+                                                    │
+                                                    ├── Step 0: Trust List Pre-flight
+                                                    │     ├── Load bundled ACME CA certs from image
+                                                    │     ├── Parse Lego ECC CA chain
+                                                    │     ├── Apply trust exclusions (per-server from
+                                                    │     │   servers.json, or global trust-exclusions.conf)
+                                                    │     ├── Compute SHA-256 fingerprints from
+                                                    │     │   cert_file PEM in each trust list entry
+                                                    │     ├── get_cert_trust_list()
+                                                    │     ├── new_cert_trust_list()        (missing certs)
+                                                    │     │     body: cert_file=<PEM string>
+                                                    │     │           cert_usage=["EAP","Others"]
+                                                    │     │           enabled=true
+                                                    │     └── update_cert_trust_list_...() (flags wrong)
+                                                    │
+                                                    ├── Step 1: HTTPS(ECC) Server Certificate
+                                                    │     ├── get_cluster_server_by_uuid("publisher")
+                                                    │     │     GET /api/cluster/server/publisher
+                                                    │     ├── get_server_cert()   (find HTTPS(ECC) service_name)
+                                                    │     └── PUT /api/server-cert/name/{uuid}/HTTPS(ECC)
+                                                    │           PKCS12 served via CPPM_CALLBACK_HOST
+                                                    │
+                                                    ├── Step 2: RADIUS (RSA) Service Certificate
+                                                    │     ├── get_cluster_server_by_uuid("publisher")
+                                                    │     ├── get_server_cert()   (find RADIUS service_name)
+                                                    │     └── PUT /api/server-cert/name/{uuid}/RADIUS
+                                                    │           PKCS12 served via CPPM_CALLBACK_HOST
+                                                    │
+                                                    └── Step 3: get_server_cert()  (verify domain present)
 ```
 
 ---
 
 ## Automatic Renewal (supercronic)
 
-acme.sh renews certificates when 30 or fewer days remain (roughly 60 days
+Lego renews certificates when 30 or fewer days remain (roughly 60 days
 after issue for a 90-day Let's Encrypt cert).
 
 ```
@@ -94,58 +100,60 @@ supercronic runs renew.sh at 02:00 and 14:00 UTC every day
     │
     └── renew.sh
             │
-            ├── acme.sh --renew (ECC + RSA)
-            │       │
-            │       ├── exit 2  (>30 days remaining)
-            │       │     └── Log "not due". Done.
-            │       │
-            │       └── exit 0  (renewed)
-            │             └── install_cert.sh → deploy_hook.sh → clearpass_upload.py
-            │
-            └── (other exit code)  Log error. supercronic retries at next window.
+            └── acme_cli.py renew
+                    │
+                    ├── lego renew --days 30 (ECC + RSA)
+                    │       │
+                    │       ├── mtime unchanged  (>30 days remaining)
+                    │       │     └── exit 2  → Log "not due". Done.
+                    │       │
+                    │       └── mtime changed  (renewed)
+                    │             └── exit 0  → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+                    │
+                    └── (non-zero exit)  Log error. supercronic retries at next window.
 ```
 
 ---
 
 ## ACME Provider Abstraction
 
-The ACME operations (issue, renew, install, revoke) are expressed as a Python
-provider interface alongside the existing shell scripts. This is prework for an
-eventual transition from `acme.sh` to [Lego](https://github.com/go-acme/lego).
+The ACME operations (issue, renew, install, revoke) are implemented as a Python
+provider class. The shell scripts (`issue_cert.sh`, `renew.sh`, `install_cert.sh`)
+delegate to `acme_cli.py`, which calls the active provider.
 
 ```
 acme_provider.py          ← Abstract base class: AcmeProvider
                                issue_cert / renew_cert / install_cert / revoke_cert / register_account
                                Shared types: IssueResult, KeyTypeResult, AcmeError
         │
-        ├── acme_sh_provider.py   ← AcmeShProvider: wraps acme.sh CLI subprocess calls
-        │                              DNS plugin mapping (cloudflare → dns_cf, etc.)
-        │                              Mirrors behaviour of issue_cert.sh / renew.sh / install_cert.sh
+        ├── lego_provider.py      ← LegoProvider (default): wraps Lego CLI subprocess calls
+        │                              DNS plugin mapping (cloudflare, porkbun, route53, …)
+        │                              Credential remapping (CF_Token → CF_DNS_API_TOKEN, etc.)
+        │                              mtime-based renewal detection
         │
-        └── lego_provider.py      ← LegoProvider: stub (NotImplementedError)
-                                       Documents key differences vs acme.sh for future implementer
+        └── acme_sh_provider.py   ← AcmeShProvider (legacy): wraps acme.sh CLI
+                                       Kept for reference; not the active code path
 ```
 
-The shell scripts remain the active code path. The Python provider layer is a
-parallel implementation that is ready to replace them incrementally. Callers
-switch providers via the factory:
+Callers switch providers via the factory (default is `"lego"`):
 
 ```python
 from acme_provider import get_provider
 
-provider = get_provider("acme_sh")   # current default
-# provider = get_provider("lego")   # future
+provider = get_provider("lego")      # current default
+# provider = get_provider("acme_sh") # legacy
 ```
 
-### Key differences between acme.sh and Lego (for future migration)
+### Lego vs acme.sh comparison
 
-| Aspect | acme.sh | Lego |
+| Aspect | acme.sh (legacy) | Lego (current) |
 |---|---|---|
 | DNS plugin names | `dns_cf`, `dns_porkbun`, `dns_aws`, … | `cloudflare`, `porkbun`, `route53`, … |
 | Key-type flag | `--keylength ec-256` / `2048` | `--key-type ec256` / `rsa2048` |
-| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/.lego/certificates/` |
-| Install step | Separate `--install-cert` required | Files written directly on issue/renew |
-| Account registration | Explicit `--register-account` | Implicit on first `run` |
+| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/lego-{ecc,rsa}/certificates/` |
+| Install step | Separate `--install-cert` required | `acme_cli.py install` copies from Lego state |
+| Account registration | Explicit `--register-account` | Implicit on first `lego run` |
+| Renewal detection | exit code (0=renewed, 2=not due) | mtime comparison before/after `lego renew` |
 
 ---
 
@@ -250,12 +258,14 @@ as a sanity check.
 | ECC (ec-256) | ECDSA P-256 | HTTPS(ECC) | 2 |
 | RSA (2048)   | RSA 2048    | RADIUS      | 1 |
 
-acme.sh stores each type in a separate directory:
+Lego stores each key type in a separate subdirectory. `acme_cli.py install`
+copies the files out to the flat layout that `clearpass_upload.py` and other
+consumers expect:
 
-| Type | acme.sh state dir | Flat files |
+| Type | Lego state dir | Flat files |
 |---|---|---|
-| ECC | `/data/certs/<cppm_host>/<domain>_ecc/` | `<domain>.ecc.cer`, `.ecc.key`, `.ecc.fullchain.cer`, `.ecc.ca.cer` |
-| RSA | `/data/certs/<cppm_host>/<domain>/` | `<domain>.rsa.cer`, `.rsa.key`, `.rsa.fullchain.cer`, `.rsa.ca.cer` |
+| ECC | `/data/certs/<cppm_host>/lego-ecc/certificates/` | `<domain>.ecc.cer`, `.ecc.key`, `.ecc.fullchain.cer`, `.ecc.ca.cer` |
+| RSA | `/data/certs/<cppm_host>/lego-rsa/certificates/` | `<domain>.rsa.cer`, `.rsa.key`, `.rsa.fullchain.cer`, `.rsa.ca.cer` |
 
 All cert files for a given ClearPass server live inside `/data/certs/<cppm_host>/`,
 where `<cppm_host>` is the sanitized ClearPass hostname (e.g. `cppm.example.com`).
@@ -276,11 +286,6 @@ image and is recreated on every `docker compose build`.
 ├── trust-exclusions.conf                 ← Global CA trust exclusion fallback
 ├── status.log                            ← Container-level startup events only
 │
-├── .acme-state/                          ← Shared acme.sh account home (all servers)
-│   ├── ca/
-│   ├── dnsapi/
-│   └── account.conf
-│
 ├── .logs/                                ← Container-level logs
 │   ├── startup.log                       ← entrypoint.sh boot log
 │   └── status_server.log                 ← Web UI process log
@@ -295,10 +300,15 @@ image and is recreated on every `docker compose build`.
 │   ├── cppm.example.com.rsa.key          ← RSA private key (chmod 600)
 │   ├── cppm.example.com.rsa.fullchain.cer
 │   ├── cppm.example.com.rsa.ca.cer
-│   ├── cppm.example.com_ecc/             ← acme.sh ECC internal state
-│   ├── cppm.example.com/                 ← acme.sh RSA internal state
+│   ├── lego-ecc/                         ← Lego ECC internal state
+│   │   └── certificates/
+│   │       ├── cppm.example.com.crt
+│   │       ├── cppm.example.com.key
+│   │       └── cppm.example.com.issuer.crt
+│   ├── lego-rsa/                         ← Lego RSA internal state
+│   │   └── certificates/
 │   └── .logs/
-│       ├── acme_renewal.log              ← acme.sh issuance/renewal detail (web UI ACME Renewal tab)
+│       ├── acme_renewal.log              ← Lego issuance/renewal detail (web UI ACME Renewal tab)
 │       └── cppm_upload.log               ← ClearPass API upload detail (web UI ClearPass Upload tab)
 │
 └── cppm-lab.example.com/                 ← Second server (same structure)
@@ -319,8 +329,7 @@ image and is recreated on every `docker compose build`.
 
 | Path in image | Contents | Source |
 |---|---|---|
-| `/usr/local/bin/acme.sh` | acme.sh binary | GitHub (git clone at build time) |
-| `/opt/acme-seed/` | Full acme.sh install (dnsapi/, deploy/) | Copied from clone |
+| `/usr/local/bin/lego` | Lego binary (static) | GitHub release tarball (curl at build time) |
 | `/opt/cppm/acme-ca-certs/` | Let's Encrypt CA PEM files + `trust-exclusions.conf` default | letsencrypt.org (curl at build time) |
 | `/opt/cppm/` | All management scripts | COPY from project directory |
 | Python packages | pyclearpass, requests, urllib3 | pip at build time |

@@ -1,10 +1,10 @@
 # ClearPass ACME Certificate Manager
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](VERSION)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**
-using [acme.sh](https://github.com/acmesh-official/acme.sh) and a DNS-01 challenge.
+using [Lego](https://github.com/go-acme/lego) and a DNS-01 challenge.
 Everything runs in a self-contained Alpine Linux Docker container with persistent storage
 on the host.
 
@@ -20,7 +20,7 @@ Two certificates are issued and maintained simultaneously:
 │              ClearPass ACME Certificate Manager Flow                     │
 │                                                                          │
 │  ┌──────────────┐  DNS-01  ┌─────────────────┐                          │
-│  │   acme.sh    │◄────────►│  DNS Provider   │                          │
+│  │    Lego      │◄────────►│  DNS Provider   │                          │
 │  │  (supercronic│          │  (Cloudflare,   │                          │
 │  │   2x daily)  │          │   Porkbun, etc) │                          │
 │  └──────┬───────┘          └─────────────────┘                          │
@@ -86,7 +86,7 @@ and enter credentials when adding or editing a server in the web UI
 
 | Provider | Selector value | Credentials required |
 |---|---|---|
-| Cloudflare *(default)* | `cloudflare` | API Token + Zone ID (or Global Key + Email) |
+| Cloudflare | `cloudflare` | API Token (or Global Key + Email) |
 | Porkbun | `porkbun` | `PORKBUN_API_KEY` + `PORKBUN_SECRET_API_KEY` |
 | AWS Route 53 | `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | DigitalOcean | `digitalocean` | `DO_API_KEY` |
@@ -97,18 +97,22 @@ and enter credentials when adding or editing a server in the web UI
 
 ```
 cppm-acme-cert-manager/
-├── Dockerfile                  # Alpine + acme.sh + Python image
+├── Dockerfile                  # Alpine + Lego + Python image
 ├── docker-compose.yml          # Service definition, volume and port mapping
-├── env-example                 # Safe-to-commit reference — copy to .env
+├── docker-compose.override.yml.example  # Local config template — copy to docker-compose.override.yml
 ├── setup.sh                    # One-time host preparation script
 ├── config/
 │   └── crontab                 # Renewal schedule (supercronic, inside container)
 ├── scripts/
 │   ├── entrypoint.sh           # Startup: validates env, manages cert state, starts supercronic
 │   ├── issue_cert.sh           # Issues ECC + RSA certs via DNS-01
-│   ├── install_cert.sh         # Copies flat files from acme.sh state to /data/certs/
-│   ├── renew.sh                # Called by supercronic — runs acme.sh --renew
+│   ├── install_cert.sh         # Copies flat files from Lego state to /data/certs/
+│   ├── renew.sh                # Called by supercronic — runs lego renew
 │   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
+│   ├── acme_cli.py             # CLI bridge: issue / renew / install / revoke commands
+│   ├── acme_provider.py        # Abstract ACME provider interface + shared types
+│   ├── lego_provider.py        # Lego-backed AcmeProvider implementation
+│   ├── acme_sh_provider.py     # Legacy acme.sh AcmeProvider (kept for reference)
 │   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
 │   ├── trust_check.sh          # Weekly trust list verification (supercronic, Sunday 03:00)
 │   ├── status_server.py        # Web UI and REST API (port STATUS_PORT)
@@ -138,19 +142,18 @@ cppm-acme-cert-manager/
 ├── .session-secret                           ← HMAC session signing key (chmod 600)
 ├── trust-exclusions.conf                     ← Global CA exclusion fallback (admin-editable)
 ├── status.log                                ← Container-level startup events
-├── .acme-state/                              ← Shared acme.sh account keys
 ├── .logs/
 │   ├── startup.log                           ← Container boot log
 │   └── status_server.log                     ← Web UI process log
 │
 ├── cppm.example.com/                         ← Per-server directory (one per ClearPass host)
 │   ├── status.log                            ← Activity log (web UI Activity tab, public)
-│   ├── <domain>.ecc.cer / .ecc.key / ...     ← ECC cert files
+│   ├── <domain>.ecc.cer / .ecc.key / ...     ← ECC cert files (flat layout, identical to acme.sh output)
 │   ├── <domain>.rsa.cer / .rsa.key / ...     ← RSA cert files
-│   ├── <domain>_ecc/                         ← acme.sh ECC state
-│   ├── <domain>/                             ← acme.sh RSA state
+│   ├── lego-ecc/                             ← Lego ECC internal state
+│   ├── lego-rsa/                             ← Lego RSA internal state
 │   └── .logs/
-│       ├── acme_renewal.log                  ← acme.sh issuance/renewal detail (auth required)
+│       ├── acme_renewal.log                  ← Lego issuance/renewal detail (auth required)
 │       └── cppm_upload.log                   ← ClearPass API upload detail (auth required)
 │
 └── cppm-lab.example.com/                     ← Second server (same structure)
@@ -168,29 +171,34 @@ cd /opt/cppm-acme-cert-manager
 chmod +x setup.sh && ./setup.sh
 ```
 
-`setup.sh` verifies Docker, creates `/opt/cppm-certs`, and copies `env-example`
-to `.env` if it does not already exist.
+`setup.sh` verifies Docker, creates `/opt/cppm-certs`, and copies
+`docker-compose.override.yml.example` to `docker-compose.override.yml` if it
+does not already exist.
 
-### 2. Configure `.env`
+### 2. Configure local overrides (optional)
 
-`.env` controls **container-level behaviour only** — ports, timezone, and
-operational flags. ClearPass credentials, DNS provider, domain, and ACME
-settings are configured through the web UI after the container starts.
-
-```bash
-nano .env
-```
-
-```ini
-TZ=America/New_York          # container timezone for logs and cron
-STATUS_PORT=8080             # web UI port (must match docker-compose.yml)
-CPPM_CALLBACK_PORT=8765      # PKCS12 delivery port (must match docker-compose.yml)
-REQUIRE_AUTH_FOR_STATUS=false
-```
+`docker-compose.override.yml` controls **container-level behaviour only** —
+timezone, ports, and operational flags. ClearPass credentials, DNS provider,
+domain, and ACME settings are configured through the web UI after the container
+starts.
 
 ```bash
-chmod 600 .env
+nano docker-compose.override.yml
 ```
+
+Commonly changed values (all have defaults in `docker-compose.yml`):
+
+```yaml
+environment:
+  TZ: America/New_York        # container timezone for logs and cron (default: UTC)
+  # STATUS_PORT: "9090"       # web UI port — also update ports section if changed
+  # CPPM_CALLBACK_PORT: "9765" # PKCS12 delivery port — also update ports section
+```
+
+> **Changing a port requires updating two places:** the `environment` section
+> (tells the app which port to listen on) and the `ports` section (tells Docker
+> which host port to forward). See the comments inside the override file for the
+> step-by-step checklist.
 
 ### 3. Create the ClearPass API client
 
@@ -320,44 +328,47 @@ First-run time: 2–5 minutes (DNS propagation for the ACME challenge).
 ```
 entrypoint.sh
     └── issue_cert.sh
-            ├── acme.sh --issue --keylength ec-256   ECC via DNS-01
-            ├── acme.sh --issue --keylength 2048      RSA via DNS-01
-            └── install_cert.sh
-                    ├── acme.sh --install-cert --ecc  → <domain>.ecc.*
-                    ├── acme.sh --install-cert        → <domain>.rsa.*
-                    └── deploy_hook.sh
-                            └── clearpass_upload.py  (pyclearpass SDK)
-                                    ├── Step 0: Trust List Pre-flight
-                                    │     Compute SHA-256 fingerprints from cert_file
-                                    │     PEM in each trust list entry, then:
-                                    │     POST  /api/cert-trust-list  (missing certs)
-                                    │     PATCH /api/cert-trust-list/{id}  (wrong flags)
-                                    │     cert_usage: ["EAP", "Others"]
-                                    │
-                                    ├── Step 1: ECC → HTTPS(ECC)
-                                    │     GET  /api/cluster/server/publisher  (UUID)
-                                    │     GET  /api/server-cert  (find HTTPS(ECC) slot)
-                                    │     PUT  /api/server-cert/name/{uuid}/HTTPS(ECC)
-                                    │     CPPM fetches PKCS12 via CPPM_CALLBACK_HOST
-                                    │
-                                    ├── Step 2: RSA → RADIUS
-                                    │     PUT  /api/server-cert/name/{uuid}/RADIUS
-                                    │
-                                    └── Step 3: GET /api/server-cert (verify domain)
+            └── acme_cli.py issue
+                    ├── lego run --key-type ec256   ECC via DNS-01
+                    ├── lego run --key-type rsa2048  RSA via DNS-01
+                    └── install_cert.sh
+                            └── acme_cli.py install
+                                    ├── lego-ecc/certificates/<domain>.crt → <domain>.ecc.*
+                                    ├── lego-rsa/certificates/<domain>.crt → <domain>.rsa.*
+                                    └── deploy_hook.sh
+                                            └── clearpass_upload.py  (pyclearpass SDK)
+                                                    ├── Step 0: Trust List Pre-flight
+                                                    │     Compute SHA-256 fingerprints from cert_file
+                                                    │     PEM in each trust list entry, then:
+                                                    │     POST  /api/cert-trust-list  (missing certs)
+                                                    │     PATCH /api/cert-trust-list/{id}  (wrong flags)
+                                                    │     cert_usage: ["EAP", "Others"]
+                                                    │
+                                                    ├── Step 1: ECC → HTTPS(ECC)
+                                                    │     GET  /api/cluster/server/publisher  (UUID)
+                                                    │     GET  /api/server-cert  (find HTTPS(ECC) slot)
+                                                    │     PUT  /api/server-cert/name/{uuid}/HTTPS(ECC)
+                                                    │     CPPM fetches PKCS12 via CPPM_CALLBACK_HOST
+                                                    │
+                                                    ├── Step 2: RSA → RADIUS
+                                                    │     PUT  /api/server-cert/name/{uuid}/RADIUS
+                                                    │
+                                                    └── Step 3: GET /api/server-cert (verify domain)
 ```
 
 ### Automatic renewal (supercronic)
 
-supercronic runs `renew.sh` at **02:00 and 14:00 UTC** daily. acme.sh renews
+supercronic runs `renew.sh` at **02:00 and 14:00 UTC** daily. Lego renews
 when ≤30 days remain — approximately 60 days after issuance for a 90-day
 Let's Encrypt certificate.
 
 ```
 supercronic (02:00 / 14:00 UTC)
     └── renew.sh
-            ├── acme.sh --renew (ECC)
-            ├── acme.sh --renew (RSA)
-            └── on renewal → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+            └── acme_cli.py renew
+                    ├── lego renew --days 30 (ECC) — mtime detection for true renewal
+                    ├── lego renew --days 30 (RSA)
+                    └── on renewal → install_cert.sh → deploy_hook.sh → clearpass_upload.py
 ```
 
 ### Authentication
@@ -416,8 +427,9 @@ http://<docker-host>:8080/
 | **Users** — admin account management | `/admin/users` | Yes |
 | **Setup** — first-time admin account creation | `/setup` | No (only before first user exists) |
 
-Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to require sign-in for the
-Dashboard as well. The Servers and Users pages always require authentication.
+Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to
+require sign-in for the Dashboard as well. The Servers and Users pages always
+require authentication.
 
 ### First-time setup
 
@@ -492,19 +504,17 @@ docker exec -it cppm-acme-cert-manager cppm-users delete <username>
 
 ### Configuration
 
-```ini
-# .env
-STATUS_PORT=8080                  # Port for the web UI (default: 8080)
-REQUIRE_AUTH_FOR_STATUS=false     # Set true to require login for the dashboard
-SESSION_LIFETIME_HOURS=8          # Session cookie lifetime in hours
-```
-
-The port must be published in `docker-compose.yml` (it is by default):
-
 ```yaml
-ports:
-  - "${STATUS_PORT:-8080}:${STATUS_PORT:-8080}"
+# docker-compose.override.yml
+environment:
+  STATUS_PORT: "8080"               # Port for the web UI (default: 8080)
+  REQUIRE_AUTH_FOR_STATUS: "false"  # Set "true" to require login for the dashboard
+  SESSION_LIFETIME_HOURS: "8"       # Session cookie lifetime in hours
 ```
+
+If you change `STATUS_PORT`, update the `ports` section in the override file
+to match (both host and container side). See the override template for the
+step-by-step checklist.
 
 ### Logs
 
@@ -567,9 +577,9 @@ docker compose logs -f
 ### Force certificate re-issue
 
 ```bash
-# Edit .env: FORCE_RENEW=true
+# Edit docker-compose.override.yml: FORCE_RENEW: "true"
 docker compose up -d --force-recreate
-# After completion, edit .env: FORCE_RENEW=false
+# After completion, edit docker-compose.override.yml: FORCE_RENEW: "false"
 docker compose up -d --force-recreate
 ```
 
@@ -660,7 +670,6 @@ docker compose up -d
 docker compose logs | grep -E "ERROR|Missing"
 ```
 
-Check that `STATUS_PORT`, `CPPM_CALLBACK_PORT`, and `TZ` are set in `.env`.
 If no servers are configured the container logs a warning but stays running —
 add a server via the web UI (**Servers → + Add Server**) or CLI
 (`cppm-servers add`), then restart.
@@ -681,9 +690,9 @@ docker exec -it cppm-acme-cert-manager sh -c '
 **Porkbun:** ensure API access is enabled on the domain in the Porkbun dashboard.
 
 **Route53:** verify the IAM policy includes `route53:GetChange` — without it
-acme.sh cannot poll for propagation.
+Lego cannot poll for propagation.
 
-Check the full acme.sh output:
+Check the full Lego output:
 ```bash
 tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
 ```
@@ -742,7 +751,8 @@ If entries still fail, add them manually:
 
 Switch to staging for testing via the web UI:
 **Servers → Edit → Certificate Authority → Let's Encrypt (Staging) → Save Changes**,
-then force a re-issue (`FORCE_RENEW=true` in `.env`, recreate, then reset to `false`).
+then force a re-issue (set `FORCE_RENEW: "true"` in `docker-compose.override.yml`,
+recreate the container, then reset to `"false"`).
 
 Switch back to **Let's Encrypt** in the server edit form and wait 7 days before
 re-issuing production certs.
@@ -753,7 +763,7 @@ re-issuing production certs.
 
 | Item | Recommendation |
 |---|---|
-| `.env` permissions | `chmod 600 .env` — readable by root only |
+| `docker-compose.override.yml` | Not committed to git (gitignored); contains no secrets by default |
 | `servers.json` permissions | Automatically `chmod 600` — contains credentials |
 | `/opt/cppm-certs` permissions | `chmod 750` |
 | Private keys | Never leave the host; PKCS12 export is ephemeral in `/tmp` |

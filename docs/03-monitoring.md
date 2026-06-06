@@ -12,7 +12,7 @@ Open in a browser:
 http://<docker-host>:8080/
 ```
 
-> Change the port by setting `STATUS_PORT` in `.env` (default `8080`).
+> Change the port by setting `STATUS_PORT` in `docker-compose.override.yml` (default `8080`).
 
 ### Navigation
 
@@ -23,8 +23,9 @@ http://<docker-host>:8080/
 | **Users** | `/admin/users` | Yes |
 | **Sign Out** | `/logout` | — |
 
-Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to require sign-in for the
-Dashboard as well. The Servers and Users pages always require authentication.
+Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to
+require sign-in for the Dashboard as well. The Servers and Users pages always
+require authentication.
 
 ---
 
@@ -59,7 +60,7 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 | **Credential storage** | bcrypt-hashed in `/opt/cppm-certs/admin.htpasswd` (persists across rebuilds) |
 | **Session token** | HMAC-SHA256 signed cookie; secret in `/opt/cppm-certs/.session-secret` |
 | **Public dashboard** | By default the certificate status page is readable without login |
-| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to protect the dashboard |
+| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to protect the dashboard |
 
 ---
 
@@ -128,7 +129,7 @@ Non-authenticated users see only the Activity Log tab:
 
 **Activity Log** — one line per event, newest first, colour-coded by level (`OK` green, `WARN` yellow, `FAILED` red, `INFO` grey). Covers cert issuance/renewal, ClearPass upload outcomes, and health check state changes (CPPM, DNS, Callback).
 
-**ACME Renewal** — full `acme.sh` output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA, and callback URL.
+**ACME Renewal** — full Lego output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA, and callback URL.
 
 ![ACME Renewal log tab](ui-server-logs-renewal.png)
 
@@ -471,7 +472,7 @@ startup and shutdown events only (not per-server cert or upload activity).
 Per-server logs are in `/opt/cppm-certs/<cppm_host>/.logs/`:
 
 ```bash
-# acme.sh issuance and renewal full output (per server)
+# Lego issuance and renewal full output (per server)
 tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
 
 # ClearPass API upload full output (per server)

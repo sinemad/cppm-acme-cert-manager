@@ -8,7 +8,7 @@ Run these steps once on the host before the container is ever started.
 |---|---|
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Linux host | Ubuntu 22.04 LTS recommended |
-| DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, GoDaddy, or any acme.sh dnsapi plugin) |
+| DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, or GoDaddy) |
 | CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13, SDK valid for all) |
 | Outbound HTTPS | Container needs access to your DNS provider's API and your ACME CA |
 
@@ -24,42 +24,48 @@ chmod +x setup.sh && ./setup.sh
 `setup.sh` does three things:
 - Verifies Docker and the Compose plugin are present
 - Creates `/opt/cppm-certs` (the persistent storage directory)
-- Copies `env-example` to `.env` if `.env` does not already exist
+- Copies `docker-compose.override.yml.example` to `docker-compose.override.yml` if it does not already exist
 
 ---
 
-## Step 2 – Configure `.env`
+## Step 2 – Configure local overrides (optional)
 
-`.env` controls **container-level behaviour only** — ports, timezone, and operational flags. ClearPass server credentials, DNS provider, domain, and ACME settings are all configured through the web UI after the container starts.
+`docker-compose.override.yml` controls **container-level behaviour only** —
+timezone, ports, and operational flags. ClearPass server credentials, DNS
+provider, domain, and ACME settings are all configured through the web UI
+after the container starts.
 
-```bash
-nano /opt/cppm-acme-cert-manager/.env
-```
-
-Required values:
-
-```ini
-# Container timezone — used in log timestamps and cron scheduling
-TZ=America/New_York
-
-# Web UI port — must match the host-side port in docker-compose.yml
-STATUS_PORT=8080
-
-# Callback port — Docker host port CPPM fetches the PKCS12 cert from during upload
-# Must match the host-side port in docker-compose.yml
-CPPM_CALLBACK_PORT=8765
-
-# Set true to require sign-in before the certificate dashboard is visible
-REQUIRE_AUTH_FOR_STATUS=false
-```
-
-Secure the file:
+Docker Compose automatically merges `docker-compose.override.yml` with
+`docker-compose.yml` — no flags or extra commands needed. Only uncomment and
+change what you need; everything else uses the defaults from `docker-compose.yml`.
 
 ```bash
-chmod 600 /opt/cppm-acme-cert-manager/.env
+nano /opt/cppm-acme-cert-manager/docker-compose.override.yml
 ```
 
-> **What .env no longer configures:** DNS provider credentials, ClearPass host/credentials, domain, ACME email, and ACME server are all managed through the web UI and stored in `/opt/cppm-certs/servers.json`. See the [full `.env` reference](env-example) for optional flags (`FORCE_RENEW`, `SKIP_UPLOAD`, `LOG_LEVEL`) and the legacy migration section.
+The most commonly changed value:
+
+```yaml
+environment:
+  TZ: America/New_York    # container timezone for logs and cron (default: UTC)
+```
+
+Optional flags (uncomment to enable):
+
+```yaml
+  # FORCE_RENEW: "true"    # force certificate re-issuance on next container start
+  # SKIP_UPLOAD: "true"    # issue/renew without uploading to ClearPass
+  # LOG_LEVEL: DEBUG       # Python log verbosity for upload script
+```
+
+> **Changing a port requires updating two places** in the override file: the
+> `environment` section (tells the app which port to listen on inside the
+> container) and the `ports` section (tells Docker which host port to forward).
+> The override template includes a step-by-step checklist for port changes.
+
+> **What docker-compose.override.yml does NOT configure:** DNS provider
+> credentials, ClearPass host/credentials, domain, ACME email, and ACME server
+> are all managed through the web UI and stored in `/opt/cppm-certs/servers.json`.
 
 ---
 
@@ -90,7 +96,7 @@ chmod 600 /opt/cppm-acme-cert-manager/.env
 docker compose build --no-cache
 ```
 
-The build fetches acme.sh from GitHub and downloads CA certificates from supported ACME providers. Both are baked into the image so the running container needs no access to either site at runtime.
+The build downloads the Lego binary from GitHub and CA certificates from supported ACME providers. Both are baked into the image so the running container needs no access to either site at runtime.
 
 Expected build time: 2–4 minutes depending on network speed.
 
@@ -213,11 +219,9 @@ Create a Production API key at the
 
 #### Other / custom providers
 
-Any acme.sh dnsapi plugin can be used. In the **DNS Provider** field enter the
-plugin name without the `dns_` prefix (e.g. `linode_v4`). Add the required
-credential variables in the custom credentials textarea. See the
-[acme.sh dnsapi docs](https://github.com/acmesh-official/acme.sh/wiki/dnsapi)
-for variable names.
+The five providers listed above are natively supported. For other DNS providers,
+refer to the [Lego DNS provider documentation](https://go-acme.github.io/lego/dns/)
+for supported providers and their required environment variable names.
 
 ### CLI alternative (no browser needed)
 

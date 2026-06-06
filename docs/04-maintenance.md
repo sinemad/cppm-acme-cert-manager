@@ -37,15 +37,18 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 
 ---
 
-## Updating `.env` settings
+## Updating docker-compose.override.yml settings
 
-`.env` controls container-level behaviour — ports, timezone, and operational
-flags. If you change `STATUS_PORT`, `CPPM_CALLBACK_PORT`, or `TZ`, recreate
-the container to pick up the changes:
+`docker-compose.override.yml` controls container-level behaviour — ports,
+timezone, and operational flags. If you change `STATUS_PORT`,
+`CPPM_CALLBACK_PORT`, or `TZ`, recreate the container to pick up the changes:
 
 ```bash
 docker compose up -d --force-recreate
 ```
+
+> When changing a port, update **both** the `environment` section and the
+> `ports` section in the override file so the two sides stay in sync.
 
 ---
 
@@ -79,9 +82,9 @@ RADIUS cert upload.
 
 ---
 
-## Manually run install-cert only
+## Manually run install only
 
-If acme.sh has the cert in its internal state but the flat files are missing
+If Lego has the cert in its internal state but the flat files are missing
 (visible in `status.log` as "Flat files missing"):
 
 ```bash
@@ -98,14 +101,14 @@ Use this to rotate the certificate before it is due (e.g. key compromise,
 CPPM migration):
 
 ```bash
-# 1. Set the flag in .env
-#    FORCE_RENEW=true
+# 1. Set the flag in docker-compose.override.yml:
+#      FORCE_RENEW: "true"
 docker compose up -d --force-recreate
 docker compose logs -f
 # Wait for "New certificate issued" and "Upload succeeded" in the logs
 
-# 2. Clear the flag when done
-#    FORCE_RENEW=false
+# 2. Clear the flag when done:
+#      FORCE_RENEW: "false"
 docker compose up -d --force-recreate
 ```
 
@@ -255,7 +258,7 @@ you will see entries like the following — no action is required.
 2026-06-08 03:00:07 | OK     | TRUST   | 9 CA certs verified – 0 uploaded, 0 patched, 9 already trusted
 ```
 
-For detailed acme.sh renewal output see `acme_renewal.log`; for full ClearPass
+For detailed Lego renewal output see `acme_renewal.log`; for full ClearPass
 API upload logs see `cppm_upload.log`. Both are in
 `/opt/cppm-certs/<cppm_host>/.logs/` and are also accessible in the web UI
 (sign-in required) on the server detail page.
@@ -339,8 +342,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
 docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
-acme.sh --list                         # show all certs managed by acme.sh
-acme.sh --info -d cppm.example.com     # show detail for this domain
+lego --path /data/certs/cppm.example.com/lego-ecc list  # show ECC certs known to Lego
+lego --path /data/certs/cppm.example.com/lego-rsa list  # show RSA certs known to Lego
 cat /data/certs/status.log             # view status log
 cat /data/certs/servers.json           # view server configuration
 ```
