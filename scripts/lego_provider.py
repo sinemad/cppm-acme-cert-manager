@@ -1,6 +1,7 @@
 """ACME provider backed by the Lego client (https://github.com/go-acme/lego)."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import subprocess
 from pathlib import Path
 
 from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult
+
+log = logging.getLogger(__name__)
 
 _LEGO_BIN = "/usr/local/bin/lego"
 
@@ -95,6 +98,7 @@ class LegoProvider(AcmeProvider):
         # Unset DEBUG — a non-numeric value from the host causes Alpine ash
         # integer-range errors in child processes.
         env.pop("DEBUG", None)
+        log.debug("lego %s", " ".join(args))
         try:
             return subprocess.run([_LEGO_BIN, *args], env=env, timeout=timeout)
         except FileNotFoundError as exc:
@@ -127,6 +131,12 @@ class LegoProvider(AcmeProvider):
         email = dns_env.get("ACME_EMAIL") or os.environ.get("ACME_EMAIL", "")
         results: list[KeyTypeResult] = []
 
+        log.info(
+            "issue_cert: domain=%s ca=%s plugin=%s types=%s force=%s",
+            domain, server_url, plugin, "+".join(k.upper() for k in key_types), force,
+        )
+        log.debug("issue_cert: mapped dns env keys: %s", sorted(lego_env.keys()))
+
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
                 raise AcmeError(f"Unknown key type: {kt!r}")
@@ -158,9 +168,11 @@ class LegoProvider(AcmeProvider):
             ]
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
+                log.error("lego run (%s) failed (exit %d) for %s", kt.upper(), rc, domain)
                 raise AcmeError(
                     f"lego run ({kt.upper()}) failed (exit {rc}) – check {log_file}"
                 )
+            log.info("lego run (%s) succeeded for %s", kt.upper(), domain)
             results.append(KeyTypeResult(key_type=kt, issued=True))
 
         return IssueResult(results=results)
@@ -182,6 +194,11 @@ class LegoProvider(AcmeProvider):
         email = dns_env.get("ACME_EMAIL") or os.environ.get("ACME_EMAIL", "")
         results: list[KeyTypeResult] = []
         failures: list[str] = []
+
+        log.info(
+            "renew_cert: domain=%s ca=%s plugin=%s types=%s",
+            domain, server_url, plugin, "+".join(k.upper() for k in key_types),
+        )
 
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
@@ -206,12 +223,18 @@ class LegoProvider(AcmeProvider):
             ]
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
+                log.error("lego renew (%s) failed (exit %d) for %s", kt.upper(), rc, domain)
                 # Collect failures but continue so the other key type is attempted.
                 failures.append(f"{kt.upper()} exit {rc}")
                 continue
 
             after = os.path.getmtime(cert_file) if os.path.exists(cert_file) else 0.0
-            results.append(KeyTypeResult(key_type=kt, issued=after > before))
+            renewed = after > before
+            log.info(
+                "lego renew (%s) for %s: %s (mtime before=%.0f after=%.0f)",
+                kt.upper(), domain, "renewed" if renewed else "not due", before, after,
+            )
+            results.append(KeyTypeResult(key_type=kt, issued=renewed))
 
         if failures:
             raise AcmeError(f"lego renew failed for {domain}: {'; '.join(failures)}")
@@ -225,6 +248,7 @@ class LegoProvider(AcmeProvider):
         key_types: list[str],
         log_file: str,
     ) -> None:
+        log.info("install_cert: domain=%s types=%s", domain, "+".join(k.upper() for k in key_types))
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
                 raise AcmeError(f"Unknown key type: {kt!r}")
@@ -264,6 +288,8 @@ class LegoProvider(AcmeProvider):
             dst_key = os.path.join(cert_dir, f"{domain}.{kt}.key")
             shutil.copy2(key_file_src, dst_key)
             os.chmod(dst_key, 0o600)
+
+            log.info("install_cert: installed %s cert files for %s", kt.upper(), domain)
 
             # CA / issuer chain → .ca.cer
             dst_ca = os.path.join(cert_dir, f"{domain}.{kt}.ca.cer")

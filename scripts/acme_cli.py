@@ -39,11 +39,22 @@ log = logging.getLogger(__name__)
 # the provider's dns_env so it can pick what it needs and remap as required.
 _DNS_CRED_KEYS = {
     "ACME_EMAIL",
+    # Cloudflare
     "CF_Token", "CF_Key", "CF_Email", "CF_Zone_ID", "CF_Account_ID",
+    # Porkbun
     "PORKBUN_API_KEY", "PORKBUN_SECRET_API_KEY",
+    # AWS Route 53
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION",
+    # DigitalOcean
     "DO_API_KEY",
+    # GoDaddy
     "GD_Key", "GD_Secret",
+    # Infoblox
+    "INFOBLOX_HOST", "INFOBLOX_USERNAME", "INFOBLOX_PASSWORD",
+    "INFOBLOX_SSL_VERIFY", "INFOBLOX_VIEW", "INFOBLOX_WAPI_VERSION",
+    # RFC 2136 (nsupdate / Active Directory DNS)
+    "RFC2136_NAMESERVER", "RFC2136_TSIG_KEY", "RFC2136_TSIG_SECRET",
+    "RFC2136_TSIG_ALGORITHM", "RFC2136_DNS_TIMEOUT",
 }
 
 
@@ -76,6 +87,22 @@ def _log_file(cert_dir: str) -> str:
     return os.path.join(log_dir, "acme_renewal.log")
 
 
+def _ca_label(acme_server: str) -> str:
+    """Return a short human-readable label for the ACME CA value."""
+    _KNOWN = {
+        "letsencrypt":      "Let's Encrypt",
+        "letsencrypt_test": "Let's Encrypt (Staging)",
+        "zerossl":          "ZeroSSL",
+        "buypass":          "Buypass",
+        "buypass_test":     "Buypass (Staging)",
+    }
+    if acme_server in _KNOWN:
+        return _KNOWN[acme_server]
+    if acme_server.startswith("http"):
+        return f"Custom CA ({acme_server})"
+    return acme_server
+
+
 def cmd_issue(args: argparse.Namespace) -> None:
     domain = _require("DOMAIN")
     cert_dir = _require("SERVER_CERT_DIR")
@@ -84,6 +111,14 @@ def cmd_issue(args: argparse.Namespace) -> None:
     dns_provider = _require("DNS_PROVIDER")
     key_types = _key_types()
 
+    log.info(
+        "Issuing %s cert(s) for %s | CA: %s | DNS: %s%s",
+        "+".join(k.upper() for k in key_types),
+        domain,
+        _ca_label(acme_server),
+        dns_provider,
+        " (forced)" if args.force else "",
+    )
     provider = get_provider("lego")
     try:
         result = provider.issue_cert(
@@ -99,7 +134,7 @@ def cmd_issue(args: argparse.Namespace) -> None:
         types_str = "+".join(r.key_type.upper() for r in result.results)
         log.info("Issued %s cert(s) for %s", types_str, domain)
     except AcmeError as exc:
-        log.error("Issue failed: %s", exc)
+        log.error("Issue failed for %s: %s", domain, exc)
         sys.exit(1)
 
 
@@ -111,6 +146,12 @@ def cmd_renew(_args: argparse.Namespace) -> None:
     dns_provider = _require("DNS_PROVIDER")
     key_types = _key_types()
 
+    log.info(
+        "Checking renewal for %s | CA: %s | DNS: %s",
+        domain,
+        _ca_label(acme_server),
+        dns_provider,
+    )
     provider = get_provider("lego")
     try:
         result = provider.renew_cert(
@@ -129,7 +170,7 @@ def cmd_renew(_args: argparse.Namespace) -> None:
             log.info("Certificate not due for renewal for %s", domain)
             sys.exit(2)
     except AcmeError as exc:
-        log.error("Renew failed: %s", exc)
+        log.error("Renew failed for %s: %s", domain, exc)
         sys.exit(1)
 
 
@@ -138,6 +179,7 @@ def cmd_install(_args: argparse.Namespace) -> None:
     cert_dir = _require("SERVER_CERT_DIR")
     key_types = _key_types()
 
+    log.info("Installing cert files for %s | types: %s", domain, "+".join(k.upper() for k in key_types))
     provider = get_provider("lego")
     try:
         provider.install_cert(
@@ -148,7 +190,7 @@ def cmd_install(_args: argparse.Namespace) -> None:
         )
         log.info("Cert files installed for %s", domain)
     except AcmeError as exc:
-        log.error("Install failed: %s", exc)
+        log.error("Install failed for %s: %s", domain, exc)
         sys.exit(1)
 
 
@@ -157,6 +199,7 @@ def cmd_revoke(_args: argparse.Namespace) -> None:
     cert_dir = _require("SERVER_CERT_DIR")
     key_types = _key_types()
 
+    log.info("Revoking cert(s) for %s | types: %s", domain, "+".join(k.upper() for k in key_types))
     provider = get_provider("lego")
     try:
         provider.revoke_cert(
@@ -167,7 +210,7 @@ def cmd_revoke(_args: argparse.Namespace) -> None:
         )
         log.info("Certificate(s) revoked for %s", domain)
     except AcmeError as exc:
-        log.error("Revoke failed: %s", exc)
+        log.error("Revoke failed for %s: %s", domain, exc)
         sys.exit(1)
 
 

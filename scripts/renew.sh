@@ -59,11 +59,21 @@ if output:
     mkdir -p "$LOG_DIR"
     status_server_init
 
+    ACME_CA_LABEL="${ACME_SERVER:-letsencrypt}"
+    case "$ACME_CA_LABEL" in
+        letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
+        letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
+        zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
+        buypass)          ACME_CA_LABEL="Buypass" ;;
+        buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
+        http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
+    esac
+
     log "=== Renewal Check ==="
     log "  Domain   : ${DOMAIN:-NOT SET}"
     log "  CPPM     : ${CPPM_HOST:-NOT SET}"
     log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
-    log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+    log "  ACME CA  : ${ACME_CA_LABEL}"
     log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 
     if [[ -z "${DOMAIN:-}" ]]; then
