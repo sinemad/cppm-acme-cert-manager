@@ -4,15 +4,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-ACME_BIN="/usr/local/bin/acme.sh"
-ACME_SEED="/opt/acme-seed"
-ACME_STATE="/data/certs/.acme-state"
+LEGO_BIN="/usr/local/bin/lego"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-[[ -x "$ACME_BIN" ]] || { echo "[ERROR] acme.sh not found at $ACME_BIN. Rebuild the image."; exit 1; }
+[[ -x "$LEGO_BIN" ]] || { echo "[ERROR] lego not found at $LEGO_BIN. Rebuild the image."; exit 1; }
 
 mkdir -p "$LOG_DIR" "$CERT_DIR"
 LOG="${LOG_DIR}/startup.log"
@@ -24,10 +22,8 @@ touch "$LOG"
 source /opt/cppm/status.sh
 GLOBAL_STATUS_LOG="$STATUS_LOG"
 
-# acme.sh uses $DEBUG as a numeric variable; a non-numeric value inherited
-# from the host environment (e.g. DEBUG=true) causes Alpine ash to throw
-# "sh: DEBUG: out of range" on every acme.sh call. Unset it globally here
-# so no acme.sh invocation in this script or its children is affected.
+# A non-numeric DEBUG value inherited from the host (e.g. DEBUG=true) can
+# cause Alpine ash to throw "sh: DEBUG: out of range" in child processes.
 unset DEBUG
 
 log()  { echo "[$(ts)] [INFO ] $*" | tee -a "$LOG"; }
@@ -35,38 +31,10 @@ warn() { echo "[$(ts)] [WARN ] $*" | tee -a "$LOG"; }
 err()  { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
 die()  { err "$*"; status_write "FAILED" "STARTUP" "$*"; exit 1; }
 
-ACME_VER=$("$ACME_BIN" --version 2>&1 | head -1)
+LEGO_VER=$("$LEGO_BIN" --version 2>&1 | head -1 || echo "lego (version unknown)")
 log "=== ClearPass Certificate Manager v2.0 ==="
-log "acme.sh : $ACME_VER"
-status_write "INFO" "STARTUP" "Container started – acme=${ACME_VER}"
-
-# ── Seed acme.sh state ────────────────────────────────────────────────────────
-log "Checking acme.sh state at ${ACME_STATE}..."
-if [[ ! -d "${ACME_STATE}/dnsapi" ]]; then
-    log "  First run – seeding acme.sh state from image..."
-    rm -rf "${ACME_STATE}"
-    cp -r "${ACME_SEED}/." "${ACME_STATE}/"
-    log "  Seeded: $(ls "${ACME_STATE}/dnsapi/" | wc -l | tr -d ' ') dnsapi scripts"
-else
-    log "  State present. Refreshing dnsapi scripts from image..."
-    cp -r "${ACME_SEED}/dnsapi/." "${ACME_STATE}/dnsapi/"
-fi
-# Patch acme.sh and all plugin scripts to use bash.
-# Covers the main binary, dnsapi/, deploy/, and notify/ scripts.
-# Runs on every start so existing volumes are fixed automatically.
-sed -i '1s|#!/usr/bin/env sh|#!/usr/bin/env bash|' "${ACME_STATE}/acme.sh" 2>/dev/null || true
-find "${ACME_STATE}/dnsapi" "${ACME_STATE}/deploy" "${ACME_STATE}/notify" \
-    -name '*.sh' \
-    -exec sed -i '1s|#!/usr/bin/env sh|#!/usr/bin/env bash|' {} \; 2>/dev/null || true
-log "  acme.sh shebang verified: $(head -1 ${ACME_STATE}/acme.sh)"
-
-if [[ ! -L /root/.acme.sh ]]; then
-    rm -rf /root/.acme.sh
-    ln -sfn "${ACME_STATE}" /root/.acme.sh
-    log "  Symlink created: /root/.acme.sh -> ${ACME_STATE}"
-else
-    log "  Symlink in place: /root/.acme.sh -> $(readlink /root/.acme.sh)"
-fi
+log "lego    : $LEGO_VER"
+status_write "INFO" "STARTUP" "Container started – lego=${LEGO_VER}"
 
 # ── Migrate .env → servers.json (backwards compatibility) ─────────────────────
 log "Checking server configuration..."
@@ -182,7 +150,7 @@ if output:
             [[ -f "${CERT_DIR}/${DOMAIN}.${ext}" ]] \
                 && mv "${CERT_DIR}/${DOMAIN}.${ext}" "${SERVER_CERT_DIR}/" || true
         done
-        # Move acme.sh state dirs
+        # Move acme.sh state dirs so the per-server cleanup below can remove them
         [[ -d "${CERT_DIR}/${DOMAIN}" ]]     && mv "${CERT_DIR}/${DOMAIN}"     "${SERVER_CERT_DIR}/" || true
         [[ -d "${CERT_DIR}/${DOMAIN}_ecc" ]] && mv "${CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/" || true
         # Seed per-server logs from global copies (status.log must be copied
@@ -222,18 +190,11 @@ if output:
         continue
     fi
 
-    # Register ACME account (idempotent — safe to call even if already registered)
-    log "Registering ACME account (${ACME_EMAIL}) with ${ACME_SERVER:-letsencrypt}..."
-    "$ACME_BIN" --register-account \
-        -m "$ACME_EMAIL" \
-        --server "${ACME_SERVER:-letsencrypt}" \
-        2>&1 | tee -a "$LOG" || true
-
     # Certificate state decision (use per-server directory)
     FLAT_ECC="${SERVER_CERT_DIR}/${DOMAIN}.ecc.cer"
     FLAT_RSA="${SERVER_CERT_DIR}/${DOMAIN}.rsa.cer"
-    ACME_ECC_CERT="${SERVER_CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
-    ACME_RSA_CERT="${SERVER_CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
+    LEGO_ECC_CERT="${SERVER_CERT_DIR}/lego-ecc/certificates/${DOMAIN}.crt"
+    LEGO_RSA_CERT="${SERVER_CERT_DIR}/lego-rsa/certificates/${DOMAIN}.crt"
 
     # Determine which cert types are expected for this server
     NEED_ECC="${ISSUE_ECC:-true}"
@@ -244,10 +205,23 @@ if output:
     [[ "$NEED_ECC" == "true" && ! -f "$FLAT_ECC" ]] && FLAT_OK=false
     [[ "$NEED_RSA" == "true" && ! -f "$FLAT_RSA" ]] && FLAT_OK=false
 
-    # Check whether expected acme.sh state dirs are all present
-    ACME_STATE_OK=true
-    [[ "$NEED_ECC" == "true" && ! -f "$ACME_ECC_CERT" ]] && ACME_STATE_OK=false
-    [[ "$NEED_RSA" == "true" && ! -f "$ACME_RSA_CERT" ]] && ACME_STATE_OK=false
+    # Check whether Lego cert state is present (files written by lego run/renew)
+    LEGO_STATE_OK=true
+    [[ "$NEED_ECC" == "true" && ! -f "$LEGO_ECC_CERT" ]] && LEGO_STATE_OK=false
+    [[ "$NEED_RSA" == "true" && ! -f "$LEGO_RSA_CERT" ]] && LEGO_STATE_OK=false
+
+    # ── Remove legacy acme.sh per-cert state dirs (one-time, post-upgrade) ───────
+    # Guard: only run when certs are already present (flat or Lego state) so this
+    # never fires on a first-run container that hasn't issued any certs yet.
+    if [[ "$FLAT_OK" == "true" || "$LEGO_STATE_OK" == "true" ]]; then
+        for legacy_dir in "${SERVER_CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/${DOMAIN}"; do
+            if [[ -d "$legacy_dir" ]]; then
+                rm -rf "$legacy_dir"
+                log "  Removed legacy acme.sh state: ${legacy_dir}"
+                status_write "INFO" "STARTUP" "Removed legacy acme.sh state dir: ${legacy_dir}"
+            fi
+        done
+    fi
 
     # Primary cert for expiry reporting (ECC preferred, else RSA)
     PRIMARY_FLAT="$FLAT_ECC"
@@ -278,9 +252,9 @@ if output:
         fi
         status_write "OK" "CERT" "Cert(s) valid for ${DOMAIN} – expires ${PRIMARY_EXPIRY} (${DAYS_LEFT} days remaining)"
 
-    elif [[ "$ACME_STATE_OK" == "true" ]]; then
-        log "acme.sh state present but flat files missing for ${DOMAIN} – running install only..."
-        status_write "INFO" "CERT" "Flat files missing for ${DOMAIN} – running install-cert (no re-issue needed)"
+    elif [[ "$LEGO_STATE_OK" == "true" ]]; then
+        log "Lego cert state present but flat files missing for ${DOMAIN} – running install only..."
+        status_write "INFO" "CERT" "Flat files missing for ${DOMAIN} – running install (no re-issue needed)"
         run_with_guard /opt/cppm/install_cert.sh || true
 
     else
@@ -289,6 +263,14 @@ if output:
         run_with_guard /opt/cppm/issue_cert.sh || true
     fi
 done
+
+# ── Remove legacy acme.sh shared state directory (one-time, post-upgrade) ────
+ACME_LEGACY_SHARED="${CERT_DIR}/.acme-state"
+if [[ -d "$ACME_LEGACY_SHARED" ]]; then
+    rm -rf "$ACME_LEGACY_SHARED"
+    log "Removed legacy acme.sh shared state: ${ACME_LEGACY_SHARED}"
+    status_write "INFO" "STARTUP" "Removed legacy acme.sh shared state dir"
+fi
 
 # Restore global STATUS_LOG so post-loop container-level messages go to the
 # right place regardless of how many servers were processed.

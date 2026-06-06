@@ -4,7 +4,8 @@
 #
 #   1. Verifies Docker and docker compose are available
 #   2. Creates the host directory for persistent storage
-#   3. Copies env-example → .env if .env does not already exist
+#   3. Copies docker-compose.override.yml.example → docker-compose.override.yml
+#      if an override file does not already exist
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -38,18 +39,20 @@ else
     ok "Created $CERT_DIR"
 fi
 
-# ── Create .env from env-example if needed ────────────────────────────────────
+# ── Create override file from template if needed ──────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -f "${SCRIPT_DIR}/.env" ]]; then
-    if [[ -f "${SCRIPT_DIR}/env-example" ]]; then
-        cp "${SCRIPT_DIR}/env-example" "${SCRIPT_DIR}/.env"
-        chmod 600 "${SCRIPT_DIR}/.env"
-        ok ".env created from env-example"
+OVERRIDE="${SCRIPT_DIR}/docker-compose.override.yml"
+TEMPLATE="${SCRIPT_DIR}/docker-compose.override.yml.example"
+
+if [[ ! -f "$OVERRIDE" ]]; then
+    if [[ -f "$TEMPLATE" ]]; then
+        cp "$TEMPLATE" "$OVERRIDE"
+        ok "docker-compose.override.yml created from template"
     else
-        fail "env-example not found in ${SCRIPT_DIR} – re-clone the repository."
+        fail "docker-compose.override.yml.example not found in ${SCRIPT_DIR} – re-clone the repository."
     fi
 else
-    ok ".env already exists."
+    ok "docker-compose.override.yml already exists."
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -57,22 +60,28 @@ echo ""
 echo "=============================================="
 ok "Host setup complete."
 echo ""
-echo "  Minimum required before building:"
-echo "    Review ${SCRIPT_DIR}/.env and set:"
-echo "      TZ                  – container timezone (default: UTC)"
-echo "      CPPM_CALLBACK_HOST  – Docker host LAN IP that ClearPass can reach"
-echo "      CPPM_CALLBACK_PORT  – callback port (default: 8765)"
-echo "      STATUS_PORT         – web UI port (default: 8080)"
+echo "  Optional: edit docker-compose.override.yml to customise your deployment."
+echo "  The defaults in docker-compose.yml work for most installations as-is."
 echo ""
-echo "  ClearPass server credentials and DNS provider configuration"
-echo "  are set up through the web UI after the container starts."
+echo "  Common overrides (all optional):"
+echo "    TZ                   – container timezone (default: UTC)"
+echo "    STATUS_PORT          – web UI port (default: 8080)"
+echo "    CPPM_CALLBACK_PORT   – PKCS12 callback port (default: 8765)"
+echo "    REQUIRE_AUTH_FOR_STATUS – require login for dashboard (default: false)"
+echo ""
+echo "  !! Changing ports requires editing TWO sections in the override file:"
+echo "     the environment section AND the ports section."
+echo "     See the comments inside docker-compose.override.yml for details."
+echo ""
+echo "  ClearPass server credentials, domain, and DNS provider are configured"
+echo "  through the web UI after the container starts — no file editing needed."
 echo ""
 echo "  Next steps:"
-echo "    1. nano ${SCRIPT_DIR}/.env"
+echo "    1. (Optional) nano ${SCRIPT_DIR}/docker-compose.override.yml"
 echo "    2. docker compose build --no-cache"
 echo "    3. docker compose up -d"
 echo "    4. docker compose logs -f"
-echo "    5. Open http://<docker-host>:\${STATUS_PORT:-8080}/ in a browser"
+echo "    5. Open http://<docker-host>:8080/ in a browser"
 echo "       – follow the Setup link to create the admin account"
 echo "       – go to Servers → Add Server to register your ClearPass server"
 echo "=============================================="

@@ -136,8 +136,12 @@ class AcmeShProvider(AcmeProvider):
         acme_server: str,
         cert_dir: str,
         key_types: list[str],
+        dns_provider: str,  # noqa: ARG002
+        dns_env: dict[str, str],  # noqa: ARG002
         log_file: str,
     ) -> IssueResult:
+        # dns_provider and dns_env accepted for interface compat; acme.sh stores
+        # DNS credentials in per-cert .conf files so they are not needed here.
         base_args = [
             "--renew",
             "--domain",    domain,
