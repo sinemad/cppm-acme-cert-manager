@@ -30,7 +30,7 @@ Two certificates are issued and maintained simultaneously:
 │  │ deploy_hook  │────────────────────►│  clearpass_upload.py         │  │
 │  │    .sh       │                     │  (pyclearpass SDK)            │  │
 │  └──────────────┘                     │                              │  │
-│                                       │  Step 0: LE Trust List       │  │
+│                                       │  Step 0: ACME CA Trust List  │  │
 │                                       │  Step 1: PUT HTTPS(ECC) cert │  │
 │                                       │  Step 2: PUT RADIUS(RSA) cert│  │
 │                                       │  Step 3: Verify              │  │
@@ -91,6 +91,11 @@ and enter credentials when adding or editing a server in the web UI
 | AWS Route 53 | `route53` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | DigitalOcean | `digitalocean` | `DO_API_KEY` |
 | GoDaddy | `godaddy` | `GD_Key` + `GD_Secret` |
+| Infoblox | `infoblox` | `INFOBLOX_HOST` + `INFOBLOX_USERNAME` + `INFOBLOX_PASSWORD` |
+| RFC 2136 (nsupdate / AD DNS) | `rfc2136` | `RFC2136_NAMESERVER` + optional TSIG fields |
+
+For a full list of supported Lego DNS providers and their required env vars, see the [Lego DNS provider docs](https://go-acme.github.io/lego/dns/).
+
 ---
 
 ## Directory Structure
@@ -287,6 +292,8 @@ with `getpass` (not echoed).
 | **AWS Route 53** | Access Key ID + Secret Access Key — IAM policy needs `route53:ChangeResourceRecordSets`, `ListHostedZones`, `GetChange`, `ListResourceRecordSets` |
 | **DigitalOcean** | API Token with Write scope — generate at [cloud.digitalocean.com/account/api/tokens](https://cloud.digitalocean.com/account/api/tokens) |
 | **GoDaddy** | API Key + API Secret — create at [developer.godaddy.com/keys](https://developer.godaddy.com/keys) |
+| **Infoblox** | `INFOBLOX_HOST` (Grid Master), `INFOBLOX_USERNAME`, `INFOBLOX_PASSWORD`, plus optionally `INFOBLOX_SSL_VERIFY`, `INFOBLOX_VIEW`, `INFOBLOX_WAPI_VERSION` |
+| **RFC 2136** | `RFC2136_NAMESERVER` (IP:port of authoritative server) — TSIG optional: `RFC2136_TSIG_KEY`, `RFC2136_TSIG_SECRET`, `RFC2136_TSIG_ALGORITHM`, `RFC2136_DNS_TIMEOUT` |
 
 > **Callback Host:** set this to the Docker host's LAN IP that ClearPass can
 > route to — not the container IP. Find it with:

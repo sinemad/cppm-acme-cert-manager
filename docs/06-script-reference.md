@@ -53,7 +53,7 @@ Delegates to `acme_cli.py install` (which calls `LegoProvider.install_cert()`).
 Copies the four flat cert files from Lego's internal state directories
 (`lego-ecc/` and `lego-rsa/`) to the server cert directory. Verifies all eight
 files (four per key type) are present, then calls `deploy_hook.sh`. No DNS
-challenge, no Let's Encrypt contact.
+challenge, no ACME CA contact.
 
 ---
 
@@ -363,6 +363,8 @@ Translates the `dns_provider` value from `servers.json` to the Lego plugin name:
 | `route53`, `aws`, `r53` | `route53` |
 | `digitalocean`, `do` | `digitalocean` |
 | `godaddy`, `gd` | `godaddy` |
+| `infoblox` | `infoblox` |
+| `rfc2136` | `rfc2136` |
 | anything else | passthrough as-is |
 
 ### Credential remapping
@@ -380,6 +382,8 @@ compatibility. `_map_dns_env()` translates them to Lego names at runtime:
 | `GD_Secret` | `GODADDY_API_SECRET` |
 | `AWS_DEFAULT_REGION` | `AWS_REGION` |
 | `CF_Zone_ID`, `CF_Account_ID` | dropped (not used by Lego) |
+| `INFOBLOX_*` keys | passed through as-is (Lego uses these names natively) |
+| `RFC2136_*` keys | passed through as-is (Lego uses these names natively) |
 
 ### Behaviour notes
 
@@ -393,6 +397,25 @@ compatibility. `_map_dns_env()` translates them to Lego names at runtime:
 - **`DEBUG` env var** — popped from subprocess environment before each call.
 - **Subprocess timeout** — defaults to 600 seconds; `TimeoutExpired` is caught
   and re-raised as `AcmeError`.
+
+### Logging
+
+`lego_provider` logs at `INFO` and `DEBUG` via Python's `logging` module
+(logger name `lego_provider`). Controlled by `LOG_LEVEL` in
+`docker-compose.override.yml`.
+
+| Level | Message pattern | When |
+|---|---|---|
+| `INFO` | `issue_cert: domain=… ca=… plugin=… types=… force=…` | Start of each issuance |
+| `DEBUG` | `issue_cert: mapped dns env keys: […]` | Credential keys passed to Lego |
+| `INFO` | `lego run (ECC/RSA) succeeded for <domain>` | Per-key-type success |
+| `ERROR` | `lego run (ECC/RSA) failed (exit N) for <domain>` | Per-key-type failure |
+| `INFO` | `renew_cert: domain=… ca=… plugin=… types=…` | Start of each renewal check |
+| `INFO` | `lego renew (ECC/RSA) for <domain>: renewed/not due (mtime before=… after=…)` | Per-key-type renewal result |
+| `ERROR` | `lego renew (ECC/RSA) failed (exit N) for <domain>` | Per-key-type failure |
+| `INFO` | `install_cert: domain=… types=…` | Start of cert install |
+| `INFO` | `install_cert: installed ECC/RSA cert files for <domain>` | Per-key-type install |
+| `DEBUG` | `lego <args>` | Every Lego subprocess invocation |
 
 ### acme_cli.py
 
@@ -514,7 +537,7 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 |---|---|
 | `DOMAIN` | FQDN for the certificate (e.g. `cppm.example.com`) |
 | `ACME_EMAIL` | ACME account contact email |
-| `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass` |
+| `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass`, `buypass_test`, or any ACME directory URL for a custom/private CA |
 | `DNS_PROVIDER` | Lego DNS plugin selector (e.g. `cloudflare`, `porkbun`, `route53`) |
 | `CPPM_HOST` | ClearPass hostname or IP |
 | `CPPM_CLIENT_ID` | ClearPass API client ID |

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# trust_check.sh – Periodic Let's Encrypt trust list verification
+# trust_check.sh – Periodic ACME CA trust list verification
 #
 # Called by supercronic on a weekly schedule (Sunday 03:00 container-local time).
-# Independently verifies that all required Let's Encrypt CA and intermediate CA
+# Independently verifies that all required ACME CA and intermediate CA
 # certificates are present in the ClearPass trust list with EAP + Others enabled,
 # and uploads any that are missing — without issuing or renewing certificates.
 #
@@ -92,11 +92,21 @@ if output:
         continue
     fi
 
+    ACME_CA_LABEL="${ACME_SERVER:-letsencrypt}"
+    case "$ACME_CA_LABEL" in
+        letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
+        letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
+        zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
+        buypass)          ACME_CA_LABEL="Buypass" ;;
+        buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
+        http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
+    esac
+
     log "=== Trust List Verification ==="
     log "  Domain   : ${DOMAIN}"
     log "  ClearPass: ${CPPM_HOST:-NOT SET}"
     log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
-    log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+    log "  ACME CA  : ${ACME_CA_LABEL}"
     log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 
     unset DEBUG

@@ -7,9 +7,9 @@
 grep FAILED /opt/cppm-certs/status.log
 
 # 2. Check the detailed logs
-tail -50 /opt/cppm-certs/.logs/startup.log   # startup issues
-tail -50 /opt/cppm-certs/.logs/renewal.log   # issuance / renewal
-tail -50 /opt/cppm-certs/.logs/upload.log    # ClearPass API issues
+tail -50 /opt/cppm-certs/.logs/startup.log                              # startup issues
+tail -50 /opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log             # issuance / renewal
+tail -50 /opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log              # ClearPass API issues
 
 # 3. Check Docker container state
 docker compose ps
@@ -75,6 +75,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 | Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | DigitalOcean | `DO_API_KEY` |
 | GoDaddy | `GD_Key` + `GD_Secret` |
+| Infoblox | `INFOBLOX_HOST` + `INFOBLOX_USERNAME` + `INFOBLOX_PASSWORD` |
+| RFC 2136 | `RFC2136_NAMESERVER` (TSIG fields optional) |
 
 ---
 
@@ -91,6 +93,14 @@ Common causes by provider:
 - **Route53:** IAM policy missing `route53:GetChange` — Lego cannot poll for
   propagation without it.
 - **DigitalOcean:** Token has read-only scope — must be write scope.
+- **Infoblox:** Check that `INFOBLOX_HOST` is the Grid Master address (not a
+  Grid Member), and that the user account has DNS record write permission on the
+  target view. Set `INFOBLOX_SSL_VERIFY=false` if the Grid Master uses a
+  self-signed certificate.
+- **RFC 2136:** Verify the nameserver address and port are reachable from the
+  container. If TSIG is configured, confirm the key name, secret, and algorithm
+  match exactly what is configured on the DNS server. Unsigned updates
+  (no TSIG) work if the nameserver allows them from the container IP.
 
 Check the renewal log for the full Lego error:
 ```bash
@@ -149,7 +159,7 @@ Fix: in CPPM Admin UI, verify the profile attached to your API client includes:
 **Cause:** CPPM requires Basic Constraints: CA=TRUE for trust list entries.
 End-entity (leaf) certificates cannot be added to the trust list.
 
-The bundled LE PEM files in the image are all CA/intermediate certs. If a chain
+The bundled ACME CA PEM files in the image are all CA/intermediate certs. If a chain
 cert parsed from `.ca.cer` fails this check, add it manually:
 
 1. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
@@ -263,22 +273,28 @@ If mismatched, set `FORCE_RENEW: "true"` in `docker-compose.override.yml` and re
 
 ## EAP authentication fails after cert install
 
-**Cause:** A Let's Encrypt CA cert is not in the trust list with EAP enabled.
+**Cause:** An ACME CA cert is not in the trust list with EAP enabled.
 
 ```bash
 # Force a re-run of the trust list pre-flight
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
-tail -f /opt/cppm-certs/status.log
+tail -f /opt/cppm-certs/<cppm_host>/status.log
 ```
 
 Check the `TRUST` status lines. If any show `FAILED`, add the cert manually:
 
-1. Copy the missing cert from the container:
+1. Copy the missing cert from the container (example for Let's Encrypt):
    ```bash
    docker cp cppm-acme-cert-manager:/opt/cppm/acme-ca-certs/isrg-root-x1.pem .
    ```
 2. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
 3. Set `cert_usage` to include **EAP** and **Others** → Save.
+
+> **Custom / Private CA:** If using a custom ACME CA, the bundled CA PEM files
+> will not include your private CA chain. Add the root and intermediate certs
+> manually to the CPPM trust list, then configure trust exclusions in the web UI
+> (**Servers → Edit → Trust Exclusions**) to prevent the tool from attempting to
+> manage certs it does not have in its bundle.
 
 ---
 

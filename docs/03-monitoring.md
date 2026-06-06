@@ -129,7 +129,7 @@ Non-authenticated users see only the Activity Log tab:
 
 **Activity Log** — one line per event, newest first, colour-coded by level (`OK` green, `WARN` yellow, `FAILED` red, `INFO` grey). Covers cert issuance/renewal, ClearPass upload outcomes, and health check state changes (CPPM, DNS, Callback).
 
-**ACME Renewal** — full Lego output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA, and callback URL.
+**ACME Renewal** — full Lego output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA (friendly name or Custom CA URL), and callback URL.
 
 ![ACME Renewal log tab](ui-server-logs-renewal.png)
 
@@ -175,6 +175,8 @@ credentials are valid.
 | DigitalOcean | `GET /v2/account` with token |
 | GoDaddy | `GET /v1/domains` with key:secret |
 | Route 53 | TCP reachability to `route53.amazonaws.com` |
+| Infoblox | TCP reachability to `INFOBLOX_HOST` on port 443 |
+| RFC 2136 | TCP reachability to `RFC2136_NAMESERVER` on the configured port |
 
 ---
 
@@ -206,8 +208,11 @@ Click **+ Add Server** and fill in all fields.
 |---|---|
 | **Identity** | Friendly label |
 | **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL |
-| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
+| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass / Custom) |
 | **DNS Provider** | Provider selector; credential fields update dynamically for the selected provider |
+
+Selecting **Custom / Private CA** reveals a URL input field and a warning
+banner — enter the full ACME directory URL for your internal CA.
 
 #### DNS provider credential fields
 
@@ -218,6 +223,8 @@ Click **+ Add Server** and fill in all fields.
 | AWS Route 53 | Access Key ID + Secret Access Key + Region |
 | DigitalOcean | API Token |
 | GoDaddy | API Key + API Secret |
+| Infoblox | Grid Master Host, Username, Password, DNS View (optional), WAPI Version (optional), SSL Verify |
+| RFC 2136 | Nameserver, TSIG Key Name (optional), TSIG Secret (optional), TSIG Algorithm (optional), DNS Timeout (optional) |
 
 Only the credential fields for the active provider are submitted — all others
 are disabled in the browser before the form is sent.
@@ -293,6 +300,7 @@ for that server:
 | Let's Encrypt / Let's Encrypt Staging | **Let's Encrypt CA Certificate Exclusion** — ISRG Root X1/X2, R10–R14, E5–E10 |
 | ZeroSSL | **ZeroSSL — Sectigo Chain CA Certificate Exclusion** — ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
 | Buypass | **Buypass CA Certificate Exclusion** — Buypass Go SSL, Buypass Class 2 Root CA |
+| Custom / Private CA | No preset sections — use the **Active Exclusions** textarea to add CN patterns manually, or leave empty to have the tool skip trust list management for this server |
 
 Check a box to exclude that certificate. The label text strikes through to
 confirm the selection. Unchecking re-enables management for that certificate.

@@ -127,8 +127,8 @@ acme_provider.py          ← Abstract base class: AcmeProvider
                                Shared types: IssueResult, KeyTypeResult, AcmeError
         │
         ├── lego_provider.py      ← LegoProvider (default): wraps Lego CLI subprocess calls
-        │                              DNS plugin mapping (cloudflare, porkbun, route53, …)
-        │                              Credential remapping (CF_Token → CF_DNS_API_TOKEN, etc.)
+        │                              DNS plugin mapping (cloudflare, porkbun, route53, infoblox, rfc2136, …)
+        │                              Credential remapping (CF_Token → CF_DNS_API_TOKEN, etc.; Infoblox/RFC 2136 pass-through)
         │                              mtime-based renewal detection
         │
         └── acme_sh_provider.py   ← AcmeShProvider (legacy): wraps acme.sh CLI
@@ -330,7 +330,7 @@ image and is recreated on every `docker compose build`.
 | Path in image | Contents | Source |
 |---|---|---|
 | `/usr/local/bin/lego` | Lego binary (static) | GitHub release tarball (curl at build time) |
-| `/opt/cppm/acme-ca-certs/` | Let's Encrypt CA PEM files + `trust-exclusions.conf` default | letsencrypt.org (curl at build time) |
+| `/opt/cppm/acme-ca-certs/` | ACME CA PEM files (Let's Encrypt, ZeroSSL, Buypass) + `trust-exclusions.conf` default | CA websites (curl at build time) |
 | `/opt/cppm/` | All management scripts | COPY from project directory |
 | Python packages | pyclearpass, requests, urllib3 | pip at build time |
 

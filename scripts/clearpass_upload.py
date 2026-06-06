@@ -393,7 +393,7 @@ def ensure_letsencrypt_chain_trusted(
             if fp not in required:
                 cn = (c.subject.split("CN=")[-1].split(",")[0].strip()
                       if "CN=" in c.subject else c.subject[:40])
-                c.label = f"LE chain: {cn}"
+                c.label = f"ACME chain: {cn}"
                 required[fp] = c
                 log.info("  Extra chain cert (not in bundle): %s", c.label)
     if not seen_paths:

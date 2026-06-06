@@ -8,7 +8,7 @@ Run these steps once on the host before the container is ever started.
 |---|---|
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Linux host | Ubuntu 22.04 LTS recommended |
-| DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, or GoDaddy) |
+| DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, GoDaddy, Infoblox, RFC 2136, or any Lego-supported provider) |
 | CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13, SDK valid for all) |
 | Outbound HTTPS | Container needs access to your DNS provider's API and your ACME CA |
 
@@ -159,7 +159,7 @@ All ClearPass server configuration — credentials, DNS provider, domain, and AC
 |---|---|
 | **Identity** | Friendly label (e.g. `Production ClearPass`) |
 | **ClearPass** | Host/IP, Client ID, Client Secret (from Step 3), Cert Passphrase, Callback Host, Callback Port, Verify SSL |
-| **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority |
+| **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority (Let's Encrypt / ZeroSSL / Buypass / Custom) |
 | **DNS Provider** | Provider selector + credentials (see below) |
 
 4. Click **Add Server** to save.
@@ -175,6 +175,8 @@ The configuration is stored in `/opt/cppm-certs/servers.json` (chmod 600).
 | **AWS Route 53** | Access Key ID + Secret Access Key + Region |
 | **DigitalOcean** | API Token |
 | **GoDaddy** | API Key + API Secret |
+| **Infoblox** | `INFOBLOX_HOST` (Grid Master FQDN/IP), `INFOBLOX_USERNAME`, `INFOBLOX_PASSWORD`; optionally `INFOBLOX_SSL_VERIFY` (`true`/`false`), `INFOBLOX_VIEW` (DNS view name), `INFOBLOX_WAPI_VERSION` (e.g. `2.5`) |
+| **RFC 2136** | `RFC2136_NAMESERVER` (IP or IP:port of authoritative server); TSIG optional: `RFC2136_TSIG_KEY` (key name), `RFC2136_TSIG_SECRET` (base64 secret), `RFC2136_TSIG_ALGORITHM` (e.g. `hmac-sha256`), `RFC2136_DNS_TIMEOUT` |
 
 #### Obtaining Cloudflare credentials
 
@@ -217,11 +219,25 @@ Generate a **Personal Access Token** with **Write** scope at
 Create a Production API key at the
 [GoDaddy Developer Portal](https://developer.godaddy.com/keys).
 
-#### Other / custom providers
+#### Custom / Private ACME CA
 
-The five providers listed above are natively supported. For other DNS providers,
-refer to the [Lego DNS provider documentation](https://go-acme.github.io/lego/dns/)
-for supported providers and their required environment variable names.
+In addition to the standard public CAs (Let's Encrypt, ZeroSSL, Buypass), the
+**Certificate Authority** dropdown includes a **Custom / Private CA** option.
+Select it and enter any ACME directory URL (e.g. a Step-CA, EJBCA, or HashiCorp
+Vault PKI endpoint). The URL is stored directly as `ACME_SERVER` and passed to
+Lego at issuance and renewal time.
+
+> **Note:** A custom CA must implement the ACME protocol (RFC 8555). The tool
+> does not manage trust for custom CA certs — ensure the CA chain is already
+> trusted by CPPM before upload (or add it manually to the ClearPass trust list).
+
+#### Other / custom DNS providers
+
+The providers listed above have dedicated UI forms. For any other Lego-supported
+DNS provider, set `DNS_PROVIDER` to the Lego plugin name and supply the required
+env vars via `cppm-servers add` or `cppm-servers edit`. Refer to the
+[Lego DNS provider documentation](https://go-acme.github.io/lego/dns/) for the
+full list of providers and their required environment variable names.
 
 ### CLI alternative (no browser needed)
 
