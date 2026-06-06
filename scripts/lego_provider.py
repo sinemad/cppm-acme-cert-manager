@@ -93,6 +93,8 @@ class LegoProvider(AcmeProvider):
         env.pop("DEBUG", None)
         try:
             return subprocess.run([_LEGO_BIN, *args], env=env, timeout=timeout)
+        except FileNotFoundError as exc:
+            raise AcmeError(f"lego binary not found at {_LEGO_BIN}") from exc
         except subprocess.TimeoutExpired as exc:
             raise AcmeError(
                 f"lego timed out after {timeout}s ({args[0] if args else '?'})"
@@ -232,6 +234,10 @@ class LegoProvider(AcmeProvider):
             if not os.path.exists(crt_file):
                 raise AcmeError(
                     f"Lego {kt.upper()} cert not found at {crt_file} – run issue_cert first"
+                )
+            if not os.path.exists(key_file_src):
+                raise AcmeError(
+                    f"Lego {kt.upper()} key not found at {key_file_src} – run issue_cert first"
                 )
 
             # Full chain (leaf + intermediates) → .fullchain.cer

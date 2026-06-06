@@ -74,15 +74,27 @@ if output:
     ISSUE_ECC="${ISSUE_ECC:-true}"
     ISSUE_RSA="${ISSUE_RSA:-true}"
 
-    # If flat cert files are missing, re-issue rather than renew
+    # If flat cert files are missing, try install-only first (Lego state may already
+    # exist from a previous run that crashed before install), then fall back to full
+    # re-issue if install fails (no Lego state at all).
     NEEDS_ISSUE=false
     [[ "$ISSUE_ECC" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.ecc.cer" ]] && NEEDS_ISSUE=true
     [[ "$ISSUE_RSA" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.rsa.cer" ]] && NEEDS_ISSUE=true
     if [[ "$NEEDS_ISSUE" == "true" ]]; then
-        log "Flat cert(s) missing for ${DOMAIN} – delegating to issue_cert.sh..."
-        status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – re-running issuance"
-        /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
-            err "issue_cert.sh failed for ${DOMAIN} – check acme_renewal.log"
+        log "Flat cert(s) missing for ${DOMAIN} – attempting install from Lego state first..."
+        status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – attempting install"
+        INSTALL_ONLY_EXIT=0
+        python3 /opt/cppm/acme_cli.py install 2>&1 | tee -a "$LOG" 2>/dev/null || INSTALL_ONLY_EXIT=$?
+        if [[ $INSTALL_ONLY_EXIT -eq 0 ]]; then
+            log "Install-only succeeded for ${DOMAIN} – triggering upload..."
+            /opt/cppm/deploy_hook.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "deploy_hook.sh failed for ${DOMAIN} – check logs"
+        else
+            log "Install-only failed for ${DOMAIN} – falling back to full issuance..."
+            status_write "WARN" "RENEW" "Lego state missing for ${DOMAIN} – re-running full issuance"
+            /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "issue_cert.sh failed for ${DOMAIN} – check acme_renewal.log"
+        fi
         continue
     fi
 
