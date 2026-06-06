@@ -589,6 +589,10 @@ _DNS_CRED_FIELDS: dict = {
     "route53":      ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"],
     "digitalocean": ["DO_API_KEY"],
     "godaddy":      ["GD_Key", "GD_Secret"],
+    "infoblox":     ["INFOBLOX_HOST", "INFOBLOX_USERNAME", "INFOBLOX_PASSWORD",
+                     "INFOBLOX_SSL_VERIFY", "INFOBLOX_VIEW", "INFOBLOX_WAPI_VERSION"],
+    "rfc2136":      ["RFC2136_NAMESERVER", "RFC2136_TSIG_KEY", "RFC2136_TSIG_SECRET",
+                     "RFC2136_TSIG_ALGORITHM", "RFC2136_DNS_TIMEOUT"],
 }
 
 
@@ -596,6 +600,8 @@ def _parse_server_form(f: dict) -> dict:
     """Convert POST form data into a server config dict."""
     provider  = f.get("dns_provider", "cloudflare")
     cred_keys = _DNS_CRED_FIELDS.get(provider, [])
+    acme_sel  = f.get("acme_server", "letsencrypt")
+    acme_server = f.get("acme_server_url", "").strip() if acme_sel == "custom" else acme_sel
     return {
         "label":                f.get("label", "").strip(),
         "cppm_host":            f.get("cppm_host", "").strip(),
@@ -607,7 +613,7 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
         "domain":               f.get("domain", "").strip(),
         "acme_email":           f.get("acme_email", "").strip(),
-        "acme_server":          f.get("acme_server", "letsencrypt"),
+        "acme_server":          acme_server or "letsencrypt",
         "dns_provider":         provider,
         "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
         "trust_exclusions":     [
@@ -1368,7 +1374,10 @@ def _settings_form_page(server: dict = None, error: str = "",
     def sel(v, t):    return " selected" if v == t else ""
     def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
 
-    acme_srv   = s.get("acme_server", "letsencrypt")
+    acme_srv_raw = s.get("acme_server", "letsencrypt")
+    acme_is_custom = acme_srv_raw.startswith("http")
+    acme_srv   = "custom" if acme_is_custom else acme_srv_raw
+    acme_custom_url = _esc(acme_srv_raw) if acme_is_custom else ""
     verify     = " checked" if s.get("cppm_verify_ssl") else ""
     cert_types = s.get("cert_types") or ["ecc", "rsa"]
     chk_ecc    = " checked" if "ecc" in cert_types else ""
@@ -1463,13 +1472,29 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>
       <div class="field">
         <label>Certificate Authority</label>
-        <select name="acme_server">
+        <select name="acme_server" id="acme_server" onchange="switchAcme(this.value)">
           <option value="letsencrypt"{sel(acme_srv,'letsencrypt')}>Let&apos;s Encrypt</option>
           <option value="letsencrypt_test"{sel(acme_srv,'letsencrypt_test')}>Let&apos;s Encrypt (Staging)</option>
           <option value="zerossl"{sel(acme_srv,'zerossl')}>ZeroSSL</option>
           <option value="buypass"{sel(acme_srv,'buypass')}>Buypass</option>
           <option value="buypass_test"{sel(acme_srv,'buypass_test')}>Buypass (Staging)</option>
+          <option value="custom"{sel(acme_srv,'custom')}>Custom / Private CA</option>
         </select>
+      </div>
+      <div id="acme-custom-section" style="{'display:none' if acme_srv != 'custom' else ''}">
+        <div class="flash flash-warn" style="margin-bottom:0.75rem">
+          <strong>Private ACME server required.</strong>
+          A private or internal ACME server (e.g. Step-CA, EJBCA, HashiCorp Vault PKI, or
+          AD&nbsp;CS with ACME) must be running and reachable by this container before
+          certificates can be issued. The domain must resolve from the CA&apos;s perspective.
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>ACME Directory URL</label>
+          <input type="url" name="acme_server_url" id="acme_server_url"
+                 value="{acme_custom_url}"
+                 placeholder="https://ca.corp.local/acme/acme/directory"
+                 autocomplete="off">
+        </div>
       </div>
       <div class="field" style="margin-bottom:0">
         <label>Certificate Types</label>
@@ -1497,6 +1522,8 @@ def _settings_form_page(server: dict = None, error: str = "",
           <option value="route53"{sel(s.get('dns_provider',''),'route53')}>AWS Route 53</option>
           <option value="digitalocean"{sel(s.get('dns_provider',''),'digitalocean')}>DigitalOcean</option>
           <option value="godaddy"{sel(s.get('dns_provider',''),'godaddy')}>GoDaddy</option>
+          <option value="infoblox"{sel(s.get('dns_provider',''),'infoblox')}>Infoblox</option>
+          <option value="rfc2136"{sel(s.get('dns_provider',''),'rfc2136')}>RFC 2136 (nsupdate / AD DNS)</option>
         </select>
       </div>
 
@@ -1588,6 +1615,77 @@ def _settings_form_page(server: dict = None, error: str = "",
           </div>
         </div>
       </div>
+
+      <div id="dns-infoblox" class="dns-section"{vis('infoblox')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Grid Master Host <span class="hint">(hostname or IP)</span></label>
+            <input type="text" name="INFOBLOX_HOST" value="{cv('INFOBLOX_HOST')}"
+                   autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Username</label>
+            <input type="text" name="INFOBLOX_USERNAME" value="{cv('INFOBLOX_USERNAME')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>Password</label>
+            <input type="password" name="INFOBLOX_PASSWORD" value="{cv('INFOBLOX_PASSWORD')}"
+                   autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>DNS View <span class="hint">(default: default)</span></label>
+            <input type="text" name="INFOBLOX_VIEW" value="{cv('INFOBLOX_VIEW', 'default')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col" style="margin-bottom:0">
+          <div class="field">
+            <label>WAPI Version <span class="hint">(default: 2.5)</span></label>
+            <input type="text" name="INFOBLOX_WAPI_VERSION"
+                   value="{cv('INFOBLOX_WAPI_VERSION', '2.5')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>SSL Verify <span class="hint">(true/false)</span></label>
+            <input type="text" name="INFOBLOX_SSL_VERIFY"
+                   value="{cv('INFOBLOX_SSL_VERIFY', 'true')}" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div id="dns-rfc2136" class="dns-section"{vis('rfc2136')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Nameserver <span class="hint">(host or host:port)</span></label>
+            <input type="text" name="RFC2136_NAMESERVER" value="{cv('RFC2136_NAMESERVER')}"
+                   autocomplete="off">
+          </div>
+          <div class="field">
+            <label>TSIG Key Name <span class="hint">(leave blank for unsigned updates)</span></label>
+            <input type="text" name="RFC2136_TSIG_KEY" value="{cv('RFC2136_TSIG_KEY')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>TSIG Secret</label>
+            <input type="password" name="RFC2136_TSIG_SECRET"
+                   value="{cv('RFC2136_TSIG_SECRET')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>TSIG Algorithm <span class="hint">(default: hmac-md5)</span></label>
+            <input type="text" name="RFC2136_TSIG_ALGORITHM"
+                   value="{cv('RFC2136_TSIG_ALGORITHM', 'hmac-md5')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>DNS Timeout <span class="hint">(seconds, default: 10)</span></label>
+          <input type="text" name="RFC2136_DNS_TIMEOUT"
+                 value="{cv('RFC2136_DNS_TIMEOUT', '10')}" autocomplete="off">
+        </div>
+      </div>
     </div>
 
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
@@ -1609,8 +1707,17 @@ function switchDns(val) {
     });
   });
 }
-(function() { switchDns(document.getElementById('dns_provider').value); })();
-
+function switchAcme(val) {
+  var sec = document.getElementById('acme-custom-section');
+  var urlInput = document.getElementById('acme_server_url');
+  var isCustom = val === 'custom';
+  sec.style.display = isCustom ? '' : 'none';
+  urlInput.required = isCustom;
+}
+(function() {
+  switchDns(document.getElementById('dns_provider').value);
+  switchAcme(document.getElementById('acme_server').value);
+})();
 </script>"""
 
     return _base(title, form + script,
@@ -1624,6 +1731,7 @@ function switchDns(val) {
 _DNS_DISPLAY = {
     "cloudflare": "Cloudflare", "porkbun": "Porkbun",
     "route53": "AWS Route 53", "digitalocean": "DigitalOcean", "godaddy": "GoDaddy",
+    "infoblox": "Infoblox", "rfc2136": "RFC 2136",
 }
 _ACME_DISPLAY = {
     "letsencrypt":      "Let's Encrypt",
@@ -1684,7 +1792,8 @@ def _overview_rows(servers: list) -> str:
         sid  = _esc(str(s.get("id", "")))
         host = _esc(s.get("cppm_host", ""))
         dns  = _esc(_DNS_DISPLAY.get(s.get("dns_provider", ""), s.get("dns_provider", "")))
-        acme = _esc(_ACME_DISPLAY.get(s.get("acme_server", ""), s.get("acme_server", "")))
+        _acme_raw = s.get("acme_server", "")
+        acme = _esc(_ACME_DISPLAY.get(_acme_raw, "Custom CA" if _acme_raw.startswith("http") else _acme_raw))
         ecc  = s.get("certs", {}).get("ecc", {"exists": False})
         rsa  = s.get("certs", {}).get("rsa", {"exists": False})
         raw_sid = str(s.get("id", ""))
@@ -1725,8 +1834,8 @@ var HEALTH_MS  = 300000;
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function cls(d){if(d==null)return'none';if(d>30)return'ok';if(d>14)return'warn';return'danger';}
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
-function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy'};return m[p]||p||'—';}
-function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||s||'—';}
+function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p||'—';}
+function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s)||'—';}
 
 function renderMiniCert(cert,label,svc){
   var svcHtml=svc?'<div class="mini-svc">'+esc(svc)+'</div>':'';
@@ -1932,8 +2041,8 @@ function cls(d) {
 }
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function fmtDT(iso){if(!iso)return'—';try{return new Date(iso).toLocaleString('en-US',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});}catch(e){return iso;}}
-function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy'};return m[p]||p;}
-function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||s;}
+function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p;}
+function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s);}
 function lvlBadge(l){var c={OK:'lvl-ok',WARN:'lvl-warn',FAILED:'lvl-failed',INFO:'lvl-info'}[l]||'lvl-info';return'<span class="lvl '+c+'">'+esc(l)+'</span>';}
 function keyLabel(cert){if(!cert.key_type)return'—';if(cert.key_type==='ECDSA'&&cert.key_curve)return cert.key_type+' ('+cert.key_curve+')';if(cert.key_size)return cert.key_type+' '+cert.key_size+'-bit';return cert.key_type;}
 

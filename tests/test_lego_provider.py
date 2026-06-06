@@ -89,6 +89,8 @@ class TestDnsPlugin:
         ("do",         "digitalocean"),
         ("godaddy",    "godaddy"),
         ("gd",         "godaddy"),
+        ("infoblox",   "infoblox"),
+        ("rfc2136",    "rfc2136"),
     ])
     def test_known_alias_maps_correctly(self, alias, expected):
         assert self.p._dns_plugin(alias) == expected

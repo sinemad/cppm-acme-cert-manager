@@ -31,6 +31,8 @@ _DNS_PLUGIN_MAP: dict[str, str] = {
     "do":           "digitalocean",
     "godaddy":      "godaddy",
     "gd":           "godaddy",
+    "infoblox":     "infoblox",
+    "rfc2136":      "rfc2136",
 }
 
 # Credential env var names as stored in servers.json (acme.sh convention) → Lego names.
@@ -42,6 +44,8 @@ _DNS_ENV_REMAP: dict[str, str] = {
     "GD_Key":             "GODADDY_API_KEY",
     "GD_Secret":          "GODADDY_API_SECRET",
     "AWS_DEFAULT_REGION": "AWS_REGION",
+    # Infoblox — stored under acme.sh-style names; Lego uses the same names natively.
+    # RFC 2136 — stored and passed through as-is (Lego names match).
 }
 
 # Env vars that acme.sh uses but Lego cloudflare plugin does not need.
