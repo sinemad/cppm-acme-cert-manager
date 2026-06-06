@@ -20,8 +20,6 @@ import datetime
 import json
 import logging
 import os
-import re
-import subprocess
 import sys
 import threading
 import time
@@ -618,11 +616,6 @@ def _parse_server_form(f: dict) -> dict:
         "acme_server":          acme_server or "letsencrypt",
         "dns_provider":         provider,
         "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
-        "trust_exclusions":     [
-            line.strip()
-            for line in f.get("trust_exclusions", "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ],
         "cert_types": [t for t in ("ecc", "rsa")
                        if f.get(f"issue_{t}") == "true"] or ["ecc", "rsa"],
     }
@@ -645,7 +638,6 @@ def _default_server_from_env() -> dict:
         "acme_server":          "letsencrypt",
         "dns_provider":         "cloudflare",
         "dns_credentials":      {},
-        "trust_exclusions":     [],
         "cert_types":           ["ecc", "rsa"],
     }
 
@@ -762,7 +754,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .flash{padding:0.6rem 0.9rem;border-radius:0.4rem;font-size:0.8rem;margin-bottom:1rem}
 .flash-err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--danger)}
 .flash-ok{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--ok)}
-.flash-warn{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:var(--warn)}
+.flash-warn{background:rgba(234,179,8,.1);border:1px solid rgba(234,179,8,.3);color:#92400e}
 .auth-cli{margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border);font-size:0.72rem;color:var(--subtle)}
 .auth-cli code{display:block;margin-top:0.35rem;font-family:monospace;background:#0a0f1a;padding:0.35rem 0.5rem;border-radius:3px;color:var(--muted);word-break:break-all}
 
@@ -788,17 +780,6 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 @media(max-width:640px){.form-2col{grid-template-columns:1fr}}
 .field select{width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.4rem 0.6rem;color:var(--text);font-size:0.85rem;outline:none;transition:border-color .15s}
 .field select:focus{border-color:var(--accent)}
-
-/* ── Trust exclusions page ── */
-.excl-card{margin-bottom:0.75rem}
-.excl-provider{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:0.75rem;padding-bottom:0.4rem;border-bottom:1px solid var(--border)}
-.excl-row{display:flex;align-items:baseline;gap:0.7rem;padding:0.32rem 0;cursor:pointer;font-size:0.82rem;line-height:1.4}
-.excl-row input[type=checkbox]{accent-color:var(--accent);cursor:pointer;flex-shrink:0;margin-top:0.2rem}
-.excl-cn{font-family:monospace;min-width:16rem;color:var(--text);transition:color .15s,text-decoration .15s}
-.excl-desc{color:var(--muted);font-size:0.75rem;transition:opacity .15s}
-.excl-row.excl-excluded .excl-cn{text-decoration:line-through;color:var(--subtle)}
-.excl-row.excl-excluded .excl-desc{opacity:0.45}
-.excl-chain-warn{font-size:0.68rem;font-weight:600;color:var(--warn);background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.25);border-radius:999px;padding:0.1rem 0.45rem;white-space:nowrap;cursor:help;flex-shrink:0}
 
 /* ── Overview table ── */
 .overview-table{width:100%;border-collapse:collapse}
@@ -1119,236 +1100,6 @@ def _server_detail_page(server_id: str, username: str = "") -> str:
                  nav_user=username, active="dashboard", show_nav=True)
 
 
-# ── Known CA patterns per ACME provider ──────────────────────────────────────
-
-_KNOWN_EXCLUSIONS: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Let's Encrypt CA Certificate Exclusion", [
-        ("ISRG Root X1", "Root CA — RSA trust anchor"),
-        ("ISRG Root X2", "Root CA — ECDSA trust anchor"),
-        ("R10", "RSA intermediate (2024 batch)"),
-        ("R11", "RSA intermediate (2024 batch)"),
-        ("R12", "RSA intermediate (2024 batch)"),
-        ("R13", "RSA intermediate (2024 batch)"),
-        ("R14", "RSA intermediate (2024 batch)"),
-        ("E5",  "ECDSA intermediate (2024 batch)"),
-        ("E6",  "ECDSA intermediate (2024 batch)"),
-        ("E7",  "ECDSA intermediate (2024 batch)"),
-        ("E8",  "ECDSA intermediate (2024 batch)"),
-        ("E9",  "ECDSA intermediate (2024 batch)"),
-        ("E10", "ECDSA intermediate (2024 batch)"),
-    ]),
-    ("ZeroSSL — Sectigo Chain CA Certificate Exclusion", [
-        ("ZeroSSL RSA Domain Secure Site CA",    "RSA intermediate"),
-        ("ZeroSSL ECC Domain Secure Site CA",    "ECDSA intermediate"),
-        ("USERTrust RSA Certification Authority", "Root CA — RSA"),
-        ("USERTrust ECC Certification Authority", "Root CA — ECDSA"),
-        ("Sectigo AAA Certificate Services",      "Legacy root (cross-signed)"),
-    ]),
-    ("Buypass CA Certificate Exclusion", [
-        ("Buypass Go SSL",          "Intermediate CA"),
-        ("Buypass Class 2 Root CA", "Root CA"),
-    ]),
-]
-
-_ALL_KNOWN_LOWER: set[str] = {
-    p.lower() for _, certs in _KNOWN_EXCLUSIONS for p, _ in certs
-}
-
-# Maps acme_server value → index into _KNOWN_EXCLUSIONS
-_ACME_PROVIDER_EXCL_IDX: dict[str, int] = {
-    "letsencrypt":      0,
-    "letsencrypt_test": 0,
-    "zerossl":          1,
-    "buypass":          2,
-    "buypass_test":     2,
-}
-
-
-def _chain_cns_for_server(server: dict) -> set[str]:
-    """
-    Parse the currently-issued CA chain files for this server and return
-    the set of certificate CNs (lower-case) found in them.
-
-    Reads both .ecc.ca.cer and .rsa.ca.cer so intermediates unique to either
-    chain are captured.  Returns an empty set if no certs have been issued yet
-    or if openssl is unavailable.
-    """
-    cert_dir = server_cert_dir(server)
-    domain   = server.get("domain", "")
-    cns: set[str] = set()
-    for suffix in (".ecc.ca.cer", ".rsa.ca.cer"):
-        ca_path = cert_dir / f"{domain}{suffix}"
-        if not ca_path.is_file():
-            continue
-        try:
-            pem_text = ca_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for block in re.findall(
-            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-            pem_text, re.DOTALL,
-        ):
-            try:
-                result = subprocess.run(
-                    ["openssl", "x509", "-noout", "-subject", "-nameopt", "compat"],
-                    input=block.encode(), capture_output=True, timeout=5,
-                )
-                subj = result.stdout.decode().strip().removeprefix("subject=").strip()
-                if "CN=" in subj:
-                    cn = subj.split("CN=")[-1].split(",")[0].strip().lower()
-                    if cn:
-                        cns.add(cn)
-            except Exception:
-                pass
-    return cns
-
-
-def _pattern_hits_chain(pattern: str, chain_cns: set[str]) -> bool:
-    """Return True if this exclusion pattern would match a cert in the current chain."""
-    p = pattern.lower()
-    return any(p in cn for cn in chain_cns)
-
-
-def _trust_exclusions_page(server: dict, username: str,
-                            flash_type: str = "", flash_msg: str = "") -> str:
-    """Per-server Trust Exclusions configuration page."""
-    sid         = _esc(str(server.get("id", "")))
-    label       = _esc(server.get("label") or server.get("cppm_host", ""))
-    active_list = server.get("trust_exclusions") or []
-    active_lower = {p.lower() for p in active_list}
-
-    flash_html = (
-        f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
-        if flash_msg else ""
-    )
-
-    acme_server  = server.get("acme_server", "letsencrypt")
-    excl_idx     = _ACME_PROVIDER_EXCL_IDX.get(acme_server)
-    excl_sections = [_KNOWN_EXCLUSIONS[excl_idx]] if excl_idx is not None else _KNOWN_EXCLUSIONS
-
-    chain_cns    = _chain_cns_for_server(server)
-    any_chain_warn = False
-
-    provider_html = ""
-    for provider_name, certs in excl_sections:
-        rows = ""
-        for p, d in certs:
-            in_chain = bool(chain_cns) and _pattern_hits_chain(p, chain_cns)
-            if in_chain:
-                any_chain_warn = True
-            warn_badge = (
-                '<span class="excl-chain-warn" '
-                'title="This CA is in your currently issued certificate chain. '
-                'Excluding it will stop the tool from uploading it to ClearPass, '
-                'which may break EAP / 802.1X authentication.">'
-                '&#9888; in active chain</span>'
-            ) if in_chain else ""
-            rows += (
-                f'<label class="excl-row">'
-                f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
-                f'{" checked" if p.lower() in active_lower else ""}>'
-                f'<span class="excl-cn">{_esc(p)}</span>'
-                f'{warn_badge}'
-                f'<span class="excl-desc">{_esc(d)}</span>'
-                f'</label>'
-            )
-        provider_html += (
-            f'<div class="card excl-card">'
-            f'<div class="excl-provider">{_esc(provider_name)}</div>'
-            f'{rows}'
-            f'</div>'
-        )
-
-    te_val = _esc("\n".join(active_list))
-
-    chain_warn_banner = ""
-    if any_chain_warn:
-        chain_warn_banner = """
-  <div class="flash flash-warn" style="margin-bottom:1rem">
-    <strong>&#9888; Active chain detected.</strong>
-    Certificates marked <em>in active chain</em> are used by the currently issued
-    certificate for this server. Excluding them prevents this tool from uploading
-    or verifying those CA certs in ClearPass, which may break EAP / 802.1X
-    authentication. Only exclude them if they are already managed outside this tool.
-  </div>"""
-
-    body = f"""
-<div class="app">
-  <div class="page-hdr">
-    <span class="page-title">Trust Exclusions</span>
-    <a href="/settings/edit/{sid}" class="btn btn-ghost">&#8592; Back to Edit Server</a>
-  </div>
-  <div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.25rem">
-    Server: <strong style="color:var(--text)">{label}</strong>
-  </div>
-  {flash_html}
-  {chain_warn_banner}
-  <div class="card" style="margin-bottom:1rem;font-size:0.82rem;color:var(--muted);line-height:1.65">
-    Checked certificates are <strong style="color:var(--text)">excluded</strong> from
-    ClearPass trust list management for this server — they will not be verified or
-    uploaded even if present in the certificate chain. Leave all unchecked to manage
-    all CA certificates automatically (recommended default).
-  </div>
-  <form method="POST" action="/settings/trust-exclusions/{sid}">
-    {provider_html}
-    <div class="card excl-card">
-      <div class="excl-provider">Active Exclusions</div>
-      <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem;line-height:1.5">
-        One CN pattern per line. Case-insensitive partial match against the certificate
-        Subject CN — e.g. <code style="font-size:0.75rem;color:var(--accent)">ISRG Root</code>
-        matches both ISRG Root X1 and X2. Use the checkboxes above or edit directly.
-      </p>
-      <textarea id="trust_exclusions" name="trust_exclusions" rows="4"
-        style="width:100%;background:#0f172a;border:1px solid var(--border2);
-               border-radius:0.4rem;padding:0.5rem 0.75rem;color:var(--text);
-               font-family:monospace;font-size:0.82rem;resize:vertical;outline:none;
-               transition:border-color .15s"
-        onfocus="this.style.borderColor='var(--accent)'"
-        onblur="this.style.borderColor=''"
-        oninput="teSync()"
-        >{te_val}</textarea>
-    </div>
-    <div style="display:flex;gap:0.75rem;margin-top:1.25rem">
-      <button type="submit" class="btn btn-primary">Save Exclusions</button>
-      <a href="/settings/edit/{sid}" class="btn btn-ghost">Cancel</a>
-    </div>
-  </form>
-</div>"""
-
-    script = """
-<script>
-function teSetStrike(cb) {
-  cb.closest('.excl-row').classList.toggle('excl-excluded', cb.checked);
-}
-function teSync() {
-  var ta = document.getElementById('trust_exclusions');
-  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
-  var active = {};
-  lines.forEach(function(l){active[l.toLowerCase()] = true;});
-  document.querySelectorAll('.excl-row input[type=checkbox]').forEach(function(cb){
-    cb.checked = !!active[cb.value.toLowerCase()];
-    teSetStrike(cb);
-  });
-}
-function teCbChange(cb) {
-  var ta = document.getElementById('trust_exclusions');
-  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
-  if (cb.checked) {
-    if (lines.map(function(l){return l.toLowerCase();}).indexOf(cb.value.toLowerCase()) === -1)
-      lines.push(cb.value);
-  } else {
-    lines = lines.filter(function(l){return l.toLowerCase() !== cb.value.toLowerCase();});
-  }
-  ta.value = lines.join('\\n');
-  teSetStrike(cb);
-}
-document.addEventListener('DOMContentLoaded', teSync);
-</script>"""
-
-    return _base("Trust Exclusions", body + script,
-                 nav_user=username, active="settings", show_nav=True)
-
-
 # ── Settings pages ───────────────────────────────────────────────────────────
 
 def _settings_list_page(servers: list, username: str,
@@ -1458,12 +1209,6 @@ def _settings_form_page(server: dict = None, error: str = "",
     cert_types = s.get("cert_types") or ["ecc", "rsa"]
     chk_ecc    = " checked" if "ecc" in cert_types else ""
     chk_rsa    = " checked" if "rsa" in cert_types else ""
-    te_link  = (
-        f'<div style="margin-top:0.85rem">'
-        f'<a href="/settings/trust-exclusions/{sid}" class="btn btn-ghost">Trust Exclusions</a>'
-        f'</div>'
-    ) if is_edit else ""
-
     # Form body — f-string with all interpolated Python values.
     # JavaScript is in a separate raw string appended below (no {{ }} issues).
     form = f"""
@@ -1585,7 +1330,6 @@ def _settings_form_page(server: dict = None, error: str = "",
           RSA <span class="hint">— RADIUS / 802.1x</span>
         </label>
       </div>
-      {te_link}
     </div>
 
     <div class="card" style="margin-bottom:1.5rem">
@@ -2569,18 +2313,6 @@ class Handler(BaseHTTPRequestHandler):
                 _settings_form_page(srv, is_edit=True, username=username)
             )
 
-        if path.startswith("/settings/trust-exclusions/"):
-            server_id = path[len("/settings/trust-exclusions/"):].strip("/")
-            qs    = parse_qs(urlparse(self.path).query)
-            ftype = qs.get("ft", [""])[0]
-            fmsg  = qs.get("fm", [""])[0]
-            srv = get_server(server_id)
-            if srv is None:
-                return self._redirect("/settings?ft=err&fm=Server+not+found")
-            return self._serve_html(
-                _trust_exclusions_page(srv, username, ftype, fmsg)
-            )
-
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2625,8 +2357,6 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_delete()
         elif path.startswith("/settings/edit/"):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
-        elif path.startswith("/settings/trust-exclusions/"):
-            self._handle_trust_exclusions_save(path[len("/settings/trust-exclusions/"):].strip("/"))
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -2770,35 +2500,6 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/settings?ft=ok&fm=Server+deleted")
         else:
             self._redirect("/settings?ft=err&fm=Server+not+found")
-
-    def _handle_trust_exclusions_save(self, server_id: str):
-        username = self._get_session_user()
-        if not username:
-            return self._redirect("/login")
-        srv = get_server(server_id)
-        if srv is None:
-            return self._redirect("/settings?ft=err&fm=Server+not+found")
-        f = self._parse_form()
-        patterns = [
-            line.strip()
-            for line in f.get("trust_exclusions", "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        srv["trust_exclusions"] = patterns
-        srv.setdefault("cert_types", ["ecc", "rsa"])
-        try:
-            update_server(server_id, srv)
-            _log.info("trust-exclusions: '%s' saved %d pattern(s) for server '%s'",
-                      username, len(patterns), server_id)
-            self._redirect(
-                f"/settings/trust-exclusions/{server_id}"
-                f"?ft=ok&fm=Trust+exclusions+saved."
-            )
-        except Exception as exc:
-            _log.error("trust-exclusions save failed: %s\n%s", exc, traceback.format_exc())
-            self._serve_html(
-                _trust_exclusions_page(srv, username, "err", f"Save failed: {exc}")
-            )
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.

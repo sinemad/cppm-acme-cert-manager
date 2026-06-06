@@ -276,14 +276,6 @@ fi
 # right place regardless of how many servers were processed.
 STATUS_LOG="$GLOBAL_STATUS_LOG"
 
-# ── Seed trust exclusion config to volume ────────────────────────────────────
-TRUST_EXCL_VOL="${CERT_DIR}/trust-exclusions.conf"
-TRUST_EXCL_IMG="/opt/cppm/acme-ca-certs/trust-exclusions.conf"
-if [[ ! -f "$TRUST_EXCL_VOL" && -f "$TRUST_EXCL_IMG" ]]; then
-    cp "$TRUST_EXCL_IMG" "$TRUST_EXCL_VOL"
-    log "  Seeded trust-exclusions.conf → ${TRUST_EXCL_VOL}"
-fi
-
 # ── Start status web server ───────────────────────────────────────────────────
 STATUS_PORT="${STATUS_PORT:-8080}"
 log "Starting status web server on port ${STATUS_PORT}..."

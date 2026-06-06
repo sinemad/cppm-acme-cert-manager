@@ -4,7 +4,7 @@
 
 The built-in web interface starts automatically with the container. It provides
 a multi-server dashboard, per-server certificate details, service configuration,
-trust exclusion management, and admin user management — all accessible from a browser.
+and admin user management — all accessible from a browser.
 
 Open in a browser:
 
@@ -195,7 +195,7 @@ Each server row shows two action buttons:
 
 | Button | Action |
 |---|---|
-| **Edit** | Modify server credentials, DNS provider, ACME settings, and trust exclusions |
+| **Edit** | Modify server credentials, DNS provider, and ACME settings |
 | **Delete** | Remove the server entry (inline two-step confirmation) |
 
 ### Adding a server
@@ -235,10 +235,6 @@ Click **Edit** on any row to open the edit form.
 
 ![Edit Server form](ui-server-edit.png)
 
-The edit form adds a **Trust Exclusions** button in the **ACME Provider** section,
-which links to the per-server trust exclusion configuration page. This button is
-not shown on the Add Server form.
-
 - Click **Delete** to start an inline two-step confirmation — no browser popup.
 
 Each ClearPass host must be unique across all server entries. Attempts to save
@@ -273,60 +269,6 @@ echoed during input. The `show` command displays `(set)` or `(empty)` in place
 of secret field values.
 
 ---
-
-## Trust Exclusions — per-server CA certificate management
-
-Each ClearPass server has its own trust exclusion configuration. Excluded CA
-certificates are not verified or uploaded to the ClearPass trust list for that
-server, even if they are present in the certificate chain.
-
-**By default no certificates are excluded** — the tool manages all CA and
-intermediate CA certificates automatically.
-
-### Accessing trust exclusions
-
-From the Servers page click **Edit** on the server you want to configure, then
-click **Trust Exclusions** in the **ACME Provider** section of the edit form.
-
-![Trust Exclusions page](trust-exclusions-screenshot.png)
-
-### Configuring exclusions
-
-The page shows only the CA certificates relevant to the ACME provider configured
-for that server:
-
-| ACME Provider | Section shown |
-|---|---|
-| Let's Encrypt / Let's Encrypt Staging | **Let's Encrypt CA Certificate Exclusion** — ISRG Root X1/X2, R10–R14, E5–E10 |
-| ZeroSSL | **ZeroSSL — Sectigo Chain CA Certificate Exclusion** — ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
-| Buypass | **Buypass CA Certificate Exclusion** — Buypass Go SSL, Buypass Class 2 Root CA |
-| Custom / Private CA | No preset sections — use the **Active Exclusions** textarea to add CN patterns manually, or leave empty to have the tool skip trust list management for this server |
-
-Check a box to exclude that certificate. The label text strikes through to
-confirm the selection. Unchecking re-enables management for that certificate.
-
-The **Active Exclusions** textarea at the bottom shows exactly what will be
-saved — one CN pattern per line. You can edit it directly for custom patterns
-not in the preset list. Partial CN matching is supported:
-`ISRG Root` matches both `ISRG Root X1` and `ISRG Root X2`.
-
-Exclusions take effect at the next scheduled or manual trust check.
-
-### Global fallback file
-
-A global `trust-exclusions.conf` file on the persistent volume applies to any
-server that has **no per-server exclusions configured**:
-
-```
-/opt/cppm-certs/trust-exclusions.conf   (host path)
-/data/certs/trust-exclusions.conf       (container path)
-```
-
-**Priority:** per-server exclusions (from `servers.json`) always take
-precedence. The file is only consulted when a server's `trust_exclusions` list
-is empty. This means existing installations with a `trust-exclusions.conf` file
-continue to work without any migration — configure per-server exclusions
-through the web UI when you are ready to move to per-server control.
 
 ---
 

@@ -146,25 +146,6 @@ docker exec -it cppm-acme-cert-manager bash
 
 ---
 
-## Trust exclusion management
-
-```bash
-# Configure per-server exclusions (recommended) — web UI
-# Servers → Edit (for a server) → ACME Provider section → Trust Exclusions → check boxes → Save Exclusions
-
-# Global fallback file — applies to servers with no per-server exclusions configured
-nano /opt/cppm-certs/trust-exclusions.conf   # takes effect at next trust check, no restart needed
-
-# Run trust check immediately to apply changes
-docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
-```
-
-**Priority:** per-server exclusions (web UI → `servers.json`) take precedence
-over the global file. The file is only read for servers that have no per-server
-exclusions configured.
-
----
-
 ## Updating credentials or DNS provider
 
 All server-specific settings (ClearPass credentials, DNS provider, domain,
@@ -194,7 +175,6 @@ No container restart is needed after updating server credentials.
 | Web UI process log | `/opt/cppm-certs/.logs/status_server.log` |
 | Container-level startup events | `/opt/cppm-certs/status.log` |
 | ClearPass server config | `/opt/cppm-certs/servers.json` |
-| Global trust exclusion config | `/opt/cppm-certs/trust-exclusions.conf` |
 | Admin credentials | `/opt/cppm-certs/admin.htpasswd` |
 | Session signing secret | `/opt/cppm-certs/.session-secret` |
 

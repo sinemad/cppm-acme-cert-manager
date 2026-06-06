@@ -292,9 +292,9 @@ Check the `TRUST` status lines. If any show `FAILED`, add the cert manually:
 
 > **Custom / Private CA:** If using a custom ACME CA, the bundled CA PEM files
 > will not include your private CA chain. Add the root and intermediate certs
-> manually to the CPPM trust list, then configure trust exclusions in the web UI
-> (**Servers → Edit → Trust Exclusions**) to prevent the tool from attempting to
-> manage certs it does not have in its bundle.
+> manually to the CPPM trust list. The tool will only attempt to manage certs
+> present in its bundled image set; unknown CA certs in the trust list are left
+> untouched.
 
 ---
 

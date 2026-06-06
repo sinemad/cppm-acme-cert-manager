@@ -61,8 +61,6 @@ entrypoint.sh
                                                     ├── Step 0: Trust List Pre-flight
                                                     │     ├── Load bundled ACME CA certs from image
                                                     │     ├── Parse Lego ECC CA chain
-                                                    │     ├── Apply trust exclusions (per-server from
-                                                    │     │   servers.json, or global trust-exclusions.conf)
                                                     │     ├── Compute SHA-256 fingerprints from
                                                     │     │   cert_file PEM in each trust list entry
                                                     │     ├── get_cert_trust_list()
@@ -283,7 +281,6 @@ image and is recreated on every `docker compose build`.
 ├── servers.json                          ← All ClearPass server configs (chmod 600, contains secrets)
 ├── admin.htpasswd                        ← Web UI admin credentials (bcrypt, chmod 600)
 ├── .session-secret                       ← Web UI session signing key (chmod 600)
-├── trust-exclusions.conf                 ← Global CA trust exclusion fallback
 ├── status.log                            ← Container-level startup events only
 │
 ├── .logs/                                ← Container-level logs
@@ -318,11 +315,6 @@ image and is recreated on every `docker compose build`.
         └── cppm_upload.log
 ```
 
-> **`trust-exclusions.conf`** is a global fallback only — it applies to servers
-> that have no per-server exclusions configured in `servers.json`. Per-server
-> trust exclusions are configured via the web UI (Servers → Trust Exclusions)
-> and stored inside `servers.json` under each server's `trust_exclusions` field.
-
 ---
 
 ## Image Contents (self-contained)
@@ -330,7 +322,7 @@ image and is recreated on every `docker compose build`.
 | Path in image | Contents | Source |
 |---|---|---|
 | `/usr/local/bin/lego` | Lego binary (static) | GitHub release tarball (curl at build time) |
-| `/opt/cppm/acme-ca-certs/` | ACME CA PEM files (Let's Encrypt, ZeroSSL, Buypass) + `trust-exclusions.conf` default | CA websites (curl at build time) |
+| `/opt/cppm/acme-ca-certs/` | ACME CA PEM files (Let's Encrypt, ZeroSSL, Buypass) | CA websites (curl at build time) |
 | `/opt/cppm/` | All management scripts | COPY from project directory |
 | Python packages | pyclearpass, requests, urllib3 | pip at build time |
 

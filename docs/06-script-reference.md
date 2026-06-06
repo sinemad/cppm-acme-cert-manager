@@ -23,9 +23,8 @@ On startup:
 4. Performs one-time cleanup of legacy acme.sh state directories
    (`<domain>_ecc/` and `<domain>/`) if certs are already present (guard
    condition ensures this never fires on a fresh container with no certs).
-5. Seeds `trust-exclusions.conf` to the volume if not already present.
-6. Starts `status_server.py` in the background.
-7. `exec supercronic` (becomes PID 1 subprocess).
+5. Starts `status_server.py` in the background.
+6. `exec supercronic` (becomes PID 1 subprocess).
 
 ---
 
@@ -209,54 +208,8 @@ Behaviour:
 1. Skips a server if its domain certificates have not yet been issued.
 2. Calls `clearpass_upload.py --only-trust-check` with both the ECC and RSA
    CA chain paths, so intermediates unique to either chain are always checked.
-3. Applies trust exclusions: per-server exclusions from `servers.json` take
-   precedence; falls back to `trust-exclusions.conf` if none are configured.
-4. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
+3. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
    and writes a `TRUST` entry to the per-server `status.log`.
-
----
-
-## trust-exclusions.conf
-
-**Global fallback file (admin-editable):**
-```
-/opt/cppm-certs/trust-exclusions.conf   (host path)
-/data/certs/trust-exclusions.conf       (container path)
-```
-
-**Image default (read-only reference):**
-```
-/opt/cppm/acme-ca-certs/trust-exclusions.conf
-```
-
-**Priority:** Per-server exclusions configured in the web UI
-(**Servers → Edit → ACME Provider → Trust Exclusions**) and stored in `servers.json` always take
-precedence. This file is only read when a server has no per-server exclusions
-configured — it acts as a global fallback for backwards compatibility.
-
-Controls which ACME CA and intermediate CA certificates are excluded from all
-trust list operations (both post-renewal uploads and weekly checks). Excluded
-certificates are silently skipped — they are never uploaded, never patched,
-and no error is raised if they are absent from the trust list.
-
-The file is seeded to the persistent volume by `entrypoint.sh` on first start.
-Edit the host-side copy — changes take effect at the next scheduled or manual
-trust check without restarting the container.
-
-**Format:** one entry per line, matched case-insensitively as a partial
-substring against the certificate's Subject CN. Lines starting with `#` are
-comments.
-
-```
-# Exclude R11 — already managed separately in this environment
-R11
-
-# Exclude ECDSA intermediates — RADIUS uses RSA-only EAP
-E5
-E6
-E7
-E8
-```
 
 ---
 
@@ -274,14 +227,12 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 | `GET /settings` | Yes | ClearPass server list — add, edit, delete |
 | `GET /settings/add` | Yes | Add server form |
 | `GET /settings/edit/<id>` | Yes | Edit server form |
-| `GET /settings/trust-exclusions/<id>` | Yes | Per-server trust exclusions (reached via Edit → ACME Provider) |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |
 
-All server configuration (ClearPass credentials, DNS provider, domain, ACME
-settings, trust exclusions) is stored in `/data/certs/servers.json` and
-managed through these routes. Admin credentials are stored in
+All server configuration (ClearPass credentials, DNS provider, domain, and ACME
+settings) is stored in `/data/certs/servers.json` and managed through these routes. Admin credentials are stored in
 `/data/certs/admin.htpasswd` (bcrypt). Sessions are HMAC-SHA256 signed cookies
 using a secret in `/data/certs/.session-secret`.
 
@@ -546,5 +497,4 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 | `CPPM_CERT_PASSPHRASE` | PKCS12 export passphrase (transient — never stored on disk) |
 | `CPPM_CALLBACK_HOST` | Docker host LAN IP that ClearPass can route to |
 | `CPPM_CALLBACK_PORT` | Mirrors the container-level value for per-server use |
-| `TRUST_EXCLUSIONS` | Newline-separated CA CN patterns to exclude from trust list operations |
 | `CF_Token`, `CF_Zone_ID`, … | DNS provider credentials — keys vary by provider |

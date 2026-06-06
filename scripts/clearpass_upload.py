@@ -102,62 +102,6 @@ ACME_CA_CERT_DIR = Path(os.environ.get("ACME_CA_CERT_DIR", "/opt/cppm/acme-ca-ce
 # No hardcoded list — load_bundled_acme_certs() scans the whole directory so
 # any CA cert downloaded at image build time is automatically included.
 
-# Trust exclusion config — first file found wins.
-# The volume copy at /data/certs/ is seeded by entrypoint.sh and is editable
-# by the admin without rebuilding the image.
-TRUST_EXCLUSIONS_PATHS: list[Path] = [
-    Path("/data/certs/trust-exclusions.conf"),       # persistent volume, admin-editable
-    Path("/opt/cppm/acme-ca-certs/trust-exclusions.conf"), # image default
-]
-
-
-def load_trust_exclusions() -> set[str]:
-    """
-    Return the set of lower-case CN patterns to exclude from trust list operations.
-
-    Checks TRUST_EXCLUSIONS env var first (set per-server via servers.json / eval loop).
-    Falls back to the first trust-exclusions.conf file found on disk for backwards
-    compatibility with manual file-based configuration.
-    """
-    env_val = os.environ.get("TRUST_EXCLUSIONS", "").strip()
-    if env_val:
-        exclusions: set[str] = set()
-        for raw in env_val.splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#"):
-                exclusions.add(line.lower())
-                log.info("  Will exclude CN matching (from servers.json): %r", line)
-        return exclusions
-
-    for path in TRUST_EXCLUSIONS_PATHS:
-        if not path.is_file():
-            continue
-        log.info("Trust exclusion config: %s", path)
-        exclusions = set()
-        try:
-            for raw in path.read_text(encoding="utf-8").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                exclusions.add(line.lower())
-                log.info("  Will exclude CN matching: %r", line)
-        except OSError as exc:
-            log.warning("Cannot read trust exclusions from %s: %s", path, exc)
-        return exclusions
-    log.debug("No trust exclusions configured; no certs excluded.")
-    return set()
-
-
-def _is_excluded(cert: "CertInfo", exclusions: set[str]) -> bool:
-    """Return True if the cert's CN contains any exclusion pattern (case-insensitive)."""
-    if not exclusions:
-        return False
-    cn = ""
-    if "CN=" in cert.subject:
-        cn = cert.subject.split("CN=")[-1].split(",")[0].strip().lower()
-    label_lower = cert.label.lower()
-    return any(excl in cn or excl in label_lower for excl in exclusions)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Certificate helpers
@@ -401,24 +345,6 @@ def ensure_letsencrypt_chain_trusted(
 
     if not required:
         log.error("No ACME CA certs available – rebuild the image.")
-        return summary
-
-    # Apply exclusions from trust-exclusions.conf before touching the trust list
-    exclusions = load_trust_exclusions()
-    if exclusions:
-        before = len(required)
-        excluded_labels = []
-        for fp in list(required):
-            if _is_excluded(required[fp], exclusions):
-                excluded_labels.append(required[fp].label)
-                del required[fp]
-        if excluded_labels:
-            log.info("Excluded by trust-exclusions.conf (%d): %s",
-                     len(excluded_labels), excluded_labels)
-            log.info("  Remaining certs to verify: %d (of %d)", len(required), before)
-
-    if not required:
-        log.info("All certs excluded by trust-exclusions.conf – nothing to verify.")
         return summary
 
     log.info("Total unique ACME CA certs to verify: %d", len(required))

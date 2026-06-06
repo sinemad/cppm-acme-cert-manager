@@ -221,7 +221,6 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
 
     creds = s.get("dns_credentials") or {}
 
-    trust_excl = s.get("trust_exclusions") or []
     env: dict[str, str] = {
         "DOMAIN":               str(s.get("domain",               "")),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),
@@ -234,7 +233,6 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        "TRUST_EXCLUSIONS":     "\n".join(str(p) for p in trust_excl if p),
         "ISSUE_ECC":            "true" if "ecc" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
         "ISSUE_RSA":            "true" if "rsa" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
         "SERVER_CERT_DIR":      str(server_cert_dir(s)),

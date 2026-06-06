@@ -127,7 +127,7 @@ cppm-acme-cert-manager/
 │   ├── cppm_acme_manager_users.py    # CLI: manage admin user accounts
 │   └── status.sh               # Shared status logging library
 ├── acme-ca-certs/
-│   └── trust-exclusions.conf   # Default exclusion list for trust list uploads (admin-editable)
+│   └── *.pem                   # Bundled CA PEM files (LE, ZeroSSL, Buypass)
 └── docs/
     ├── 01-initial-setup.md
     ├── 02-how-it-works.md
@@ -145,7 +145,6 @@ cppm-acme-cert-manager/
 ├── servers.json                              ← All ClearPass server configs (chmod 600)
 ├── admin.htpasswd                            ← Web UI admin credentials (bcrypt, chmod 600)
 ├── .session-secret                           ← HMAC session signing key (chmod 600)
-├── trust-exclusions.conf                     ← Global CA exclusion fallback (admin-editable)
 ├── status.log                                ← Container-level startup events
 ├── .logs/
 │   ├── startup.log                           ← Container boot log
@@ -627,22 +626,6 @@ CA certificates are present in the ClearPass trust list:
 ```bash
 docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 ```
-
-**Exclude specific CA certificates per server (recommended):**
-
-Configure in the web UI — **Servers → Trust Exclusions** on the server row.
-Check the certificates to exclude, then click **Save Exclusions**. Takes
-effect at the next trust check with no restart required.
-
-**Global fallback file** (applies to servers with no per-server exclusions):
-
-```bash
-nano /opt/cppm-certs/trust-exclusions.conf
-```
-
-Each non-comment line is a case-insensitive partial match against the
-certificate Subject CN. The per-server web UI setting always takes precedence
-over this file.
 
 ---
 
