@@ -70,10 +70,19 @@ FORCE_FLAG=""
 [[ "${FORCE_RENEW:-false}" == "true" ]] && FORCE_FLAG="--force"
 
 ISSUE_EXIT=0
+ISSUE_TMP=$(mktemp)
 # shellcheck disable=SC2086
-python3 /opt/cppm/acme_cli.py issue $FORCE_FLAG 2>&1 | tee -a "$LOG" || ISSUE_EXIT=$?
+python3 /opt/cppm/acme_cli.py issue $FORCE_FLAG 2>&1 | tee -a "$LOG" | tee "$ISSUE_TMP" || ISSUE_EXIT=$?
 
-[[ $ISSUE_EXIT -ne 0 ]] && die "Certificate issuance failed (exit ${ISSUE_EXIT}) – check ${LOG}"
+if [[ $ISSUE_EXIT -ne 0 ]]; then
+    if grep -qiE "rateLimited|too many certificates already issued|rate.?limit" "$ISSUE_TMP" 2>/dev/null; then
+        rm -f "$ISSUE_TMP"
+        die "ACME rate limit reached – too many certificates issued for this domain recently. Let's Encrypt allows 5 duplicate certificates per week. Try again in a few days."
+    fi
+    rm -f "$ISSUE_TMP"
+    die "Certificate issuance failed (exit ${ISSUE_EXIT}) – see the ACME Renewal log for details"
+fi
+rm -f "$ISSUE_TMP"
 
 status_write "OK" "CERT" "New ${CERT_LABEL} certificate(s) issued – dns=${DNS_PROVIDER:-?} ca=${ACME_CA_LABEL}"
 

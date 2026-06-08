@@ -1118,12 +1118,18 @@ def _overview_page(username: str = "") -> str:
                  nav_user=username, active="dashboard", show_nav=True)
 
 
-def _server_detail_page(server_id: str, username: str = "") -> str:
+def _server_detail_page(server_id: str, username: str = "",
+                        flash_type: str = "", flash_msg: str = "") -> str:
     """Per-server drill-down (existing dashboard panels, accessed at /server/<id>)."""
+    flash_html = ""
+    if flash_msg:
+        flash_html = (f'<div class="app" style="margin-bottom:0">'
+                      f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+                      f'</div>')
     is_auth  = "true" if username else "false"
     sid_js   = (f'<script>var SERVER_ID="{_esc(server_id)}";'
                 f'var IS_AUTH={is_auth};</script>')
-    return _base("Server Details", _DETAIL_BODY + sid_js + _DETAIL_SCRIPT,
+    return _base("Server Details", flash_html + _DETAIL_BODY + sid_js + _DETAIL_SCRIPT,
                  nav_user=username, active="dashboard", show_nav=True)
 
 
@@ -2286,12 +2292,17 @@ class Handler(BaseHTTPRequestHandler):
             # ── Pages ────────────────────────────────────────────────────────
             if path.startswith("/server/"):
                 server_id = path[len("/server/"):].strip("/")
+                qs        = parse_qs(urlparse(self.path).query)
+                ftype     = qs.get("ft", [""])[0]
+                fmsg      = qs.get("fm", [""])[0]
                 servers   = load_servers()
                 valid = (any(s.get("id") == server_id for s in servers)
                          if servers else server_id == "env")
                 if not valid:
                     return self._redirect("/")
-                return self._serve_html(_server_detail_page(server_id, username or ""))
+                return self._serve_html(
+                    _server_detail_page(server_id, username or "", ftype, fmsg)
+                )
 
             # "/" and "/index.html" → overview
             return self._serve_html(_overview_page(username or ""))
@@ -2552,8 +2563,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/settings?ft=err&fm=Server+not+found")
         _log.info("settings: '%s' triggered cert pipeline for '%s'", username, srv.get("label"))
         _spawn_cert_pipeline(server_id, force=True)
-        label = _url_enc(srv.get("label") or server_id)
-        self._redirect(f"/settings?ft=ok&fm=Certificate+pipeline+started+for+{label}")
+        self._redirect(
+            f"/server/{server_id}?ft=ok&fm=Certificate+pipeline+started."
+            f"+Results+will+appear+in+the+Activity+Log+below."
+        )
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.
