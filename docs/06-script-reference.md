@@ -76,10 +76,17 @@ the cert file mtime before and after the call. Exit codes propagated by
 
 **Called by:** `install_cert.sh` after cert files are verified.
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh`
+**Web UI:** **Servers → Upload to ClearPass** button.
 
 Resolves cert file paths and invokes `clearpass_upload.py`. Set
 `SKIP_UPLOAD: "true"` in `docker-compose.override.yml` to disable the upload
 without removing the hook.
+
+Uses `flock` on a lockfile (`/tmp/cppm_upload_<port>.lock`) so only one instance
+can run at a time. If a second invocation arrives while one is already in progress
+(e.g. a scheduled renewal upload and a manual upload triggered simultaneously),
+the second exits immediately and writes a WARN to the Activity Log. The lock is
+released automatically when the process exits.
 
 ---
 
@@ -224,9 +231,14 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 |---|---|---|
 | `GET /` | No (configurable) | Multi-server certificate dashboard |
 | `GET /server/<id>` | No (configurable) | Per-server detail with connectivity status |
-| `GET /settings` | Yes | ClearPass server list — add, edit, delete |
+| `GET /settings` | Yes | ClearPass server list — add, edit, delete, run, upload |
 | `GET /settings/add` | Yes | Add server form |
 | `GET /settings/edit/<id>` | Yes | Edit server form |
+| `POST /settings/add` | Yes | Save new server; auto-triggers cert pipeline in background |
+| `POST /settings/edit/<id>` | Yes | Save edited server |
+| `POST /settings/delete` | Yes | Delete server |
+| `POST /settings/run/<id>` | Yes | Force full cert re-issue (Issue Cert Now); redirects to `/server/<id>` |
+| `POST /settings/upload/<id>` | Yes | Re-upload existing certs to ClearPass (Upload to ClearPass); redirects to `/server/<id>` |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |
@@ -402,10 +414,11 @@ Python module providing the `servers.json` CRUD layer:
 |---|---|
 | `load_servers()` | Return all server entries as a list |
 | `get_server(id)` | Return a single server entry by UUID |
-| `add_server(entry)` | Validate, check for duplicate host, write |
+| `add_server(entry)` | Validate, check for duplicate host, write; returns the new server UUID |
 | `update_server(id, entry)` | Replace an existing entry |
 | `delete_server(id)` | Remove an entry |
-| `get_server_shell_env(id)` | Return `export KEY='VALUE'` lines for `eval` in shell scripts |
+| `get_server_env_dict(id)` | Return per-server environment variables as a `dict[str, str]` (used by web-triggered pipelines) |
+| `get_server_shell_env(id)` | Return `export KEY='VALUE'` lines for `eval` in shell scripts (wraps `get_server_env_dict`) |
 | `migrate_from_env()` | One-time migration: reads legacy `.env` vars, writes first `servers.json` entry |
 
 ---

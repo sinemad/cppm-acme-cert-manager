@@ -191,12 +191,20 @@ Navigate to **Servers** in the top navigation bar.
 
 ### Server list actions
 
-Each server row shows two action buttons:
+Each server row shows four action buttons:
 
 | Button | Action |
 |---|---|
 | **Edit** | Modify server credentials, DNS provider, and ACME settings |
+| **Issue Cert Now** | Force a full certificate re-issue via ACME DNS-01 challenge |
+| **Upload to ClearPass** | Re-upload the existing on-disk certs to ClearPass without contacting the ACME CA |
 | **Delete** | Remove the server entry (inline two-step confirmation) |
+
+**Issue Cert Now** shows a confirmation dialog warning that the action counts against your ACME CA rate limit (Let's Encrypt allows 5 duplicate certificates per domain per week). Use it only when you need to rotate a cert immediately. After clicking, you are redirected to the server detail page where the Activity Log updates as the pipeline progresses.
+
+**Upload to ClearPass** runs only the upload pipeline (`deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
+
+> Only one upload pipeline can run at a time. If a second upload is triggered while one is already in progress (e.g. a scheduled renewal happened to be uploading), the second request is queued and a WARN entry appears in the Activity Log.
 
 ### Adding a server
 
@@ -228,6 +236,8 @@ banner — enter the full ACME directory URL for your internal CA.
 
 Only the credential fields for the active provider are submitted — all others
 are disabled in the browser before the form is sent.
+
+When a new server is saved, the certificate pipeline starts automatically in the background — the same full sequence as clicking **Issue Cert Now**. You are redirected to the server detail page where the Activity Log shows progress.
 
 ### Editing and deleting
 

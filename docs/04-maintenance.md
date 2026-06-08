@@ -71,14 +71,25 @@ Then enable SSL verification in the web UI:
 ## Manually re-upload to ClearPass
 
 Use this if the cert is already current but needs to be re-uploaded
-(e.g. after a CPPM rebuild or restore):
+(e.g. after a CPPM rebuild, restore, or a previous upload failure). No new
+certificates are issued and the ACME CA is not contacted.
+
+**Web UI (preferred):** Navigate to **Servers**, then click **Upload to ClearPass**
+on the server row. You are redirected to the server detail page and the Activity
+Log updates as the upload progresses.
+
+**CLI alternative:**
 
 ```bash
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
-This runs the full upload sequence: trust list pre-flight, HTTPS cert upload,
-RADIUS cert upload.
+Both methods run the same sequence: trust list pre-flight, HTTPS(ECC) cert upload,
+RADIUS(RSA) cert upload.
+
+> Only one upload can run at a time. If a renewal or another upload is already
+> in progress, `deploy_hook.sh` exits immediately with a WARN in the Activity Log.
+> Wait a moment and retry.
 
 ---
 
@@ -98,7 +109,14 @@ No DNS challenge is performed. No contact with the ACME CA.
 ## Force a full certificate re-issue
 
 Use this to rotate the certificate before it is due (e.g. key compromise,
-CPPM migration):
+CPPM migration). This contacts the ACME CA and counts against the rate limit
+(Let's Encrypt: 5 duplicate certificates per domain per week).
+
+**Web UI (preferred):** Navigate to **Servers**, then click **Issue Cert Now**
+on the server row. Confirm the rate-limit warning. You are redirected to the
+server detail page and the Activity Log shows progress in real time.
+
+**CLI / container flag alternative** (useful when the web UI is unavailable):
 
 ```bash
 # 1. Set the flag in docker-compose.override.yml:
