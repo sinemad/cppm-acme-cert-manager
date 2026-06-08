@@ -165,6 +165,7 @@ class LegoProvider(AcmeProvider):
                 "--server",   server_url,
                 "--key-type", _KEY_TYPE_MAP[kt],
                 "run",
+                "--always-deactivate-authorizations", "true",
             ]
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
