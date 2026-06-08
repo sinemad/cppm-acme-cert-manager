@@ -1234,7 +1234,7 @@ def _settings_list_page(servers: list, username: str,
                 f"'Issue new ACME certificates for {label}?\\n\\n"
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
-                f"Use Upload to ClearPass instead if certs are already issued and just need uploading.')\">"
+                f"Use Upload to ClearPass instead if certs are already issued and just need to be uploaded.')\">"
                 f'<button type="submit" class="btn btn-ghost">&#9654; Issue Cert Now</button>'
                 f'</form>'
             )
