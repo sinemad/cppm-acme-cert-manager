@@ -168,10 +168,20 @@ cppm-acme-cert-manager/
 
 ## Initial Setup
 
-### 1. Host preparation
+### 1. Clone the repository
 
 ```bash
-cd /opt/cppm-acme-cert-manager
+cd /opt
+git clone https://github.com/sinemad/cppm-acme-cert-manager.git
+cd cppm-acme-cert-manager
+```
+
+> `/opt` is the recommended installation path. You can clone anywhere — just
+> substitute the path in every subsequent command.
+
+### 2. Host preparation
+
+```bash
 chmod +x setup.sh && ./setup.sh
 ```
 
@@ -179,7 +189,7 @@ chmod +x setup.sh && ./setup.sh
 `docker-compose.override.yml.example` to `docker-compose.override.yml` if it
 does not already exist.
 
-### 2. Configure local overrides (optional)
+### 3. Configure local overrides (optional)
 
 `docker-compose.override.yml` controls **container-level behaviour only** —
 timezone, ports, and operational flags. ClearPass credentials, DNS provider,
@@ -204,7 +214,7 @@ environment:
 > which host port to forward). See the comments inside the override file for the
 > step-by-step checklist.
 
-### 3. Create the ClearPass API client
+### 4. Create the ClearPass API client
 
 1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
 2. Configure:
@@ -223,7 +233,7 @@ environment:
 > Administration → Operator Logins → Operator Profiles → Add
 > Enable **Allow → All → Certificate Management**
 
-### 4. Build and start
+### 5. Build and start
 
 ```bash
 docker compose build --no-cache
@@ -241,7 +251,7 @@ waits — this is expected:
 [INFO ] Startup complete
 ```
 
-### 5. Create the admin account
+### 6. Create the admin account
 
 **Web UI:**
 
@@ -256,7 +266,7 @@ waits — this is expected:
 docker exec -it cppm-acme-cert-manager cppm-users add admin
 ```
 
-### 6. Add your ClearPass server
+### 7. Add your ClearPass server
 
 All per-server configuration — ClearPass host, API credentials, DNS provider,
 domain, and ACME settings — is entered here and stored in `servers.json`.
@@ -300,10 +310,14 @@ with `getpass` (not echoed).
 > ip route get <cppm-ip>   # look for 'src X.X.X.X'
 > ```
 
-### 7. Trigger first-run certificate issuance
+### 8. Trigger first-run certificate issuance
 
-After saving the first server, restart the container so it picks up the new
-configuration and issues the certificates:
+Saving a new server via the web UI automatically starts the certificate pipeline
+in the background — no restart needed. You are redirected to the server detail
+page where the Activity Log updates as issuance progresses.
+
+If you added the server via the CLI (`cppm-servers add`), restart the container
+to trigger first-run issuance:
 
 ```bash
 docker compose restart
@@ -582,6 +596,12 @@ docker compose logs -f
 
 ### Force certificate re-issue
 
+**Web UI (preferred):** Navigate to **Servers**, click **Issue Cert Now** on
+the server row, and confirm the rate-limit warning. The Activity Log updates as
+the pipeline runs.
+
+**CLI / container flag alternative:**
+
 ```bash
 # Edit docker-compose.override.yml: FORCE_RENEW: "true"
 docker compose up -d --force-recreate
@@ -590,6 +610,11 @@ docker compose up -d --force-recreate
 ```
 
 ### Re-upload to CPPM (cert unchanged)
+
+**Web UI (preferred):** Navigate to **Servers**, click **Upload to ClearPass**
+on the server row. No new cert is issued and the ACME CA is not contacted.
+
+**CLI alternative:**
 
 ```bash
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
