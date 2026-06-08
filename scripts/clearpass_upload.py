@@ -2,7 +2,9 @@
 """
 clearpass_upload.py – Uploads an ACME-issued certificate to Aruba ClearPass.
 
-Supports Let's Encrypt, ZeroSSL, Buypass, and any other acme.sh-compatible CA.
+Supports Let's Encrypt, ZeroSSL, Buypass, Infoblox/RFC 2136 DNS providers,
+and any ACME-compatible CA (including private CAs such as Step-CA, EJBCA,
+HashiCorp Vault PKI, or AD CS with ACME).
 Uses the official pyclearpass SDK (github.com/aruba/pyclearpass) for all API
 operations. See api_platformcertificates.py in that package for the authoritative
 source of endpoint paths and body schemas.
@@ -59,6 +61,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("cppm-upload")
 
+
+def _ca_label(acme_server: str) -> str:
+    """Return a short human-readable label for the ACME CA value."""
+    _KNOWN = {
+        "letsencrypt":      "Let's Encrypt",
+        "letsencrypt_test": "Let's Encrypt (Staging)",
+        "zerossl":          "ZeroSSL",
+        "buypass":          "Buypass",
+        "buypass_test":     "Buypass (Staging)",
+    }
+    if acme_server in _KNOWN:
+        return _KNOWN[acme_server]
+    if acme_server.startswith("http"):
+        return f"Custom CA ({acme_server})"
+    return acme_server or "letsencrypt"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Status log
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,62 +101,6 @@ ACME_CA_CERT_DIR = Path(os.environ.get("ACME_CA_CERT_DIR", "/opt/cppm/acme-ca-ce
 
 # No hardcoded list — load_bundled_acme_certs() scans the whole directory so
 # any CA cert downloaded at image build time is automatically included.
-
-# Trust exclusion config — first file found wins.
-# The volume copy at /data/certs/ is seeded by entrypoint.sh and is editable
-# by the admin without rebuilding the image.
-TRUST_EXCLUSIONS_PATHS: list[Path] = [
-    Path("/data/certs/trust-exclusions.conf"),       # persistent volume, admin-editable
-    Path("/opt/cppm/acme-ca-certs/trust-exclusions.conf"), # image default
-]
-
-
-def load_trust_exclusions() -> set[str]:
-    """
-    Return the set of lower-case CN patterns to exclude from trust list operations.
-
-    Checks TRUST_EXCLUSIONS env var first (set per-server via servers.json / eval loop).
-    Falls back to the first trust-exclusions.conf file found on disk for backwards
-    compatibility with manual file-based configuration.
-    """
-    env_val = os.environ.get("TRUST_EXCLUSIONS", "").strip()
-    if env_val:
-        exclusions: set[str] = set()
-        for raw in env_val.splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#"):
-                exclusions.add(line.lower())
-                log.info("  Will exclude CN matching (from servers.json): %r", line)
-        return exclusions
-
-    for path in TRUST_EXCLUSIONS_PATHS:
-        if not path.is_file():
-            continue
-        log.info("Trust exclusion config: %s", path)
-        exclusions = set()
-        try:
-            for raw in path.read_text(encoding="utf-8").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                exclusions.add(line.lower())
-                log.info("  Will exclude CN matching: %r", line)
-        except OSError as exc:
-            log.warning("Cannot read trust exclusions from %s: %s", path, exc)
-        return exclusions
-    log.debug("No trust exclusions configured; no certs excluded.")
-    return set()
-
-
-def _is_excluded(cert: "CertInfo", exclusions: set[str]) -> bool:
-    """Return True if the cert's CN contains any exclusion pattern (case-insensitive)."""
-    if not exclusions:
-        return False
-    cn = ""
-    if "CN=" in cert.subject:
-        cn = cert.subject.split("CN=")[-1].split(",")[0].strip().lower()
-    label_lower = cert.label.lower()
-    return any(excl in cn or excl in label_lower for excl in exclusions)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,7 +189,7 @@ def load_bundled_acme_certs() -> dict[str, CertInfo]:
     """
     required: dict[str, CertInfo] = {}
     if not ACME_CA_CERT_DIR.is_dir():
-        log.error("Bundled LE cert dir not found: %s – rebuild the image.", ACME_CA_CERT_DIR)
+        log.error("Bundled ACME CA cert dir not found: %s – rebuild the image.", ACME_CA_CERT_DIR)
         return required
 
     pem_files = sorted(ACME_CA_CERT_DIR.glob("*.pem"))
@@ -253,7 +215,7 @@ def load_bundled_acme_certs() -> dict[str, CertInfo]:
                 log.debug("Bundled: %s | file: %s | expires: %s",
                           cert.label, pem_path.name, cert.not_after)
 
-    log.info("Loaded %d bundled LE CA certs from %s (%d files scanned)",
+    log.info("Loaded %d bundled ACME CA certs from %s (%d files scanned)",
              len(required), ACME_CA_CERT_DIR, len(pem_files))
     return required
 
@@ -342,7 +304,7 @@ def ensure_letsencrypt_chain_trusted(
       cert_usage (list) – list of usage strings: "EAP", "RADIUS", "HTTPS", "Others"
     """
     log.info("=" * 62)
-    log.info("Step 0: Let's Encrypt Trust List Pre-flight")
+    log.info("Step 0: ACME CA Trust List Pre-flight")
     log.info("  SDK: ApiPlatformCertificates.get/new/update_cert_trust_list")
     log.info("=" * 62)
 
@@ -364,7 +326,7 @@ def ensure_letsencrypt_chain_trusted(
         if not Path(ca_cert_path).is_file():
             log.warning("CA chain file not found: %s (skipping)", ca_cert_path)
             continue
-        log.info("Parsing acme.sh CA chain: %s", ca_cert_path)
+        log.info("Parsing ACME CA chain: %s", ca_cert_path)
         try:
             chain_text = Path(ca_cert_path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -375,35 +337,17 @@ def ensure_letsencrypt_chain_trusted(
             if fp not in required:
                 cn = (c.subject.split("CN=")[-1].split(",")[0].strip()
                       if "CN=" in c.subject else c.subject[:40])
-                c.label = f"LE chain: {cn}"
+                c.label = f"ACME chain: {cn}"
                 required[fp] = c
                 log.info("  Extra chain cert (not in bundle): %s", c.label)
     if not seen_paths:
         log.warning("No CA chain files found – using bundled certs only")
 
     if not required:
-        log.error("No LE certs available – rebuild the image.")
+        log.error("No ACME CA certs available – rebuild the image.")
         return summary
 
-    # Apply exclusions from trust-exclusions.conf before touching the trust list
-    exclusions = load_trust_exclusions()
-    if exclusions:
-        before = len(required)
-        excluded_labels = []
-        for fp in list(required):
-            if _is_excluded(required[fp], exclusions):
-                excluded_labels.append(required[fp].label)
-                del required[fp]
-        if excluded_labels:
-            log.info("Excluded by trust-exclusions.conf (%d): %s",
-                     len(excluded_labels), excluded_labels)
-            log.info("  Remaining certs to verify: %d (of %d)", len(required), before)
-
-    if not required:
-        log.info("All certs excluded by trust-exclusions.conf – nothing to verify.")
-        return summary
-
-    log.info("Total unique LE certs to verify: %d", len(required))
+    log.info("Total unique ACME CA certs to verify: %d", len(required))
 
     # Fetch current trust list
     try:
@@ -602,13 +546,13 @@ def ensure_letsencrypt_chain_trusted(
     fail_count = len(summary["failed"])
     if fail_count == 0:
         status_write("OK", "TRUST",
-                     f"{total} LE CA certs verified – "
+                     f"{total} ACME CA cert(s) verified – "
                      f"{len(summary['uploaded'])} uploaded, "
                      f"{len(summary['flags_updated'])} patched, "
                      f"{len(summary['already_trusted'])} already trusted")
     else:
         status_write("WARN", "TRUST",
-                     f"{fail_count}/{total} LE CA cert(s) failed – check cppm_upload.log")
+                     f"{fail_count}/{total} ACME CA cert(s) failed – check cppm_upload.log")
     return summary
 
 
@@ -702,25 +646,30 @@ def _serve_pkcs12_and_upload(
         def log_message(self, *_):
             pass
 
-    # Bind on 0.0.0.0 so Docker port mapping reaches us
-    httpd  = socketserver.TCPServer(("0.0.0.0", callback_port), _SilentHandler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    orig_dir = os.getcwd()
-    os.chdir("/tmp")
-    thread.start()
-    log.info("  Serving PKCS12 at %s (CPPM will fetch this)", pfx_url)
+    # allow_reuse_address lets the HTTPS and RADIUS uploads both bind the same
+    # port in the same process run without hitting TIME_WAIT between them.
+    class _PkcsServer(socketserver.TCPServer):
+        allow_reuse_address = True
 
-    url     = f"https://{host}/api/server-cert/name/{server_uuid}/{service_name}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "pkcs12_file_url":  pfx_url,
-        "pkcs12_passphrase": passphrase,
-    }
+    httpd    = _PkcsServer(("0.0.0.0", callback_port), _SilentHandler)
+    thread   = threading.Thread(target=httpd.serve_forever, daemon=True)
+    orig_dir = os.getcwd()
 
     try:
+        os.chdir("/tmp")
+        thread.start()
+        log.info("  Serving PKCS12 at %s (CPPM will fetch this)", pfx_url)
+
+        url     = f"https://{host}/api/server-cert/name/{server_uuid}/{service_name}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        }
+        body = {
+            "pkcs12_file_url":  pfx_url,
+            "pkcs12_passphrase": passphrase,
+        }
+
         resp = _req.put(url, headers=headers, json=body,
                         verify=verify_ssl, timeout=60)
         log.debug("  PUT %s → HTTP %d  body=%s",
@@ -892,7 +841,7 @@ def verify_cert_installed(api: ApiPlatformCertificates, domain: str) -> bool:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Upload acme.sh certificate to Aruba ClearPass (pyclearpass SDK)",
+        description="Upload ACME certificate to Aruba ClearPass (pyclearpass SDK)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 SDK: pyclearpass  (github.com/aruba/pyclearpass)
@@ -1009,7 +958,7 @@ def main() -> int:
     log.info("  Domain   : %s", args.domain)
     log.info("  Callback : http://%s:%d/", callback_host, callback_port)
     log.info("  DNS      : %s", os.environ.get("DNS_PROVIDER", "unknown"))
-    log.info("  ACME CA  : %s", os.environ.get("ACME_SERVER", "letsencrypt"))
+    log.info("  ACME CA  : %s", _ca_label(os.environ.get("ACME_SERVER", "letsencrypt")))
     if not args.skip_https:
         log.info("  HTTPS cert: %s", args.https_cert or "(not provided)")
     if not args.skip_radius:
@@ -1155,7 +1104,11 @@ def main() -> int:
             )
             log.info("RADIUS upload response: %s", json.dumps(result, indent=2)
                      if isinstance(result, dict) else result)
-            if isinstance(result, dict) and result.get("status") != "skipped":
+            if isinstance(result, dict) and result.get("status") == "skipped":
+                status_write("INFO", "UPLOAD",
+                             f"RADIUS step skipped – CPPM uses a unified HTTPS/RADIUS cert; "
+                             f"HTTPS upload already covers RADIUS on {host}")
+            else:
                 status_write("OK", "UPLOAD", f"RADIUS(RSA) cert uploaded to {host}")
         except Exception as exc:
             log.error("RADIUS upload FAILED: %s", exc)

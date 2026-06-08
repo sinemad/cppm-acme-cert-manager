@@ -20,6 +20,7 @@ import datetime
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -44,7 +45,7 @@ from auth_utils import (
 )
 from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
-    server_cert_dir,
+    server_cert_dir, get_server_env_dict,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -270,6 +271,10 @@ _health_cache:       dict           = {}
 _HEALTH_TTL                         = 120  # seconds
 _health_prev_states: dict           = {}   # {server_id: {check_type: status_str}}
 
+# Serializes upload pipeline runs and the callback-port health check — both
+# bind the same fixed callback port, so they must not run concurrently.
+_UPLOAD_LOCK: threading.Lock = threading.Lock()
+
 # Level map for health check results → status.log level column
 _HEALTH_LEVEL: dict[str, str] = {
     "ok":      "OK",
@@ -476,7 +481,13 @@ def _check_callback(server: dict = None) -> dict:
     probe.close()
     _log.debug("callback-check [%s]: port %d is bindable", label, callback_port)
 
-    # Step 2 — spin up a minimal HTTP server and try reaching it via the external URL
+    # Step 2 — spin up a minimal HTTP server and try reaching it via the external URL.
+    # Skip if an upload pipeline is already holding the port.
+    if not _UPLOAD_LOCK.acquire(blocking=False):
+        _log.debug("callback-check [%s]: upload in progress — skipping round-trip test", label)
+        return {"status": "warn",
+                "message": f"Upload in progress — callback port {callback_port} is in use"}
+
     class _PingHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -485,9 +496,12 @@ def _check_callback(server: dict = None) -> dict:
         def log_message(self, *_):
             pass
 
+    class _PingServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
     httpd = None
     try:
-        httpd = socketserver.TCPServer(("0.0.0.0", callback_port), _PingHandler)
+        httpd = _PingServer(("0.0.0.0", callback_port), _PingHandler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         import requests as _req
         r = _req.get(url, timeout=4)
@@ -513,6 +527,7 @@ def _check_callback(server: dict = None) -> dict:
     finally:
         if httpd:
             httpd.shutdown()
+        _UPLOAD_LOCK.release()
 
 
 def _build_health() -> dict:
@@ -579,6 +594,78 @@ def _build_health() -> dict:
     return result
 
 
+# ── Cert pipeline trigger ─────────────────────────────────────────────────────
+
+_ISSUE_SCRIPT = Path("/opt/cppm/issue_cert.sh")
+
+def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
+    """Run issue_cert.sh for server_id in a background daemon thread."""
+    def _run():
+        if not _ISSUE_SCRIPT.exists():
+            _log.warning("cert pipeline: %s not found (not in container?)", _ISSUE_SCRIPT)
+            return
+        env_dict = get_server_env_dict(server_id)
+        if env_dict is None:
+            _log.error("cert pipeline: server %s not found", server_id)
+            return
+        Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, **env_dict, "FORCE_RENEW": "true" if force else "false"}
+        _log.info("cert pipeline: starting for %s (force=%s)", server_id, force)
+        try:
+            rc = subprocess.run([str(_ISSUE_SCRIPT)], env=env, check=False).returncode
+            _log.info("cert pipeline: finished for %s (rc=%d)", server_id, rc)
+        except Exception as exc:
+            _log.error("cert pipeline: error for %s: %s", server_id, exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
+
+def _status_write(status_log: str, level: str, category: str, message: str) -> None:
+    """Write a single status entry directly to a server's status.log."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        Path(status_log).parent.mkdir(parents=True, exist_ok=True)
+        with open(status_log, "a") as f:
+            f.write(f"{ts}\t{level}\t{category}\t{message}\n")
+    except Exception as exc:
+        _log.warning("status_write failed: %s", exc)
+
+
+def _spawn_upload_pipeline(server_id: str) -> None:
+    """Run deploy_hook.sh for server_id in a background daemon thread."""
+    def _run():
+        if not _DEPLOY_SCRIPT.exists():
+            _log.warning("upload pipeline: %s not found (not in container?)", _DEPLOY_SCRIPT)
+            return
+        env_dict = get_server_env_dict(server_id)
+        if env_dict is None:
+            _log.error("upload pipeline: server %s not found", server_id)
+            return
+        Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
+        status_log = env_dict.get("STATUS_LOG", "")
+
+        if not _UPLOAD_LOCK.acquire(blocking=False):
+            _log.warning("upload pipeline: another upload is already running, skipping %s", server_id)
+            if status_log:
+                _status_write(status_log, "WARN", "UPLOAD",
+                              "Upload skipped – another upload is already in progress. Try again in a moment.")
+            return
+
+        try:
+            env = {**os.environ, **env_dict}
+            _log.info("upload pipeline: starting for %s", server_id)
+            rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
+            _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
+        except Exception as exc:
+            _log.error("upload pipeline: error for %s: %s", server_id, exc)
+        finally:
+            _UPLOAD_LOCK.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 # ── Settings helpers ─────────────────────────────────────────────────────────
 
 # DNS credential keys per provider — used both to build form fields and to
@@ -589,6 +676,10 @@ _DNS_CRED_FIELDS: dict = {
     "route53":      ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"],
     "digitalocean": ["DO_API_KEY"],
     "godaddy":      ["GD_Key", "GD_Secret"],
+    "infoblox":     ["INFOBLOX_HOST", "INFOBLOX_USERNAME", "INFOBLOX_PASSWORD",
+                     "INFOBLOX_SSL_VERIFY", "INFOBLOX_VIEW", "INFOBLOX_WAPI_VERSION"],
+    "rfc2136":      ["RFC2136_NAMESERVER", "RFC2136_TSIG_KEY", "RFC2136_TSIG_SECRET",
+                     "RFC2136_TSIG_ALGORITHM", "RFC2136_DNS_TIMEOUT"],
 }
 
 
@@ -596,6 +687,8 @@ def _parse_server_form(f: dict) -> dict:
     """Convert POST form data into a server config dict."""
     provider  = f.get("dns_provider", "cloudflare")
     cred_keys = _DNS_CRED_FIELDS.get(provider, [])
+    acme_sel  = f.get("acme_server", "letsencrypt")
+    acme_server = f.get("acme_server_url", "").strip() if acme_sel == "custom" else acme_sel
     return {
         "label":                f.get("label", "").strip(),
         "cppm_host":            f.get("cppm_host", "").strip(),
@@ -607,14 +700,9 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
         "domain":               f.get("domain", "").strip(),
         "acme_email":           f.get("acme_email", "").strip(),
-        "acme_server":          f.get("acme_server", "letsencrypt"),
+        "acme_server":          acme_server or "letsencrypt",
         "dns_provider":         provider,
         "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
-        "trust_exclusions":     [
-            line.strip()
-            for line in f.get("trust_exclusions", "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ],
         "cert_types": [t for t in ("ecc", "rsa")
                        if f.get(f"issue_{t}") == "true"] or ["ecc", "rsa"],
     }
@@ -637,7 +725,6 @@ def _default_server_from_env() -> dict:
         "acme_server":          "letsencrypt",
         "dns_provider":         "cloudflare",
         "dns_credentials":      {},
-        "trust_exclusions":     [],
         "cert_types":           ["ecc", "rsa"],
     }
 
@@ -754,6 +841,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .flash{padding:0.6rem 0.9rem;border-radius:0.4rem;font-size:0.8rem;margin-bottom:1rem}
 .flash-err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--danger)}
 .flash-ok{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--ok)}
+.flash-warn{background:rgba(234,179,8,.1);border:1px solid rgba(234,179,8,.3);color:#92400e}
 .auth-cli{margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border);font-size:0.72rem;color:var(--subtle)}
 .auth-cli code{display:block;margin-top:0.35rem;font-family:monospace;background:#0a0f1a;padding:0.35rem 0.5rem;border-radius:3px;color:var(--muted);word-break:break-all}
 
@@ -779,16 +867,6 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 @media(max-width:640px){.form-2col{grid-template-columns:1fr}}
 .field select{width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.4rem 0.6rem;color:var(--text);font-size:0.85rem;outline:none;transition:border-color .15s}
 .field select:focus{border-color:var(--accent)}
-
-/* ── Trust exclusions page ── */
-.excl-card{margin-bottom:0.75rem}
-.excl-provider{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:0.75rem;padding-bottom:0.4rem;border-bottom:1px solid var(--border)}
-.excl-row{display:flex;align-items:baseline;gap:0.7rem;padding:0.32rem 0;cursor:pointer;font-size:0.82rem;line-height:1.4}
-.excl-row input[type=checkbox]{accent-color:var(--accent);cursor:pointer;flex-shrink:0;margin-top:0.2rem}
-.excl-cn{font-family:monospace;min-width:16rem;color:var(--text);transition:color .15s,text-decoration .15s}
-.excl-desc{color:var(--muted);font-size:0.75rem;transition:opacity .15s}
-.excl-row.excl-excluded .excl-cn{text-decoration:line-through;color:var(--subtle)}
-.excl-row.excl-excluded .excl-desc{opacity:0.45}
 
 /* ── Overview table ── */
 .overview-table{width:100%;border-collapse:collapse}
@@ -1100,170 +1178,19 @@ def _overview_page(username: str = "") -> str:
                  nav_user=username, active="dashboard", show_nav=True)
 
 
-def _server_detail_page(server_id: str, username: str = "") -> str:
+def _server_detail_page(server_id: str, username: str = "",
+                        flash_type: str = "", flash_msg: str = "") -> str:
     """Per-server drill-down (existing dashboard panels, accessed at /server/<id>)."""
+    flash_html = ""
+    if flash_msg:
+        flash_html = (f'<div class="app" style="margin-bottom:0">'
+                      f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+                      f'</div>')
     is_auth  = "true" if username else "false"
     sid_js   = (f'<script>var SERVER_ID="{_esc(server_id)}";'
                 f'var IS_AUTH={is_auth};</script>')
-    return _base("Server Details", _DETAIL_BODY + sid_js + _DETAIL_SCRIPT,
+    return _base("Server Details", flash_html + _DETAIL_BODY + sid_js + _DETAIL_SCRIPT,
                  nav_user=username, active="dashboard", show_nav=True)
-
-
-# ── Known CA patterns per ACME provider ──────────────────────────────────────
-
-_KNOWN_EXCLUSIONS: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Let's Encrypt CA Certificate Exclusion", [
-        ("ISRG Root X1", "Root CA — RSA trust anchor"),
-        ("ISRG Root X2", "Root CA — ECDSA trust anchor"),
-        ("R10", "RSA intermediate (2024 batch)"),
-        ("R11", "RSA intermediate (2024 batch)"),
-        ("R12", "RSA intermediate (2024 batch)"),
-        ("R13", "RSA intermediate (2024 batch)"),
-        ("R14", "RSA intermediate (2024 batch)"),
-        ("E5",  "ECDSA intermediate (2024 batch)"),
-        ("E6",  "ECDSA intermediate (2024 batch)"),
-        ("E7",  "ECDSA intermediate (2024 batch)"),
-        ("E8",  "ECDSA intermediate (2024 batch)"),
-        ("E9",  "ECDSA intermediate (2024 batch)"),
-        ("E10", "ECDSA intermediate (2024 batch)"),
-    ]),
-    ("ZeroSSL — Sectigo Chain CA Certificate Exclusion", [
-        ("ZeroSSL RSA Domain Secure Site CA",    "RSA intermediate"),
-        ("ZeroSSL ECC Domain Secure Site CA",    "ECDSA intermediate"),
-        ("USERTrust RSA Certification Authority", "Root CA — RSA"),
-        ("USERTrust ECC Certification Authority", "Root CA — ECDSA"),
-        ("Sectigo AAA Certificate Services",      "Legacy root (cross-signed)"),
-    ]),
-    ("Buypass CA Certificate Exclusion", [
-        ("Buypass Go SSL",          "Intermediate CA"),
-        ("Buypass Class 2 Root CA", "Root CA"),
-    ]),
-]
-
-_ALL_KNOWN_LOWER: set[str] = {
-    p.lower() for _, certs in _KNOWN_EXCLUSIONS for p, _ in certs
-}
-
-# Maps acme_server value → index into _KNOWN_EXCLUSIONS
-_ACME_PROVIDER_EXCL_IDX: dict[str, int] = {
-    "letsencrypt":      0,
-    "letsencrypt_test": 0,
-    "zerossl":          1,
-    "buypass":          2,
-}
-
-
-def _trust_exclusions_page(server: dict, username: str,
-                            flash_type: str = "", flash_msg: str = "") -> str:
-    """Per-server Trust Exclusions configuration page."""
-    sid         = _esc(str(server.get("id", "")))
-    label       = _esc(server.get("label") or server.get("cppm_host", ""))
-    active_list = server.get("trust_exclusions") or []
-    active_lower = {p.lower() for p in active_list}
-
-    flash_html = (
-        f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
-        if flash_msg else ""
-    )
-
-    acme_server  = server.get("acme_server", "letsencrypt")
-    excl_idx     = _ACME_PROVIDER_EXCL_IDX.get(acme_server)
-    excl_sections = [_KNOWN_EXCLUSIONS[excl_idx]] if excl_idx is not None else _KNOWN_EXCLUSIONS
-
-    provider_html = ""
-    for provider_name, certs in excl_sections:
-        rows = "".join(
-            f'<label class="excl-row">'
-            f'<input type="checkbox" value="{_esc(p)}" onchange="teCbChange(this)"'
-            f'{" checked" if p.lower() in active_lower else ""}>'
-            f'<span class="excl-cn">{_esc(p)}</span>'
-            f'<span class="excl-desc">{_esc(d)}</span>'
-            f'</label>'
-            for p, d in certs
-        )
-        provider_html += (
-            f'<div class="card excl-card">'
-            f'<div class="excl-provider">{_esc(provider_name)}</div>'
-            f'{rows}'
-            f'</div>'
-        )
-
-    te_val = _esc("\n".join(active_list))
-
-    body = f"""
-<div class="app">
-  <div class="page-hdr">
-    <span class="page-title">Trust Exclusions</span>
-    <a href="/settings/edit/{sid}" class="btn btn-ghost">&#8592; Back to Edit Server</a>
-  </div>
-  <div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.25rem">
-    Server: <strong style="color:var(--text)">{label}</strong>
-  </div>
-  {flash_html}
-  <div class="card" style="margin-bottom:1rem;font-size:0.82rem;color:var(--muted);line-height:1.65">
-    Checked certificates are <strong style="color:var(--text)">excluded</strong> from
-    ClearPass trust list management for this server — they will not be verified or
-    uploaded even if present in the certificate chain. Leave all unchecked to manage
-    all CA certificates automatically (recommended default).
-  </div>
-  <form method="POST" action="/settings/trust-exclusions/{sid}">
-    {provider_html}
-    <div class="card excl-card">
-      <div class="excl-provider">Active Exclusions</div>
-      <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem;line-height:1.5">
-        One CN pattern per line. Case-insensitive partial match against the certificate
-        Subject CN — e.g. <code style="font-size:0.75rem;color:var(--accent)">ISRG Root</code>
-        matches both ISRG Root X1 and X2. Use the checkboxes above or edit directly.
-      </p>
-      <textarea id="trust_exclusions" name="trust_exclusions" rows="4"
-        style="width:100%;background:#0f172a;border:1px solid var(--border2);
-               border-radius:0.4rem;padding:0.5rem 0.75rem;color:var(--text);
-               font-family:monospace;font-size:0.82rem;resize:vertical;outline:none;
-               transition:border-color .15s"
-        onfocus="this.style.borderColor='var(--accent)'"
-        onblur="this.style.borderColor=''"
-        oninput="teSync()"
-        >{te_val}</textarea>
-    </div>
-    <div style="display:flex;gap:0.75rem;margin-top:1.25rem">
-      <button type="submit" class="btn btn-primary">Save Exclusions</button>
-      <a href="/settings/edit/{sid}" class="btn btn-ghost">Cancel</a>
-    </div>
-  </form>
-</div>"""
-
-    script = """
-<script>
-function teSetStrike(cb) {
-  cb.closest('.excl-row').classList.toggle('excl-excluded', cb.checked);
-}
-function teSync() {
-  var ta = document.getElementById('trust_exclusions');
-  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
-  var active = {};
-  lines.forEach(function(l){active[l.toLowerCase()] = true;});
-  document.querySelectorAll('.excl-row input[type=checkbox]').forEach(function(cb){
-    cb.checked = !!active[cb.value.toLowerCase()];
-    teSetStrike(cb);
-  });
-}
-function teCbChange(cb) {
-  var ta = document.getElementById('trust_exclusions');
-  var lines = ta.value.split('\\n').map(function(l){return l.trim();}).filter(Boolean);
-  if (cb.checked) {
-    if (lines.map(function(l){return l.toLowerCase();}).indexOf(cb.value.toLowerCase()) === -1)
-      lines.push(cb.value);
-  } else {
-    lines = lines.filter(function(l){return l.toLowerCase() !== cb.value.toLowerCase();});
-  }
-  ta.value = lines.join('\\n');
-  teSetStrike(cb);
-}
-document.addEventListener('DOMContentLoaded', teSync);
-</script>"""
-
-    return _base("Trust Exclusions", body + script,
-                 nav_user=username, active="settings", show_nav=True)
 
 
 # ── Settings pages ───────────────────────────────────────────────────────────
@@ -1300,6 +1227,23 @@ def _settings_list_page(servers: list, username: str,
                 f' onclick="hideDelConfirm(\'{sid}\')">No</button>'
                 f'</span>'
             )
+            run_btn = (
+                f'<form method="POST" action="/settings/run/{sid}"'
+                f' style="display:inline;margin-right:0.4rem"'
+                f' onsubmit="return confirm('
+                f"'Issue new ACME certificates for {label}?\\n\\n"
+                f"Warning: this counts against your ACME CA rate limit "
+                f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
+                f"Use Upload to ClearPass instead if certs are already issued and just need uploading.')\">"
+                f'<button type="submit" class="btn btn-ghost">&#9654; Issue Cert Now</button>'
+                f'</form>'
+            )
+            upload_btn = (
+                f'<form method="POST" action="/settings/upload/{sid}"'
+                f' style="display:inline;margin-right:0.4rem">'
+                f'<button type="submit" class="btn btn-ghost">&#8679; Upload to ClearPass</button>'
+                f'</form>'
+            )
             rows += (
                 f'<tr>'
                 f'<td><strong>{label}</strong></td>'
@@ -1308,6 +1252,8 @@ def _settings_list_page(servers: list, username: str,
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
+                f'{run_btn}'
+                f'{upload_btn}'
                 f'{del_btn}'
                 f'</td>'
                 f'</tr>'
@@ -1367,17 +1313,14 @@ def _settings_form_page(server: dict = None, error: str = "",
     def sel(v, t):    return " selected" if v == t else ""
     def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
 
-    acme_srv   = s.get("acme_server", "letsencrypt")
+    acme_srv_raw = s.get("acme_server", "letsencrypt")
+    acme_is_custom = acme_srv_raw.startswith("http")
+    acme_srv   = "custom" if acme_is_custom else acme_srv_raw
+    acme_custom_url = _esc(acme_srv_raw) if acme_is_custom else ""
     verify     = " checked" if s.get("cppm_verify_ssl") else ""
     cert_types = s.get("cert_types") or ["ecc", "rsa"]
     chk_ecc    = " checked" if "ecc" in cert_types else ""
     chk_rsa    = " checked" if "rsa" in cert_types else ""
-    te_link  = (
-        f'<div style="margin-top:0.85rem">'
-        f'<a href="/settings/trust-exclusions/{sid}" class="btn btn-ghost">Trust Exclusions</a>'
-        f'</div>'
-    ) if is_edit else ""
-
     # Form body — f-string with all interpolated Python values.
     # JavaScript is in a separate raw string appended below (no {{ }} issues).
     form = f"""
@@ -1462,12 +1405,29 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>
       <div class="field">
         <label>Certificate Authority</label>
-        <select name="acme_server">
+        <select name="acme_server" id="acme_server" onchange="switchAcme(this.value)">
           <option value="letsencrypt"{sel(acme_srv,'letsencrypt')}>Let&apos;s Encrypt</option>
           <option value="letsencrypt_test"{sel(acme_srv,'letsencrypt_test')}>Let&apos;s Encrypt (Staging)</option>
           <option value="zerossl"{sel(acme_srv,'zerossl')}>ZeroSSL</option>
           <option value="buypass"{sel(acme_srv,'buypass')}>Buypass</option>
+          <option value="buypass_test"{sel(acme_srv,'buypass_test')}>Buypass (Staging)</option>
+          <option value="custom"{sel(acme_srv,'custom')}>Custom / Private CA</option>
         </select>
+      </div>
+      <div id="acme-custom-section" style="{'display:none' if acme_srv != 'custom' else ''}">
+        <div class="flash flash-warn" style="margin-bottom:0.75rem">
+          <strong>Private ACME server required.</strong>
+          A private or internal ACME server (e.g. Step-CA, EJBCA, HashiCorp Vault PKI, or
+          AD&nbsp;CS with ACME) must be running and reachable by this container before
+          certificates can be issued. The domain must resolve from the CA&apos;s perspective.
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>ACME Directory URL</label>
+          <input type="url" name="acme_server_url" id="acme_server_url"
+                 value="{acme_custom_url}"
+                 placeholder="https://ca.corp.local/acme/acme/directory"
+                 autocomplete="off">
+        </div>
       </div>
       <div class="field" style="margin-bottom:0">
         <label>Certificate Types</label>
@@ -1482,7 +1442,6 @@ def _settings_form_page(server: dict = None, error: str = "",
           RSA <span class="hint">— RADIUS / 802.1x</span>
         </label>
       </div>
-      {te_link}
     </div>
 
     <div class="card" style="margin-bottom:1.5rem">
@@ -1495,6 +1454,8 @@ def _settings_form_page(server: dict = None, error: str = "",
           <option value="route53"{sel(s.get('dns_provider',''),'route53')}>AWS Route 53</option>
           <option value="digitalocean"{sel(s.get('dns_provider',''),'digitalocean')}>DigitalOcean</option>
           <option value="godaddy"{sel(s.get('dns_provider',''),'godaddy')}>GoDaddy</option>
+          <option value="infoblox"{sel(s.get('dns_provider',''),'infoblox')}>Infoblox</option>
+          <option value="rfc2136"{sel(s.get('dns_provider',''),'rfc2136')}>RFC 2136 (nsupdate / AD DNS)</option>
         </select>
       </div>
 
@@ -1586,6 +1547,77 @@ def _settings_form_page(server: dict = None, error: str = "",
           </div>
         </div>
       </div>
+
+      <div id="dns-infoblox" class="dns-section"{vis('infoblox')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Grid Master Host <span class="hint">(hostname or IP)</span></label>
+            <input type="text" name="INFOBLOX_HOST" value="{cv('INFOBLOX_HOST')}"
+                   autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Username</label>
+            <input type="text" name="INFOBLOX_USERNAME" value="{cv('INFOBLOX_USERNAME')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>Password</label>
+            <input type="password" name="INFOBLOX_PASSWORD" value="{cv('INFOBLOX_PASSWORD')}"
+                   autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>DNS View <span class="hint">(default: default)</span></label>
+            <input type="text" name="INFOBLOX_VIEW" value="{cv('INFOBLOX_VIEW', 'default')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col" style="margin-bottom:0">
+          <div class="field">
+            <label>WAPI Version <span class="hint">(default: 2.5)</span></label>
+            <input type="text" name="INFOBLOX_WAPI_VERSION"
+                   value="{cv('INFOBLOX_WAPI_VERSION', '2.5')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>SSL Verify <span class="hint">(true/false)</span></label>
+            <input type="text" name="INFOBLOX_SSL_VERIFY"
+                   value="{cv('INFOBLOX_SSL_VERIFY', 'true')}" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div id="dns-rfc2136" class="dns-section"{vis('rfc2136')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Nameserver <span class="hint">(host or host:port)</span></label>
+            <input type="text" name="RFC2136_NAMESERVER" value="{cv('RFC2136_NAMESERVER')}"
+                   autocomplete="off">
+          </div>
+          <div class="field">
+            <label>TSIG Key Name <span class="hint">(leave blank for unsigned updates)</span></label>
+            <input type="text" name="RFC2136_TSIG_KEY" value="{cv('RFC2136_TSIG_KEY')}"
+                   autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>TSIG Secret</label>
+            <input type="password" name="RFC2136_TSIG_SECRET"
+                   value="{cv('RFC2136_TSIG_SECRET')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>TSIG Algorithm <span class="hint">(default: hmac-md5)</span></label>
+            <input type="text" name="RFC2136_TSIG_ALGORITHM"
+                   value="{cv('RFC2136_TSIG_ALGORITHM', 'hmac-md5')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>DNS Timeout <span class="hint">(seconds, default: 10)</span></label>
+          <input type="text" name="RFC2136_DNS_TIMEOUT"
+                 value="{cv('RFC2136_DNS_TIMEOUT', '10')}" autocomplete="off">
+        </div>
+      </div>
     </div>
 
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
@@ -1607,8 +1639,17 @@ function switchDns(val) {
     });
   });
 }
-(function() { switchDns(document.getElementById('dns_provider').value); })();
-
+function switchAcme(val) {
+  var sec = document.getElementById('acme-custom-section');
+  var urlInput = document.getElementById('acme_server_url');
+  var isCustom = val === 'custom';
+  sec.style.display = isCustom ? '' : 'none';
+  urlInput.required = isCustom;
+}
+(function() {
+  switchDns(document.getElementById('dns_provider').value);
+  switchAcme(document.getElementById('acme_server').value);
+})();
 </script>"""
 
     return _base(title, form + script,
@@ -1622,12 +1663,14 @@ function switchDns(val) {
 _DNS_DISPLAY = {
     "cloudflare": "Cloudflare", "porkbun": "Porkbun",
     "route53": "AWS Route 53", "digitalocean": "DigitalOcean", "godaddy": "GoDaddy",
+    "infoblox": "Infoblox", "rfc2136": "RFC 2136",
 }
 _ACME_DISPLAY = {
     "letsencrypt":      "Let's Encrypt",
     "letsencrypt_test": "Let's Encrypt (Staging)",
     "zerossl":          "ZeroSSL",
     "buypass":          "Buypass",
+    "buypass_test":     "Buypass (Staging)",
 }
 
 
@@ -1681,7 +1724,8 @@ def _overview_rows(servers: list) -> str:
         sid  = _esc(str(s.get("id", "")))
         host = _esc(s.get("cppm_host", ""))
         dns  = _esc(_DNS_DISPLAY.get(s.get("dns_provider", ""), s.get("dns_provider", "")))
-        acme = _esc(_ACME_DISPLAY.get(s.get("acme_server", ""), s.get("acme_server", "")))
+        _acme_raw = s.get("acme_server", "")
+        acme = _esc(_ACME_DISPLAY.get(_acme_raw, "Custom CA" if _acme_raw.startswith("http") else _acme_raw))
         ecc  = s.get("certs", {}).get("ecc", {"exists": False})
         rsa  = s.get("certs", {}).get("rsa", {"exists": False})
         raw_sid = str(s.get("id", ""))
@@ -1722,8 +1766,8 @@ var HEALTH_MS  = 300000;
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function cls(d){if(d==null)return'none';if(d>30)return'ok';if(d>14)return'warn';return'danger';}
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
-function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy'};return m[p]||p||'—';}
-function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass'};return m[s]||s||'—';}
+function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p||'—';}
+function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s)||'—';}
 
 function renderMiniCert(cert,label,svc){
   var svcHtml=svc?'<div class="mini-svc">'+esc(svc)+'</div>':'';
@@ -1929,8 +1973,8 @@ function cls(d) {
 }
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function fmtDT(iso){if(!iso)return'—';try{return new Date(iso).toLocaleString('en-US',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});}catch(e){return iso;}}
-function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy'};return m[p]||p;}
-function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass'};return m[s]||s;}
+function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p;}
+function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s);}
 function lvlBadge(l){var c={OK:'lvl-ok',WARN:'lvl-warn',FAILED:'lvl-failed',INFO:'lvl-info'}[l]||'lvl-info';return'<span class="lvl '+c+'">'+esc(l)+'</span>';}
 function keyLabel(cert){if(!cert.key_type)return'—';if(cert.key_type==='ECDSA'&&cert.key_curve)return cert.key_type+' ('+cert.key_curve+')';if(cert.key_size)return cert.key_type+' '+cert.key_size+'-bit';return cert.key_type;}
 
@@ -2021,11 +2065,11 @@ async function loadStatus(){
 }
 var _healthRetry=0;
 async function loadHealth(){
+  var ok=false;
   try{
     var res=await fetch('/api/health');
     if(res.ok){
       _healthData=await res.json();
-      _healthRetry=0;
       var sh=(_healthData.servers&&_healthData.servers[_SERVER_ID])||{};
       var ce=document.getElementById('d-dot-cppm');
       var de=document.getElementById('d-dot-dns');
@@ -2033,11 +2077,17 @@ async function loadHealth(){
       if(ce&&sh.cppm)    applyDot(ce,sh.cppm);
       if(de&&sh.dns)     applyDot(de,sh.dns);
       if(cbe&&sh.callback) applyDot(cbe,sh.callback);
+      ok=true;
     }
   }catch(e){}
-  var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
-  _healthRetry=Math.min(_healthRetry+1,3);
-  setTimeout(loadHealth,delay);
+  if(ok){
+    _healthRetry=0;
+    setTimeout(loadHealth,HEALTH_MS);
+  }else{
+    var delay=_healthRetry<3?[5000,10000,30000][_healthRetry]:HEALTH_MS;
+    _healthRetry=Math.min(_healthRetry+1,3);
+    setTimeout(loadHealth,delay);
+  }
 }
 setInterval(loadStatus,REFRESH_MS);
 loadStatus();
@@ -2309,12 +2359,17 @@ class Handler(BaseHTTPRequestHandler):
             # ── Pages ────────────────────────────────────────────────────────
             if path.startswith("/server/"):
                 server_id = path[len("/server/"):].strip("/")
+                qs        = parse_qs(urlparse(self.path).query)
+                ftype     = qs.get("ft", [""])[0]
+                fmsg      = qs.get("fm", [""])[0]
                 servers   = load_servers()
                 valid = (any(s.get("id") == server_id for s in servers)
                          if servers else server_id == "env")
                 if not valid:
                     return self._redirect("/")
-                return self._serve_html(_server_detail_page(server_id, username or ""))
+                return self._serve_html(
+                    _server_detail_page(server_id, username or "", ftype, fmsg)
+                )
 
             # "/" and "/index.html" → overview
             return self._serve_html(_overview_page(username or ""))
@@ -2375,18 +2430,6 @@ class Handler(BaseHTTPRequestHandler):
                 _settings_form_page(srv, is_edit=True, username=username)
             )
 
-        if path.startswith("/settings/trust-exclusions/"):
-            server_id = path[len("/settings/trust-exclusions/"):].strip("/")
-            qs    = parse_qs(urlparse(self.path).query)
-            ftype = qs.get("ft", [""])[0]
-            fmsg  = qs.get("fm", [""])[0]
-            srv = get_server(server_id)
-            if srv is None:
-                return self._redirect("/settings?ft=err&fm=Server+not+found")
-            return self._serve_html(
-                _trust_exclusions_page(srv, username, ftype, fmsg)
-            )
-
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2431,8 +2474,10 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_delete()
         elif path.startswith("/settings/edit/"):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
-        elif path.startswith("/settings/trust-exclusions/"):
-            self._handle_trust_exclusions_save(path[len("/settings/trust-exclusions/"):].strip("/"))
+        elif path.startswith("/settings/run/"):
+            self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
+        elif path.startswith("/settings/upload/"):
+            self._handle_settings_upload(path[len("/settings/upload/"):].strip("/"))
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -2536,9 +2581,10 @@ class Handler(BaseHTTPRequestHandler):
         f     = self._parse_form()
         entry = _parse_server_form(f)
         try:
-            add_server(entry)
+            server_id = add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
-            self._redirect("/settings?ft=ok&fm=Server+added")
+            _spawn_cert_pipeline(server_id, force=True)
+            self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
             self._serve_html(
@@ -2577,33 +2623,33 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._redirect("/settings?ft=err&fm=Server+not+found")
 
-    def _handle_trust_exclusions_save(self, server_id: str):
+    def _handle_settings_run(self, server_id: str):
         username = self._get_session_user()
         if not username:
             return self._redirect("/login")
         srv = get_server(server_id)
         if srv is None:
             return self._redirect("/settings?ft=err&fm=Server+not+found")
-        f = self._parse_form()
-        patterns = [
-            line.strip()
-            for line in f.get("trust_exclusions", "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        srv["trust_exclusions"] = patterns
-        try:
-            update_server(server_id, srv)
-            _log.info("trust-exclusions: '%s' saved %d pattern(s) for server '%s'",
-                      username, len(patterns), server_id)
-            self._redirect(
-                f"/settings/trust-exclusions/{server_id}"
-                f"?ft=ok&fm=Trust+exclusions+saved."
-            )
-        except Exception as exc:
-            _log.error("trust-exclusions save failed: %s\n%s", exc, traceback.format_exc())
-            self._serve_html(
-                _trust_exclusions_page(srv, username, "err", f"Save failed: {exc}")
-            )
+        _log.info("settings: '%s' triggered cert pipeline for '%s'", username, srv.get("label"))
+        _spawn_cert_pipeline(server_id, force=True)
+        self._redirect(
+            f"/server/{server_id}?ft=ok&fm=Certificate+pipeline+started."
+            f"+Results+will+appear+in+the+Activity+Log+below."
+        )
+
+    def _handle_settings_upload(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        srv = get_server(server_id)
+        if srv is None:
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        _log.info("settings: '%s' triggered upload pipeline for '%s'", username, srv.get("label"))
+        _spawn_upload_pipeline(server_id)
+        self._redirect(
+            f"/server/{server_id}?ft=ok&fm=Upload+pipeline+started."
+            f"+Results+will+appear+in+the+Activity+Log+below."
+        )
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.

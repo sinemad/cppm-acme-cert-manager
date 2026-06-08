@@ -1,5 +1,7 @@
+tests/
 .DS_Store
 .env
+docker-compose.override.yml
 *.zip
 settings.json
 *.log

@@ -37,15 +37,18 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 
 ---
 
-## Updating `.env` settings
+## Updating docker-compose.override.yml settings
 
-`.env` controls container-level behaviour — ports, timezone, and operational
-flags. If you change `STATUS_PORT`, `CPPM_CALLBACK_PORT`, or `TZ`, recreate
-the container to pick up the changes:
+`docker-compose.override.yml` controls container-level behaviour — ports,
+timezone, and operational flags. If you change `STATUS_PORT`,
+`CPPM_CALLBACK_PORT`, or `TZ`, recreate the container to pick up the changes:
 
 ```bash
 docker compose up -d --force-recreate
 ```
+
+> When changing a port, update **both** the `environment` section and the
+> `ports` section in the override file so the two sides stay in sync.
 
 ---
 
@@ -68,20 +71,31 @@ Then enable SSL verification in the web UI:
 ## Manually re-upload to ClearPass
 
 Use this if the cert is already current but needs to be re-uploaded
-(e.g. after a CPPM rebuild or restore):
+(e.g. after a CPPM rebuild, restore, or a previous upload failure). No new
+certificates are issued and the ACME CA is not contacted.
+
+**Web UI (preferred):** Navigate to **Servers**, then click **Upload to ClearPass**
+on the server row. You are redirected to the server detail page and the Activity
+Log updates as the upload progresses.
+
+**CLI alternative:**
 
 ```bash
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
-This runs the full upload sequence: trust list pre-flight, HTTPS cert upload,
-RADIUS cert upload.
+Both methods run the same sequence: trust list pre-flight, HTTPS(ECC) cert upload,
+RADIUS(RSA) cert upload.
+
+> Only one upload can run at a time. If a renewal or another upload is already
+> in progress, `deploy_hook.sh` exits immediately with a WARN in the Activity Log.
+> Wait a moment and retry.
 
 ---
 
-## Manually run install-cert only
+## Manually run install only
 
-If acme.sh has the cert in its internal state but the flat files are missing
+If Lego has the cert in its internal state but the flat files are missing
 (visible in `status.log` as "Flat files missing"):
 
 ```bash
@@ -95,17 +109,24 @@ No DNS challenge is performed. No contact with the ACME CA.
 ## Force a full certificate re-issue
 
 Use this to rotate the certificate before it is due (e.g. key compromise,
-CPPM migration):
+CPPM migration). This contacts the ACME CA and counts against the rate limit
+(Let's Encrypt: 5 duplicate certificates per domain per week).
+
+**Web UI (preferred):** Navigate to **Servers**, then click **Issue Cert Now**
+on the server row. Confirm the rate-limit warning. You are redirected to the
+server detail page and the Activity Log shows progress in real time.
+
+**CLI / container flag alternative** (useful when the web UI is unavailable):
 
 ```bash
-# 1. Set the flag in .env
-#    FORCE_RENEW=true
+# 1. Set the flag in docker-compose.override.yml:
+#      FORCE_RENEW: "true"
 docker compose up -d --force-recreate
 docker compose logs -f
 # Wait for "New certificate issued" and "Upload succeeded" in the logs
 
-# 2. Clear the flag when done
-#    FORCE_RENEW=false
+# 2. Clear the flag when done:
+#      FORCE_RENEW: "false"
 docker compose up -d --force-recreate
 ```
 
@@ -142,66 +163,6 @@ Output appends to each server's `/opt/cppm-certs/<cppm_host>/.logs/cppm_upload.l
 and records a `TRUST` entry in the per-server `status.log`.
 
 ---
-
-## Trust exclusion configuration
-
-You can exclude specific CA or intermediate certificates from trust list
-operations. There are two layers: per-server (primary) and a global file
-(fallback for backwards compatibility).
-
-### Per-server exclusions (recommended)
-
-Configure exclusions in the web UI for each ClearPass server individually:
-
-1. Navigate to **Servers** in the web UI.
-2. Click **Edit** on the server row you want to configure.
-3. In the **ACME Provider** section, click **Trust Exclusions**.
-4. Check the certificates you want to exclude — the label strikes through to
-   confirm the selection.
-5. Click **Save Exclusions**.
-
-Per-server exclusions are stored in `servers.json` alongside the other server
-configuration and take effect at the next scheduled or manual trust check.
-No container restart is required.
-
-Exclusions are organised by ACME provider for clarity. You can also type
-custom patterns directly in the **Active Exclusions** textarea — one CN pattern
-per line, case-insensitive partial match against the certificate Subject CN.
-
-#### Example use cases
-
-| Goal | What to exclude |
-|---|---|
-| R11 is already imported manually in this CPPM | `R11` |
-| RADIUS uses RSA-only EAP — no ECDSA root needed | `ISRG Root X2` |
-| Exclude all 2024 ECDSA intermediates | `E5`, `E6`, `E7`, `E8`, `E9`, `E10` |
-| Running ZeroSSL — exclude LE roots | `ISRG Root X1`, `ISRG Root X2` |
-
-### Global fallback file
-
-A `trust-exclusions.conf` file on the persistent volume applies to any server
-that has no per-server exclusions configured:
-
-```
-/opt/cppm-certs/trust-exclusions.conf   (host path — edit this one)
-/data/certs/trust-exclusions.conf       (container path)
-```
-
-This file is seeded automatically from the image default on first container
-start. Edit it on the host — no container restart required; changes take effect
-at the next scheduled or manual trust check:
-
-```bash
-nano /opt/cppm-certs/trust-exclusions.conf
-```
-
-**Priority:** per-server exclusions always win. The global file is only
-consulted when a server's per-server exclusion list is empty. Once you
-configure per-server exclusions for a server through the web UI, the global
-file is no longer consulted for that server.
-
-If you delete or corrupt the file, the container restores the image default on
-next restart.
 
 ---
 
@@ -255,7 +216,7 @@ you will see entries like the following — no action is required.
 2026-06-08 03:00:07 | OK     | TRUST   | 9 CA certs verified – 0 uploaded, 0 patched, 9 already trusted
 ```
 
-For detailed acme.sh renewal output see `acme_renewal.log`; for full ClearPass
+For detailed Lego renewal output see `acme_renewal.log`; for full ClearPass
 API upload logs see `cppm_upload.log`. Both are in
 `/opt/cppm-certs/<cppm_host>/.logs/` and are also accessible in the web UI
 (sign-in required) on the server detail page.
@@ -339,8 +300,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
 docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
-acme.sh --list                         # show all certs managed by acme.sh
-acme.sh --info -d cppm.example.com     # show detail for this domain
+lego --path /data/certs/cppm.example.com/lego-ecc list  # show ECC certs known to Lego
+lego --path /data/certs/cppm.example.com/lego-rsa list  # show RSA certs known to Lego
 cat /data/certs/status.log             # view status log
 cat /data/certs/servers.json           # view server configuration
 ```

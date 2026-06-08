@@ -1,5 +1,25 @@
 version: "3.9"
 
+# ── Base configuration ────────────────────────────────────────────────────────
+# Defaults here work for most deployments without any changes.
+#
+# To override settings for your environment, copy the provided template:
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Docker Compose automatically merges docker-compose.override.yml with this
+# file — no flags or extra commands needed. Only the values you uncomment and
+# change in the override file take effect; everything else stays at the default
+# defined here.
+#
+# ── Changing ports ────────────────────────────────────────────────────────────
+# Every port is defined in TWO places: the environment section (tells the app
+# which port to listen on inside the container) and the ports section (tells
+# Docker which host port to forward). If you change a port, you must update
+# BOTH places in docker-compose.override.yml. See the override template for
+# step-by-step instructions.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
   cppm-acme-cert-manager:
     build:
@@ -11,64 +31,77 @@ services:
 
     environment:
       # ── Container ────────────────────────────────────────────────────────────
-      TZ: ${TZ:-UTC}
+      # Timezone for log timestamps and cron scheduling.
+      # Common values:
+      #   UTC                      Coordinated Universal Time
+      #
+      #   America/New_York         US Eastern    (UTC-5 / UTC-4 DST)
+      #   America/Chicago          US Central    (UTC-6 / UTC-5 DST)
+      #   America/Denver           US Mountain   (UTC-7 / UTC-6 DST)
+      #   America/Los_Angeles      US Pacific    (UTC-8 / UTC-7 DST)
+      #   America/Anchorage        US Alaska     (UTC-9 / UTC-8 DST)
+      #   America/Honolulu         US Hawaii     (UTC-10, no DST)
+      #   America/Toronto          Canada Eastern
+      #   America/Vancouver        Canada Pacific
+      #   America/Sao_Paulo        Brazil Eastern
+      #
+      #   Europe/London            UK            (UTC+0 / UTC+1 BST)
+      #   Europe/Paris             Central Europe (UTC+1 / UTC+2 CEST)
+      #   Europe/Berlin            Germany
+      #   Europe/Amsterdam         Netherlands
+      #   Europe/Stockholm         Sweden
+      #   Europe/Helsinki          Finland / Baltics (UTC+2 / UTC+3 EEST)
+      #   Europe/Athens            Greece
+      #   Europe/Moscow            Russia Moscow  (UTC+3, no DST)
+      #
+      #   Asia/Dubai               UAE           (UTC+4, no DST)
+      #   Asia/Kolkata             India         (UTC+5:30, no DST)
+      #   Asia/Bangkok             SE Asia       (UTC+7, no DST)
+      #   Asia/Singapore           Singapore     (UTC+8, no DST)
+      #   Asia/Shanghai            China         (UTC+8, no DST)
+      #   Asia/Tokyo               Japan         (UTC+9, no DST)
+      #   Asia/Seoul               South Korea   (UTC+9, no DST)
+      #
+      #   Australia/Perth          WA            (UTC+8, no DST)
+      #   Australia/Adelaide       SA            (UTC+9:30 / UTC+10:30 DST)
+      #   Australia/Sydney         NSW / VIC     (UTC+10 / UTC+11 DST)
+      #   Pacific/Auckland         New Zealand   (UTC+12 / UTC+13 DST)
+      #
+      # Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      TZ: UTC
 
       # ── Web UI ───────────────────────────────────────────────────────────────
-      # Port must match the host-side port mapping below.
-      STATUS_PORT:             ${STATUS_PORT:-8080}
-      REQUIRE_AUTH_FOR_STATUS: ${REQUIRE_AUTH_FOR_STATUS:-false}
-      SESSION_LIFETIME_HOURS:  ${SESSION_LIFETIME_HOURS:-8}
+      # Port the web interface listens on inside the container.
+      # The matching host-side port mapping is in the ports section below.
+      # To change: update STATUS_PORT here AND the ports entry — see override template.
+      STATUS_PORT: "8080"
+      REQUIRE_AUTH_FOR_STATUS: "false"
+      SESSION_LIFETIME_HOURS: "8"
 
       # ── Certificate upload callback ──────────────────────────────────────────
-      # Port must match the host-side port mapping below.
-      # CPPM fetches the PKCS12 via http://<callback_host>:<port>/ during upload.
-      # The callback HOST is set per-server in the web UI (Servers page).
-      CPPM_CALLBACK_PORT: ${CPPM_CALLBACK_PORT:-8765}
+      # Port the temporary PKCS12 delivery server listens on inside the container.
+      # CPPM fetches the certificate file from http://<callback_host>:<port>/
+      # during upload. The callback HOST is set per-server in the web UI.
+      # To change: update CPPM_CALLBACK_PORT here AND the ports entry — see override template.
+      CPPM_CALLBACK_PORT: "8765"
 
       # ── Operational flags ────────────────────────────────────────────────────
-      FORCE_RENEW:  ${FORCE_RENEW:-false}
-      SKIP_UPLOAD:  ${SKIP_UPLOAD:-false}
-      LOG_LEVEL:    ${LOG_LEVEL:-INFO}
+      FORCE_RENEW: "false"
+      SKIP_UPLOAD: "false"
+      LOG_LEVEL: INFO
 
-      # ── Legacy migration vars ────────────────────────────────────────────────
-      # These are only used once, on first startup, to auto-migrate an existing
-      # .env-based configuration into servers.json. After migration they are
-      # ignored. New installations configure servers through the web UI instead.
-      #
-      # All default to empty string — no effect if not set in .env.
-      DOMAIN:               ${DOMAIN:-}
-      ACME_EMAIL:           ${ACME_EMAIL:-}
-      ACME_SERVER:          ${ACME_SERVER:-letsencrypt}
-      DNS_PROVIDER:         ${DNS_PROVIDER:-cloudflare}
-      CF_Token:             ${CF_Token:-}
-      CF_Account_ID:        ${CF_Account_ID:-}
-      CF_Zone_ID:           ${CF_Zone_ID:-}
-      CF_Key:               ${CF_Key:-}
-      CF_Email:             ${CF_Email:-}
-      PORKBUN_API_KEY:        ${PORKBUN_API_KEY:-}
-      PORKBUN_SECRET_API_KEY: ${PORKBUN_SECRET_API_KEY:-}
-      AWS_ACCESS_KEY_ID:      ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY:  ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION:     ${AWS_DEFAULT_REGION:-us-east-1}
-      DO_API_KEY:             ${DO_API_KEY:-}
-      GD_Key:                 ${GD_Key:-}
-      GD_Secret:              ${GD_Secret:-}
-      CPPM_HOST:            ${CPPM_HOST:-}
-      CPPM_CLIENT_ID:       ${CPPM_CLIENT_ID:-}
-      CPPM_CLIENT_SECRET:   ${CPPM_CLIENT_SECRET:-}
-      CPPM_VERIFY_SSL:      ${CPPM_VERIFY_SSL:-false}
-      CPPM_CERT_PASSPHRASE: ${CPPM_CERT_PASSPHRASE:-}
-      CPPM_CALLBACK_HOST:   ${CPPM_CALLBACK_HOST:-}
+    ports:
+      # PKCS12 callback — CPPM fetches the certificate from this port.
+      # Format: "<host_port>:<container_port>"
+      # Container port must match CPPM_CALLBACK_PORT above.
+      - "8765:8765"
+      # Web UI — browse to http://<docker-host>:8080/
+      # Container port must match STATUS_PORT above.
+      - "8080:8080"
 
     volumes:
       # Single persistent volume – certificates, config, and logs.
       - cppm_certs:/data/certs
-
-    ports:
-      # Temporary HTTP server for PKCS12 delivery during cert upload.
-      - "${CPPM_CALLBACK_PORT:-8765}:${CPPM_CALLBACK_PORT:-8765}"
-      # Web UI. Browse to http://<docker-host>:STATUS_PORT/
-      - "${STATUS_PORT:-8080}:${STATUS_PORT:-8080}"
 
     logging:
       driver: "json-file"

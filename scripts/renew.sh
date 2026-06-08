@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# renew.sh – Called by crond twice daily to check and renew certificates
-#            Iterates over all servers configured in servers.json
+# renew.sh – Called by supercronic twice daily to check and renew certificates.
+#            Iterates over all servers configured in servers.json.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-ACME_BIN="/usr/local/bin/acme.sh"
 CERT_DIR="/data/certs"
 LOG_DIR="/data/certs/.logs"
 LOG="${LOG_DIR}/acme_renewal.log"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
-log() { local m="[$(ts)] [RENEW] $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/null; }
+log() { local m="[$(ts)] [RENEW] $*"; echo "$m";     echo "$m" >> "$LOG" 2>/dev/null; }
 err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 source /opt/cppm/status.sh
-# acme.sh uses $DEBUG as a numeric variable; a non-numeric value from
-# the host environment causes integer comparison errors.
 unset DEBUG
 
 log "=== Renewal Check ==="
 
-# Load server IDs from servers.json
 SERVER_IDS=$(python3 -c "
 import sys
 sys.path.insert(0, '/opt/cppm')
@@ -57,18 +53,27 @@ if output:
     fi
     eval "$SERVER_ENV"
 
-    # Switch to per-server cert and log directories
     CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
     LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
     LOG="${LOG_DIR}/acme_renewal.log"
     mkdir -p "$LOG_DIR"
     status_server_init
 
+    ACME_CA_LABEL="${ACME_SERVER:-letsencrypt}"
+    case "$ACME_CA_LABEL" in
+        letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
+        letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
+        zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
+        buypass)          ACME_CA_LABEL="Buypass" ;;
+        buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
+        http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
+    esac
+
     log "=== Renewal Check ==="
     log "  Domain   : ${DOMAIN:-NOT SET}"
     log "  CPPM     : ${CPPM_HOST:-NOT SET}"
     log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
-    log "  ACME CA  : ${ACME_SERVER:-letsencrypt}"
+    log "  ACME CA  : ${ACME_CA_LABEL}"
     log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
 
     if [[ -z "${DOMAIN:-}" ]]; then
@@ -79,81 +84,65 @@ if output:
     ISSUE_ECC="${ISSUE_ECC:-true}"
     ISSUE_RSA="${ISSUE_RSA:-true}"
 
-    # Check that flat cert files exist for each enabled type; re-issue if missing
+    # If flat cert files are missing, try install-only first (Lego state may already
+    # exist from a previous run that crashed before install), then fall back to full
+    # re-issue if install fails (no Lego state at all).
     NEEDS_ISSUE=false
     [[ "$ISSUE_ECC" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.ecc.cer" ]] && NEEDS_ISSUE=true
     [[ "$ISSUE_RSA" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.rsa.cer" ]] && NEEDS_ISSUE=true
     if [[ "$NEEDS_ISSUE" == "true" ]]; then
-        log "Flat cert(s) missing for ${DOMAIN} – delegating to issue_cert.sh..."
-        status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – re-running issuance"
-        /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
-            err "issue_cert.sh failed for ${DOMAIN} – check acme_renewal.log"
+        log "Flat cert(s) missing for ${DOMAIN} – attempting install from Lego state first..."
+        status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – attempting install"
+        INSTALL_ONLY_EXIT=0
+        python3 /opt/cppm/acme_cli.py install 2>&1 | tee -a "$LOG" 2>/dev/null || INSTALL_ONLY_EXIT=$?
+        if [[ $INSTALL_ONLY_EXIT -eq 0 ]]; then
+            log "Install-only succeeded for ${DOMAIN} – triggering upload..."
+            /opt/cppm/deploy_hook.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "deploy_hook.sh failed for ${DOMAIN} – check logs"
+        else
+            log "Install-only failed for ${DOMAIN} – falling back to full issuance..."
+            status_write "WARN" "RENEW" "Lego state missing for ${DOMAIN} – re-running full issuance"
+            /opt/cppm/issue_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "issue_cert.sh failed for ${DOMAIN} – check acme_renewal.log"
+        fi
         continue
     fi
 
-    # Use the primary enabled cert type for expiry display
+    # Log current expiry
     PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.ecc.cer"
     [[ "$ISSUE_ECC" != "true" ]] && PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.rsa.cer"
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_FLAT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
-    DAYS_LEFT="unknown"
-    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
-    if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
-        DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
-    fi
+    DAYS_LEFT=$(python3 -c "
+import sys, datetime, re
+s = re.sub(r'\s+', ' ', sys.argv[1].strip())
+try:
+    d = datetime.datetime.strptime(s, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    print((d - datetime.datetime.now(datetime.timezone.utc)).days)
+except Exception:
+    print('unknown')
+" "$EXPIRY" 2>/dev/null || echo "unknown")
     log "Current cert for ${DOMAIN} expires: $EXPIRY ($DAYS_LEFT days remaining)"
 
-    RENEWED=0
-    RENEW_FAILED=0
+    RENEW_EXIT=0
+    python3 /opt/cppm/acme_cli.py renew 2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
 
-    if [[ "$ISSUE_ECC" == "true" ]]; then
-        log "Running acme.sh --renew (ECC) for ${DOMAIN}..."
-        ECC_RENEW_EXIT=0
-        "$ACME_BIN" --renew \
-            --domain    "$DOMAIN" \
-            --ecc \
-            --server    "${ACME_SERVER:-letsencrypt}" \
-            --cert-home "$CERT_DIR" \
-            --home      /root/.acme.sh \
-            --log       "$LOG" \
-            --log-level 2 \
-            2>&1 | tee -a "$LOG" 2>/dev/null || ECC_RENEW_EXIT=$?
-        case $ECC_RENEW_EXIT in
-            0) log "ECC certificate renewed for ${DOMAIN}."; RENEWED=$((RENEWED+1)) ;;
-            2) log "ECC cert not due for renewal." ;;
-            *) err "acme.sh --renew (ECC) exited $ECC_RENEW_EXIT for ${DOMAIN}"; RENEW_FAILED=$((RENEW_FAILED+1)) ;;
-        esac
-    fi
-
-    if [[ "$ISSUE_RSA" == "true" ]]; then
-        log "Running acme.sh --renew (RSA) for ${DOMAIN}..."
-        RSA_RENEW_EXIT=0
-        "$ACME_BIN" --renew \
-            --domain    "$DOMAIN" \
-            --server    "${ACME_SERVER:-letsencrypt}" \
-            --cert-home "$CERT_DIR" \
-            --home      /root/.acme.sh \
-            --log       "$LOG" \
-            --log-level 2 \
-            2>&1 | tee -a "$LOG" 2>/dev/null || RSA_RENEW_EXIT=$?
-        case $RSA_RENEW_EXIT in
-            0) log "RSA certificate renewed for ${DOMAIN}."; RENEWED=$((RENEWED+1)) ;;
-            2) log "RSA cert not due for renewal." ;;
-            *) err "acme.sh --renew (RSA) exited $RSA_RENEW_EXIT for ${DOMAIN}"; RENEW_FAILED=$((RENEW_FAILED+1)) ;;
-        esac
-    fi
-
-    if [[ $RENEW_FAILED -gt 0 ]]; then
-        status_write "FAILED" "RENEW" "acme.sh --renew failed for ${DOMAIN} – check acme_renewal.log"
-    elif [[ $RENEWED -gt 0 ]]; then
-        log "Certificate(s) renewed for ${DOMAIN}."
-        status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
-        /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
-            err "install_cert.sh failed for ${DOMAIN}"
-    else
-        log "Certificate for ${DOMAIN} not due for renewal – no action needed."
-        status_write "INFO" "RENEW" "Not due for renewal – ${DOMAIN} has ${DAYS_LEFT} days remaining (next check in 12h)"
-    fi
+    case $RENEW_EXIT in
+        0)
+            log "Certificate(s) renewed for ${DOMAIN}."
+            status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
+            /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
+                err "install_cert.sh failed for ${DOMAIN}"
+            ;;
+        2)
+            log "Certificate for ${DOMAIN} not due for renewal."
+            status_write "INFO" "RENEW" "Not due for renewal – ${DOMAIN} has ${DAYS_LEFT} days remaining (next check in 12h)"
+            ;;
+        *)
+            err "lego renew exited ${RENEW_EXIT} for ${DOMAIN} – check acme_renewal.log"
+            status_write "FAILED" "RENEW" "lego renew failed for ${DOMAIN} – check acme_renewal.log"
+            ;;
+    esac
 done
 
 log "=== Renewal Check Complete ==="

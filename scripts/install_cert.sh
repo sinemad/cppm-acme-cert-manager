@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# install_cert.sh – Install ECC and/or RSA certs from acme.sh state
-#                   to flat paths, then trigger ClearPass upload.
+# install_cert.sh – Copy Lego cert state to flat file paths, then upload.
 #
-# Flat file layout (per-server directory, e.g. /data/certs/cppm.example.com/):
+# Flat file layout (per-server directory):
 #   ECC: <SERVER_CERT_DIR>/<domain>.ecc.cer  / .ecc.key / .ecc.fullchain.cer / .ecc.ca.cer
 #   RSA: <SERVER_CERT_DIR>/<domain>.rsa.cer  / .rsa.key / .rsa.fullchain.cer / .rsa.ca.cer
 #
-# acme.sh state directories (also inside SERVER_CERT_DIR):
-#   ECC: <SERVER_CERT_DIR>/<domain>_ecc/<domain>.cer   (--ecc flag required)
-#   RSA: <SERVER_CERT_DIR>/<domain>/<domain>.cer
+# Lego cert state (inside SERVER_CERT_DIR):
+#   ECC: lego-ecc/certificates/<domain>.crt / .key / .issuer.crt
+#   RSA: lego-rsa/certificates/<domain>.crt / .key / .issuer.crt
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-ACME_BIN="/usr/local/bin/acme.sh"
-CERT_DIR="/data/certs"
-CERT_DIR="${SERVER_CERT_DIR:-$CERT_DIR}"
+CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
 LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
 LOG="${LOG_DIR}/acme_renewal.log"
 DOMAIN="${DOMAIN:-}"
@@ -32,88 +29,38 @@ die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
 
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
-CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC + RSA" || \
-               [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
+if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
+    CERT_LABEL="ECC + RSA"
+elif [[ "$ISSUE_ECC" == "true" ]]; then
+    CERT_LABEL="ECC"
+else
+    CERT_LABEL="RSA"
+fi
 
 log "=== Install Cert Files (${CERT_LABEL}) ==="
 log "  Domain : $DOMAIN"
 log "  CPPM   : ${CPPM_HOST:-NOT SET}"
 log "  Types  : ${CERT_LABEL}"
 
-# ── Install ECC cert ───────────────────────────────────────────────────────
-if [[ "$ISSUE_ECC" == "true" ]]; then
-    ECC_ACME_CERT="${CERT_DIR}/${DOMAIN}_ecc/${DOMAIN}.cer"
-    if [[ -f "$ECC_ACME_CERT" ]]; then
-        log "--- Installing ECC certificate ---"
-        "$ACME_BIN" --install-cert \
-            --domain         "$DOMAIN" \
-            --ecc \
-            --home           /root/.acme.sh \
-            --cert-home      "$CERT_DIR" \
-            --cert-file      "${CERT_DIR}/${DOMAIN}.ecc.cer" \
-            --key-file       "${CERT_DIR}/${DOMAIN}.ecc.key" \
-            --fullchain-file "${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer" \
-            --ca-file        "${CERT_DIR}/${DOMAIN}.ecc.ca.cer" \
-            2>&1 | tee -a "$LOG"
-        chmod 600 "${CERT_DIR}/${DOMAIN}.ecc.key"
-        log "  ECC cert installed."
-    else
-        err "ECC acme.sh state not found at ${ECC_ACME_CERT} – run issue_cert.sh first"
-    fi
-else
-    log "--- Skipping ECC install (ISSUE_ECC=false) ---"
-fi
+INSTALL_EXIT=0
+python3 /opt/cppm/acme_cli.py install 2>&1 | tee -a "$LOG" || INSTALL_EXIT=$?
 
-# ── Install RSA cert ───────────────────────────────────────────────────────
-if [[ "$ISSUE_RSA" == "true" ]]; then
-    RSA_ACME_CERT="${CERT_DIR}/${DOMAIN}/${DOMAIN}.cer"
-    if [[ -f "$RSA_ACME_CERT" ]]; then
-        log "--- Installing RSA certificate ---"
-        "$ACME_BIN" --install-cert \
-            --domain         "$DOMAIN" \
-            --home           /root/.acme.sh \
-            --cert-home      "$CERT_DIR" \
-            --cert-file      "${CERT_DIR}/${DOMAIN}.rsa.cer" \
-            --key-file       "${CERT_DIR}/${DOMAIN}.rsa.key" \
-            --fullchain-file "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer" \
-            --ca-file        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer" \
-            2>&1 | tee -a "$LOG"
-        chmod 600 "${CERT_DIR}/${DOMAIN}.rsa.key"
-        log "  RSA cert installed."
-    else
-        err "RSA acme.sh state not found at ${RSA_ACME_CERT} – run issue_cert.sh first"
-    fi
-else
-    log "--- Skipping RSA install (ISSUE_RSA=false) ---"
-fi
+[[ $INSTALL_EXIT -ne 0 ]] && die "Certificate install failed (exit ${INSTALL_EXIT}) – check ${LOG}"
 
-# ── Verify expected flat files exist ──────────────────────────────────────
-MISSING=0
-if [[ "$ISSUE_ECC" == "true" ]]; then
-    for f in "${CERT_DIR}/${DOMAIN}.ecc.cer" "${CERT_DIR}/${DOMAIN}.ecc.key" \
-              "${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer" "${CERT_DIR}/${DOMAIN}.ecc.ca.cer"; do
-        [[ -f "$f" ]] && log "  OK: $(basename "$f")" || { err "Missing: $f"; MISSING=$((MISSING+1)); }
-    done
-fi
-if [[ "$ISSUE_RSA" == "true" ]]; then
-    for f in "${CERT_DIR}/${DOMAIN}.rsa.cer" "${CERT_DIR}/${DOMAIN}.rsa.key" \
-              "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer" "${CERT_DIR}/${DOMAIN}.rsa.ca.cer"; do
-        [[ -f "$f" ]] && log "  OK: $(basename "$f")" || { err "Missing: $f"; MISSING=$((MISSING+1)); }
-    done
-fi
-[[ $MISSING -gt 0 ]] && die "$MISSING expected file(s) missing after --install-cert"
-
-# ── Log expiry ────────────────────────────────────────────────────────────
-PRIMARY_CERT=""
-[[ "$ISSUE_ECC" == "true" ]] && PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer" \
-                              || PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+# Log expiry from the installed flat files
+PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
+[[ "$ISSUE_ECC" != "true" ]] && PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
 EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
          | cut -d= -f2 || echo "unknown")
-DAYS_LEFT="unknown"
-EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
-if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
-    DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
-fi
+DAYS_LEFT=$(python3 -c "
+import sys, datetime, re
+s = re.sub(r'\s+', ' ', sys.argv[1].strip())
+try:
+    d = datetime.datetime.strptime(s, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    print((d - datetime.datetime.now(datetime.timezone.utc)).days)
+except Exception:
+    print('unknown')
+" "$EXPIRY" 2>/dev/null || echo "unknown")
 log "Certificate expires ${EXPIRY} (${DAYS_LEFT} days)"
 if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
     RSA_EXPIRY=$(openssl x509 -enddate -noout -in "${CERT_DIR}/${DOMAIN}.rsa.cer" 2>/dev/null \

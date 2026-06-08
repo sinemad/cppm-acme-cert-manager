@@ -65,9 +65,17 @@ class AcmeProvider(abc.ABC):
         acme_server: str,
         cert_dir: str,
         key_types: list[str],
+        dns_provider: str,
+        dns_env: dict[str, str],
         log_file: str,
     ) -> IssueResult:
-        """Renew an existing certificate. Returns the renewal outcome."""
+        """Renew an existing certificate. Returns the renewal outcome.
+
+        ``dns_provider`` and ``dns_env`` are required because some providers
+        (Lego) need DNS credentials on every renewal call, not just issuance.
+        Providers that store credentials in per-cert state (acme.sh) accept
+        these parameters for interface compatibility but do not use them.
+        """
 
     @abc.abstractmethod
     def install_cert(
@@ -101,7 +109,7 @@ class AcmeProvider(abc.ABC):
         """Revoke an issued certificate."""
 
 
-def get_provider(provider_type: str = "acme_sh") -> AcmeProvider:
+def get_provider(provider_type: str = "lego") -> AcmeProvider:
     """Factory: return a provider instance by name (``"acme_sh"`` or ``"lego"``)."""
     if provider_type == "acme_sh":
         from acme_sh_provider import AcmeShProvider  # noqa: PLC0415

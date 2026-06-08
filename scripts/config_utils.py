@@ -167,6 +167,7 @@ def migrate_from_env() -> Optional[str]:
         "acme_email":           os.environ.get("ACME_EMAIL",           ""),
         "acme_server":          os.environ.get("ACME_SERVER",          "letsencrypt"),
         "dns_provider":         os.environ.get("DNS_PROVIDER",         "cloudflare"),
+        "cert_types": ["ecc", "rsa"],
         "dns_credentials": {k: v for k, v in {
             "CF_Token":               os.environ.get("CF_Token",               ""),
             "CF_Account_ID":          os.environ.get("CF_Account_ID",          ""),
@@ -206,21 +207,16 @@ def server_cert_dir(server: dict) -> Path:
 
 # ── Shell environment export ───────────────────────────────────────────────────
 
-def get_server_shell_env(server_id: str) -> Optional[str]:
-    """
-    Return a shell-sourceable string of 'export KEY=VALUE' lines for the
-    given server entry, suitable for eval in bash scripts.
+def get_server_env_dict(server_id: str) -> Optional[dict]:
+    """Return the per-server environment as a plain Python dict.
 
-    All values are quoted with shlex.quote so special characters in passwords
-    are handled correctly.  Returns None if the server ID is not found.
+    Returns None if the server ID is not found.
     """
     s = get_server(server_id)
     if not s:
         return None
 
     creds = s.get("dns_credentials") or {}
-
-    trust_excl = s.get("trust_exclusions") or []
     env: dict[str, str] = {
         "DOMAIN":               str(s.get("domain",               "")),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),
@@ -233,17 +229,25 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        "TRUST_EXCLUSIONS":     "\n".join(str(p) for p in trust_excl if p),
         "ISSUE_ECC":            "true" if "ecc" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
         "ISSUE_RSA":            "true" if "rsa" in (s.get("cert_types") or ["ecc", "rsa"]) else "false",
         "SERVER_CERT_DIR":      str(server_cert_dir(s)),
         "SERVER_LOG_DIR":       str(server_cert_dir(s) / ".logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
     }
-    # DNS credential keys are already named as env vars in servers.json
     for k, v in creds.items():
         env[k] = str(v)
+    return env
 
+
+def get_server_shell_env(server_id: str) -> Optional[str]:
+    """Return a shell-sourceable 'export KEY=VALUE' string for the given server.
+
+    Returns None if the server ID is not found.
+    """
+    env = get_server_env_dict(server_id)
+    if env is None:
+        return None
     lines = [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
     return "\n".join(lines)
 

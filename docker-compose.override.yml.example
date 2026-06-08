@@ -1,0 +1,133 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.override.yml.example
+#
+# Local configuration overrides for ClearPass ACME Certificate Manager.
+#
+# SETUP:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Docker Compose automatically loads docker-compose.override.yml alongside
+# docker-compose.yml — no flags or extra commands needed. Only uncomment and
+# change the values you actually need. Everything else uses the defaults in
+# docker-compose.yml.
+#
+# docker-compose.override.yml is excluded from git. This file
+# (docker-compose.override.yml.example) is safe to commit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  cppm-acme-cert-manager:
+
+    environment:
+
+      # ── Timezone ─────────────────────────────────────────────────────────────
+      # Sets the timezone for log timestamps and cron scheduling (02:00 and
+      # 14:00 daily renewal checks run in this timezone).
+      # Default: UTC
+      #
+      # Common values:
+      #   UTC                      Coordinated Universal Time
+      #
+      #   America/New_York         US Eastern    (UTC-5 / UTC-4 DST)
+      #   America/Chicago          US Central    (UTC-6 / UTC-5 DST)
+      #   America/Denver           US Mountain   (UTC-7 / UTC-6 DST)
+      #   America/Los_Angeles      US Pacific    (UTC-8 / UTC-7 DST)
+      #   America/Anchorage        US Alaska     (UTC-9 / UTC-8 DST)
+      #   America/Honolulu         US Hawaii     (UTC-10, no DST)
+      #   America/Toronto          Canada Eastern
+      #   America/Vancouver        Canada Pacific
+      #   America/Sao_Paulo        Brazil Eastern
+      #
+      #   Europe/London            UK            (UTC+0 / UTC+1 BST)
+      #   Europe/Paris             Central Europe (UTC+1 / UTC+2 CEST)
+      #   Europe/Berlin            Germany
+      #   Europe/Amsterdam         Netherlands
+      #   Europe/Stockholm         Sweden
+      #   Europe/Helsinki          Finland / Baltics (UTC+2 / UTC+3 EEST)
+      #   Europe/Athens            Greece
+      #   Europe/Moscow            Russia Moscow  (UTC+3, no DST)
+      #
+      #   Asia/Dubai               UAE           (UTC+4, no DST)
+      #   Asia/Kolkata             India         (UTC+5:30, no DST)
+      #   Asia/Bangkok             SE Asia       (UTC+7, no DST)
+      #   Asia/Singapore           Singapore     (UTC+8, no DST)
+      #   Asia/Shanghai            China         (UTC+8, no DST)
+      #   Asia/Tokyo               Japan         (UTC+9, no DST)
+      #   Asia/Seoul               South Korea   (UTC+9, no DST)
+      #
+      #   Australia/Perth          WA            (UTC+8, no DST)
+      #   Australia/Adelaide       SA            (UTC+9:30 / UTC+10:30 DST)
+      #   Australia/Sydney         NSW / VIC     (UTC+10 / UTC+11 DST)
+      #   Pacific/Auckland         New Zealand   (UTC+12 / UTC+13 DST)
+      #
+      # Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      TZ: America/New_York
+
+      # ── Web UI port ───────────────────────────────────────────────────────────
+      # !! If you change this, you MUST also update the ports section below !!
+      # Default: 8080
+      # STATUS_PORT: "9090"
+
+      # ── Web UI authentication ─────────────────────────────────────────────────
+      # Set to "true" to require sign-in before the certificate dashboard is
+      # visible. The Servers and Users pages always require authentication.
+      # Default: false
+      # REQUIRE_AUTH_FOR_STATUS: "true"
+
+      # ── Session lifetime ──────────────────────────────────────────────────────
+      # How long a web UI login session stays valid, in hours.
+      # Default: 8
+      # SESSION_LIFETIME_HOURS: "24"
+
+      # ── PKCS12 callback port ──────────────────────────────────────────────────
+      # !! If you change this, you MUST also update the ports section below !!
+      # Port used by the temporary HTTP server that delivers the PKCS12 to
+      # ClearPass during certificate upload. ClearPass connects to:
+      #   http://<CPPM_CALLBACK_HOST>:<CPPM_CALLBACK_PORT>/
+      # The callback HOST is set per-server in the web UI (Servers page).
+      # Default: 8765
+      # CPPM_CALLBACK_PORT: "9765"
+
+      # ── Operational flags ─────────────────────────────────────────────────────
+      # Force certificate re-issuance on the next container start.
+      # Set to "true", restart, wait for new certs, then set back to "false".
+      # Default: false
+      # FORCE_RENEW: "true"
+
+      # Issue/renew certificates without uploading to ClearPass.
+      # Useful for testing the ACME workflow independently of ClearPass.
+      # Default: false
+      # SKIP_UPLOAD: "true"
+
+      # Python log verbosity for the ClearPass upload script.
+      # Options: DEBUG | INFO | WARNING | ERROR
+      # Default: INFO
+      # LOG_LEVEL: DEBUG
+
+    # ── Port mappings ─────────────────────────────────────────────────────────
+    #
+    # Format: "<host_port>:<container_port>"
+    #   host_port      — port on the Docker host machine (what you connect to)
+    #   container_port — port inside the container (must match the env var)
+    #
+    # !! PORT CHANGE CHECKLIST !!
+    # If you change STATUS_PORT or CPPM_CALLBACK_PORT above, update the
+    # corresponding entry here so the two sides stay in sync:
+    #
+    #   To move the web UI from 8080 to 9090:
+    #     1. Set STATUS_PORT: "9090" in the environment section above
+    #     2. Change "8080:8080" to "9090:9090" in the ports section below
+    #
+    #   To move the PKCS12 callback from 8765 to 9765:
+    #     1. Set CPPM_CALLBACK_PORT: "9765" in the environment section above
+    #     2. Change "8765:8765" to "9765:9765" in the ports section below
+    #     3. Update the callback port in the web UI (Servers → Edit → Callback Port)
+    #        so ClearPass connects on the new port during certificate upload
+    #
+    # Uncomment and edit the lines below only if you are changing ports.
+    # If you leave this section commented out, the defaults from
+    # docker-compose.yml (8080 and 8765) are used as-is.
+    # ─────────────────────────────────────────────────────────────────────────
+    # ports:
+    #   - "9765:9765"   # PKCS12 callback  (was 8765:8765)
+    #   - "9090:9090"   # Web UI           (was 8080:8080)

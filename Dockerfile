@@ -1,8 +1,8 @@
-FROM alpine:3.19
+FROM alpine:3.21
 
-ARG VERSION=1.1.0
+ARG VERSION=2.0.0
 LABEL org.opencontainers.image.title="ClearPass ACME Certificate Manager" \
-      org.opencontainers.image.description="Automated TLS certificate management for Aruba ClearPass Policy Manager via acme.sh DNS-01" \
+      org.opencontainers.image.description="Automated TLS certificate management for Aruba ClearPass Policy Manager via Lego DNS-01" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       maintainer="Network Engineering"
@@ -11,7 +11,6 @@ LABEL org.opencontainers.image.title="ClearPass ACME Certificate Manager" \
 RUN apk add --no-cache \
     bash \
     curl \
-    git \
     openssl \
     python3 \
     py3-pip \
@@ -48,45 +47,19 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     "requests==2.32.3" \
     "urllib3==2.2.3"
 
-# ── Install acme.sh ───────────────────────────────────────────────────────────
-# Clone the full repo (--depth 1) so all dnsapi/ scripts are available.
-# We manually copy files into /opt/acme-seed/ rather than using acme.sh --install
-# because --install requires CWD to contain acme.sh, which is not guaranteed
-# in a Docker RUN layer.
-RUN git clone --depth 1 https://github.com/acmesh-official/acme.sh.git /opt/acme-src \
-    # Patch the shebang FIRST, before any copies are made.
-    # acme.sh calls itself internally using the path in LE_WORKING_DIR
-    # (/data/certs/.acme-state/acme.sh), which is seeded from /opt/acme-seed/acme.sh.
-    # If only /usr/local/bin/acme.sh is patched, the seed copy still runs under
-    # Alpine ash, producing 'sh: DEBUG: out of range' errors on every invocation.
-    # Patching the source before all copies ensures every code path uses bash.
-    && sed -i '1s|#!/usr/bin/env sh|#!/usr/bin/env bash|' /opt/acme-src/acme.sh \
-    # Install patched binary at stable system path
-    && cp /opt/acme-src/acme.sh /usr/local/bin/acme.sh \
-    && chmod +x /usr/local/bin/acme.sh \
-    # Assemble seed directory from the patched source
-    && mkdir -p /opt/acme-seed/dnsapi \
-               /opt/acme-seed/deploy \
-               /opt/acme-seed/notify \
-    && cp /opt/acme-src/acme.sh      /opt/acme-seed/acme.sh \
-    && cp /opt/acme-src/dnsapi/*.sh  /opt/acme-seed/dnsapi/ \
-    && cp /opt/acme-src/deploy/*.sh  /opt/acme-seed/deploy/ \
-    && cp /opt/acme-src/notify/*.sh  /opt/acme-seed/notify/ \
-    # Patch every dnsapi, deploy, and notify script to use bash.
-    # These are called by acme.sh during DNS challenges and cert hooks.
-    # Without this patch they run under Alpine ash and may fail on bash-only syntax.
-    && find /opt/acme-seed/dnsapi /opt/acme-seed/deploy /opt/acme-seed/notify \
-            -name '*.sh' \
-            -exec sed -i '1s|#!/usr/bin/env sh|#!/usr/bin/env bash|' {} \; \
-    && touch /opt/acme-seed/account.conf \
-    && test -f /opt/acme-seed/dnsapi/dns_cf.sh \
-        || { echo "ERROR: dns_cf.sh missing from seed"; exit 1; } \
-    # Confirm both copies have the bash shebang
-    && head -1 /usr/local/bin/acme.sh \
-    && head -1 /opt/acme-seed/acme.sh \
-    && echo "acme.sh $(/usr/local/bin/acme.sh --version 2>&1 | head -1)" \
-    && echo "dnsapi scripts bundled: $(ls /opt/acme-seed/dnsapi/ | wc -l)" \
-    && rm -rf /opt/acme-src
+# ── Install Lego ──────────────────────────────────────────────────────────────
+# Single static binary — no git, no shell patching, no seed directory needed.
+# Check latest releases: https://github.com/go-acme/lego/releases
+ENV LEGO_VERSION=4.19.0
+RUN set -e \
+    && curl -fsSL \
+       "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz" \
+       -o /tmp/lego.tar.gz \
+    && tar -xzf /tmp/lego.tar.gz -C /tmp lego \
+    && mv /tmp/lego /usr/local/bin/lego \
+    && chmod +x /usr/local/bin/lego \
+    && rm /tmp/lego.tar.gz \
+    && echo "lego $(/usr/local/bin/lego --version 2>&1)"
 
 # ── Bundle Let's Encrypt CA certificates ─────────────────────────────────────
 # Downloaded at build time so the running container never needs letsencrypt.org.
@@ -150,11 +123,8 @@ COPY VERSION  /opt/cppm/VERSION
 COPY config/crontab /etc/crontabs/root
 # Stamp build time — readable by status_server.py for display in the UI footer
 RUN date -u +'%Y%m%d.%H%M%S' > /opt/cppm/BUILD
-# Merge the acme-ca-certs project directory (contains trust-exclusions.conf default)
-# into the directory already populated by the ACME CA cert download RUN block above.
-COPY acme-ca-certs/ /opt/cppm/acme-ca-certs/
-
 RUN chmod +x /opt/cppm/*.sh \
+    && chmod 755 /opt/cppm/acme_cli.py \
     && chmod 755 /opt/cppm/clearpass_upload.py \
     && chmod 755 /opt/cppm/cppm_acme_manager_servers.py \
     && chmod 755 /opt/cppm/cppm_acme_manager_users.py \
@@ -164,14 +134,14 @@ RUN chmod +x /opt/cppm/*.sh \
 # ── Timezone ──────────────────────────────────────────────────────────────────
 ENV TZ=UTC
 
-# ── Single persistent volume – certificates only ─────────────────────────────
+# ── Single persistent volume ──────────────────────────────────────────────────
 # Layout created by entrypoint.sh at first start:
-#   /data/certs/<domain>.{cer,key,fullchain.cer,ca.cer}
-#   /data/certs/.acme-state/   – acme.sh account keys + cert state
-#   /data/certs/.logs/         – operational logs
+#   /data/certs/<cppm_host>/<domain>.{cer,key,fullchain.cer,ca.cer}   flat cert files
+#   /data/certs/<cppm_host>/lego-{ecc,rsa}/                           Lego cert state
+#   /data/certs/.logs/                                                 container-level logs
 VOLUME ["/data/certs"]
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=5 \
-    CMD test -f /data/certs/cppm.sinemalab.com.cer || exit 1
+    CMD test -f /data/certs/.logs/startup.log || exit 1
 
 ENTRYPOINT ["/opt/cppm/entrypoint.sh"]

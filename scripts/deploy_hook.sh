@@ -23,15 +23,36 @@ err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/
 
 source /opt/cppm/status.sh
 
+# Serialize all upload invocations — the callback HTTP server binds a fixed
+# port, so two concurrent deploy_hook.sh runs (e.g. cert pipeline + manual
+# upload trigger) would both fail with "Address in use".
+UPLOAD_LOCK="/tmp/cppm_upload_${CPPM_CALLBACK_PORT:-8765}.lock"
+exec 9>"$UPLOAD_LOCK"
+if ! flock -n 9; then
+    log "Another upload is already in progress – skipping this run."
+    status_write "WARN" "UPLOAD" "Upload skipped – another upload was already in progress. Try again shortly."
+    exit 0
+fi
+
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
+
+ACME_CA_LABEL="${ACME_SERVER:-letsencrypt}"
+case "$ACME_CA_LABEL" in
+    letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
+    letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
+    zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
+    buypass)          ACME_CA_LABEL="Buypass" ;;
+    buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
+    http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
+esac
 
 log "=== Deploy Hook ==="
 log "  ClearPass: ${CPPM_HOST}"
 log "  Domain   : ${DOMAIN}"
 log "  Callback : http://${CPPM_CALLBACK_HOST}:${CPPM_CALLBACK_PORT}/"
 log "  DNS      : ${DNS_PROVIDER}"
-log "  ACME CA  : ${ACME_SERVER}"
+log "  ACME CA  : ${ACME_CA_LABEL}"
 
 # ── Build cert path args and validate files ───────────────────────────────
 UPLOAD_ARGS=()
@@ -87,9 +108,14 @@ if [[ $UPLOAD_EXIT -eq 0 ]]; then
     log "Upload succeeded."
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
-    UPLOAD_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC→HTTPS + RSA→RADIUS" || \
-                     [[ "$ISSUE_ECC" == "true" ]] && echo "ECC→HTTPS" || echo "RSA→RADIUS" )"
-    status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} – expires ${EXPIRY}"
+    if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
+        UPLOAD_LABEL="ECC→HTTPS + RSA→RADIUS"
+    elif [[ "$ISSUE_ECC" == "true" ]]; then
+        UPLOAD_LABEL="ECC→HTTPS"
+    else
+        UPLOAD_LABEL="RSA→RADIUS"
+    fi
+    status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
 else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"
     status_write "FAILED" "UPLOAD" "ClearPass upload failed (exit ${UPLOAD_EXIT}) – check cppm_upload.log"

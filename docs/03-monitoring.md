@@ -4,7 +4,7 @@
 
 The built-in web interface starts automatically with the container. It provides
 a multi-server dashboard, per-server certificate details, service configuration,
-trust exclusion management, and admin user management — all accessible from a browser.
+and admin user management — all accessible from a browser.
 
 Open in a browser:
 
@@ -12,7 +12,7 @@ Open in a browser:
 http://<docker-host>:8080/
 ```
 
-> Change the port by setting `STATUS_PORT` in `.env` (default `8080`).
+> Change the port by setting `STATUS_PORT` in `docker-compose.override.yml` (default `8080`).
 
 ### Navigation
 
@@ -23,8 +23,9 @@ http://<docker-host>:8080/
 | **Users** | `/admin/users` | Yes |
 | **Sign Out** | `/logout` | — |
 
-Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to require sign-in for the
-Dashboard as well. The Servers and Users pages always require authentication.
+Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to
+require sign-in for the Dashboard as well. The Servers and Users pages always
+require authentication.
 
 ---
 
@@ -59,7 +60,7 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 | **Credential storage** | bcrypt-hashed in `/opt/cppm-certs/admin.htpasswd` (persists across rebuilds) |
 | **Session token** | HMAC-SHA256 signed cookie; secret in `/opt/cppm-certs/.session-secret` |
 | **Public dashboard** | By default the certificate status page is readable without login |
-| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS=true` in `.env` to protect the dashboard |
+| **Require auth** | Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to protect the dashboard |
 
 ---
 
@@ -128,7 +129,7 @@ Non-authenticated users see only the Activity Log tab:
 
 **Activity Log** — one line per event, newest first, colour-coded by level (`OK` green, `WARN` yellow, `FAILED` red, `INFO` grey). Covers cert issuance/renewal, ClearPass upload outcomes, and health check state changes (CPPM, DNS, Callback).
 
-**ACME Renewal** — full `acme.sh` output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA, and callback URL.
+**ACME Renewal** — full Lego output from certificate issuance and renewal runs. Each session opens with a header showing Domain, ClearPass host, DNS provider, ACME CA (friendly name or Custom CA URL), and callback URL.
 
 ![ACME Renewal log tab](ui-server-logs-renewal.png)
 
@@ -174,6 +175,8 @@ credentials are valid.
 | DigitalOcean | `GET /v2/account` with token |
 | GoDaddy | `GET /v1/domains` with key:secret |
 | Route 53 | TCP reachability to `route53.amazonaws.com` |
+| Infoblox | TCP reachability to `INFOBLOX_HOST` on port 443 |
+| RFC 2136 | TCP reachability to `RFC2136_NAMESERVER` on the configured port |
 
 ---
 
@@ -188,12 +191,20 @@ Navigate to **Servers** in the top navigation bar.
 
 ### Server list actions
 
-Each server row shows two action buttons:
+Each server row shows four action buttons:
 
 | Button | Action |
 |---|---|
-| **Edit** | Modify server credentials, DNS provider, ACME settings, and trust exclusions |
+| **Edit** | Modify server credentials, DNS provider, and ACME settings |
+| **Issue Cert Now** | Force a full certificate re-issue via ACME DNS-01 challenge |
+| **Upload to ClearPass** | Re-upload the existing on-disk certs to ClearPass without contacting the ACME CA |
 | **Delete** | Remove the server entry (inline two-step confirmation) |
+
+**Issue Cert Now** shows a confirmation dialog warning that the action counts against your ACME CA rate limit (Let's Encrypt allows 5 duplicate certificates per domain per week). Use it only when you need to rotate a cert immediately. After clicking, you are redirected to the server detail page where the Activity Log updates as the pipeline progresses.
+
+**Upload to ClearPass** runs only the upload pipeline (`deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
+
+> Only one upload pipeline can run at a time. If a second upload is triggered while one is already in progress (e.g. a scheduled renewal happened to be uploading), the second request is queued and a WARN entry appears in the Activity Log.
 
 ### Adding a server
 
@@ -205,8 +216,11 @@ Click **+ Add Server** and fill in all fields.
 |---|---|
 | **Identity** | Friendly label |
 | **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL |
-| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass) |
+| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass / Custom) |
 | **DNS Provider** | Provider selector; credential fields update dynamically for the selected provider |
+
+Selecting **Custom / Private CA** reveals a URL input field and a warning
+banner — enter the full ACME directory URL for your internal CA.
 
 #### DNS provider credential fields
 
@@ -217,19 +231,19 @@ Click **+ Add Server** and fill in all fields.
 | AWS Route 53 | Access Key ID + Secret Access Key + Region |
 | DigitalOcean | API Token |
 | GoDaddy | API Key + API Secret |
+| Infoblox | Grid Master Host, Username, Password, DNS View (optional), WAPI Version (optional), SSL Verify |
+| RFC 2136 | Nameserver, TSIG Key Name (optional), TSIG Secret (optional), TSIG Algorithm (optional), DNS Timeout (optional) |
 
 Only the credential fields for the active provider are submitted — all others
 are disabled in the browser before the form is sent.
+
+When a new server is saved, the certificate pipeline starts automatically in the background — the same full sequence as clicking **Issue Cert Now**. You are redirected to the server detail page where the Activity Log shows progress.
 
 ### Editing and deleting
 
 Click **Edit** on any row to open the edit form.
 
 ![Edit Server form](ui-server-edit.png)
-
-The edit form adds a **Trust Exclusions** button in the **ACME Provider** section,
-which links to the per-server trust exclusion configuration page. This button is
-not shown on the Add Server form.
 
 - Click **Delete** to start an inline two-step confirmation — no browser popup.
 
@@ -265,59 +279,6 @@ echoed during input. The `show` command displays `(set)` or `(empty)` in place
 of secret field values.
 
 ---
-
-## Trust Exclusions — per-server CA certificate management
-
-Each ClearPass server has its own trust exclusion configuration. Excluded CA
-certificates are not verified or uploaded to the ClearPass trust list for that
-server, even if they are present in the certificate chain.
-
-**By default no certificates are excluded** — the tool manages all CA and
-intermediate CA certificates automatically.
-
-### Accessing trust exclusions
-
-From the Servers page click **Edit** on the server you want to configure, then
-click **Trust Exclusions** in the **ACME Provider** section of the edit form.
-
-![Trust Exclusions page](trust-exclusions-screenshot.png)
-
-### Configuring exclusions
-
-The page shows only the CA certificates relevant to the ACME provider configured
-for that server:
-
-| ACME Provider | Section shown |
-|---|---|
-| Let's Encrypt / Let's Encrypt Staging | **Let's Encrypt CA Certificate Exclusion** — ISRG Root X1/X2, R10–R14, E5–E10 |
-| ZeroSSL | **ZeroSSL — Sectigo Chain CA Certificate Exclusion** — ZeroSSL RSA/ECC intermediates, USERTrust roots, Sectigo AAA |
-| Buypass | **Buypass CA Certificate Exclusion** — Buypass Go SSL, Buypass Class 2 Root CA |
-
-Check a box to exclude that certificate. The label text strikes through to
-confirm the selection. Unchecking re-enables management for that certificate.
-
-The **Active Exclusions** textarea at the bottom shows exactly what will be
-saved — one CN pattern per line. You can edit it directly for custom patterns
-not in the preset list. Partial CN matching is supported:
-`ISRG Root` matches both `ISRG Root X1` and `ISRG Root X2`.
-
-Exclusions take effect at the next scheduled or manual trust check.
-
-### Global fallback file
-
-A global `trust-exclusions.conf` file on the persistent volume applies to any
-server that has **no per-server exclusions configured**:
-
-```
-/opt/cppm-certs/trust-exclusions.conf   (host path)
-/data/certs/trust-exclusions.conf       (container path)
-```
-
-**Priority:** per-server exclusions (from `servers.json`) always take
-precedence. The file is only consulted when a server's `trust_exclusions` list
-is empty. This means existing installations with a `trust-exclusions.conf` file
-continue to work without any migration — configure per-server exclusions
-through the web UI when you are ready to move to per-server control.
 
 ---
 
@@ -471,7 +432,7 @@ startup and shutdown events only (not per-server cert or upload activity).
 Per-server logs are in `/opt/cppm-certs/<cppm_host>/.logs/`:
 
 ```bash
-# acme.sh issuance and renewal full output (per server)
+# Lego issuance and renewal full output (per server)
 tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
 
 # ClearPass API upload full output (per server)

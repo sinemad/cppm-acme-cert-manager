@@ -7,9 +7,9 @@
 grep FAILED /opt/cppm-certs/status.log
 
 # 2. Check the detailed logs
-tail -50 /opt/cppm-certs/.logs/startup.log   # startup issues
-tail -50 /opt/cppm-certs/.logs/renewal.log   # issuance / renewal
-tail -50 /opt/cppm-certs/.logs/upload.log    # ClearPass API issues
+tail -50 /opt/cppm-certs/.logs/startup.log                              # startup issues
+tail -50 /opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log             # issuance / renewal
+tail -50 /opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log              # ClearPass API issues
 
 # 3. Check Docker container state
 docker compose ps
@@ -20,19 +20,20 @@ docker compose logs --tail=50
 
 ## Container exits immediately on start
 
-**Cause:** A required `.env` variable is missing (`TZ`, `STATUS_PORT`, or
-`CPPM_CALLBACK_PORT`) or the acme.sh binary is not found in the image.
+**Cause:** A required environment variable is missing (`TZ`, `STATUS_PORT`, or
+`CPPM_CALLBACK_PORT`) or the Lego binary is not found in the image.
 
 ```bash
 docker compose logs | head -20
 ```
 
-If the error is about a missing env var, add it to `.env` and recreate:
+If the error is about a missing env var, set it in `docker-compose.override.yml`
+and recreate:
 ```bash
 docker compose up -d --force-recreate
 ```
 
-If acme.sh is not found, rebuild the image:
+If Lego is not found, rebuild the image:
 ```bash
 docker compose build --no-cache && docker compose up -d
 ```
@@ -46,10 +47,9 @@ docker compose build --no-cache && docker compose up -d
 ## `[: DEBUG: integer expression expected` in logs
 
 **Cause:** The `DEBUG` environment variable is set to a non-numeric string.
-acme.sh uses `$DEBUG` as a numeric log level internally.
-
-The scripts run `unset DEBUG` before every acme.sh invocation. If you still
-see this, check your host environment or `.env` for a string-valued `DEBUG`.
+Lego's Python wrapper pops `DEBUG` from the subprocess environment before each
+invocation. If you still see this, check your host environment for a
+string-valued `DEBUG` leaking into the container.
 
 ---
 
@@ -75,6 +75,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 | Route53 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | DigitalOcean | `DO_API_KEY` |
 | GoDaddy | `GD_Key` + `GD_Secret` |
+| Infoblox | `INFOBLOX_HOST` + `INFOBLOX_USERNAME` + `INFOBLOX_PASSWORD` |
+| RFC 2136 | `RFC2136_NAMESERVER` (TSIG fields optional) |
 
 ---
 
@@ -85,17 +87,24 @@ was not created, or did not propagate before the ACME server checked.
 
 Common causes by provider:
 
-- **Cloudflare:** Zone ID mismatch — `CF_Zone_ID` must match the zone that
-  contains the domain, not a parent zone.
+- **Cloudflare:** Token missing `Zone:DNS:Edit` permission on the target zone.
 - **Porkbun:** API access not enabled for the domain. Check
   **Domain Management → API Access** on the Porkbun dashboard.
-- **Route53:** IAM policy missing `route53:GetChange` — the script cannot
-  wait for the record to propagate.
+- **Route53:** IAM policy missing `route53:GetChange` — Lego cannot poll for
+  propagation without it.
 - **DigitalOcean:** Token has read-only scope — must be write scope.
+- **Infoblox:** Check that `INFOBLOX_HOST` is the Grid Master address (not a
+  Grid Member), and that the user account has DNS record write permission on the
+  target view. Set `INFOBLOX_SSL_VERIFY=false` if the Grid Master uses a
+  self-signed certificate.
+- **RFC 2136:** Verify the nameserver address and port are reachable from the
+  container. If TSIG is configured, confirm the key name, secret, and algorithm
+  match exactly what is configured on the DNS server. Unsigned updates
+  (no TSIG) work if the nameserver allows them from the container IP.
 
-Check the renewal log for the full acme.sh error:
+Check the renewal log for the full Lego error:
 ```bash
-tail -100 /opt/cppm-certs/.logs/renewal.log
+tail -100 /opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log
 ```
 
 ---
@@ -150,7 +159,7 @@ Fix: in CPPM Admin UI, verify the profile attached to your API client includes:
 **Cause:** CPPM requires Basic Constraints: CA=TRUE for trust list entries.
 End-entity (leaf) certificates cannot be added to the trust list.
 
-The bundled LE PEM files in the image are all CA/intermediate certs. If a chain
+The bundled ACME CA PEM files in the image are all CA/intermediate certs. If a chain
 cert parsed from `.ca.cer` fails this check, add it manually:
 
 1. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
@@ -206,15 +215,14 @@ access to **Administration → Server Manager** or equivalent.
 JSON-only. CPPM must fetch the PKCS12 from the `pkcs12_file_url` provided in
 the request body. If CPPM cannot reach that URL, it times out and returns 422.
 
-**Fix:** Ensure `CPPM_CALLBACK_HOST` and `CPPM_CALLBACK_PORT` are set correctly
-in `.env`, and that the port is published in `docker-compose.yml`:
-
-```ini
-CPPM_CALLBACK_HOST=<docker-host-ip>    # Docker host's LAN IP that CPPM can route to
-CPPM_CALLBACK_PORT=8765
-```
+**Fix:** Ensure `CPPM_CALLBACK_HOST` is set correctly in the web UI (Servers →
+Edit → Callback Host), `CPPM_CALLBACK_PORT` is correct in
+`docker-compose.override.yml`, and the port is published:
 
 ```yaml
+# docker-compose.override.yml
+environment:
+  CPPM_CALLBACK_PORT: "8765"
 ports:
   - "8765:8765"
 ```
@@ -225,7 +233,7 @@ ip route get <cppm-ip>
 # Look for 'src X.X.X.X' — that's the interface toward CPPM
 ```
 
-After updating `.env` and `docker-compose.yml`, restart the container:
+After updating the override file, restart the container:
 ```bash
 docker compose down && docker compose up -d
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
@@ -259,41 +267,47 @@ docker exec -it cppm-acme-cert-manager sh -c '
 '
 ```
 
-If mismatched, set `FORCE_RENEW=true` in `.env` and recreate the container.
+If mismatched, set `FORCE_RENEW: "true"` in `docker-compose.override.yml` and recreate the container.
 
 ---
 
 ## EAP authentication fails after cert install
 
-**Cause:** A Let's Encrypt CA cert is not in the trust list with EAP enabled.
+**Cause:** An ACME CA cert is not in the trust list with EAP enabled.
 
 ```bash
 # Force a re-run of the trust list pre-flight
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
-tail -f /opt/cppm-certs/status.log
+tail -f /opt/cppm-certs/<cppm_host>/status.log
 ```
 
 Check the `TRUST` status lines. If any show `FAILED`, add the cert manually:
 
-1. Copy the missing cert from the container:
+1. Copy the missing cert from the container (example for Let's Encrypt):
    ```bash
    docker cp cppm-acme-cert-manager:/opt/cppm/acme-ca-certs/isrg-root-x1.pem .
    ```
 2. CPPM Admin UI → **Administration → Certificates → Trust List → Import**
 3. Set `cert_usage` to include **EAP** and **Others** → Save.
 
+> **Custom / Private CA:** If using a custom ACME CA, the bundled CA PEM files
+> will not include your private CA chain. Add the root and intermediate certs
+> manually to the CPPM trust list. The tool will only attempt to manage certs
+> present in its bundled image set; unknown CA certs in the trust list are left
+> untouched.
+
 ---
 
 ## ACME rate limit hit
 
-**Symptom:** `renewal.log` contains `too many certificates already issued`.
+**Symptom:** `acme_renewal.log` contains `too many certificates already issued`.
 
 Switch to staging to test without hitting rate limits. Update the server entry
 in the web UI: **Servers → Edit → Certificate Authority → Let's Encrypt (Staging) → Save Changes**,
 then force a re-issue:
 
 ```bash
-# Edit .env: FORCE_RENEW=true
+# Edit docker-compose.override.yml: FORCE_RENEW: "true"
 docker compose up -d --force-recreate
 ```
 

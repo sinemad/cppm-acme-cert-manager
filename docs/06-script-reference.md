@@ -10,19 +10,21 @@ the project directory.
 **Called by:** Docker on container start — never call manually.
 
 On startup:
-1. Seeds the acme.sh state directory from the image default.
-2. Runs `migrate_from_env()` — if `servers.json` is empty and legacy `.env`
-   server vars are present, auto-migrates them into `servers.json` (one-time).
-3. Iterates over each server in `servers.json`, exporting per-server
+1. Runs `migrate_from_env()` — if `servers.json` is empty and legacy server
+   vars are present in the environment, auto-migrates them into `servers.json`
+   (one-time).
+2. Iterates over each server in `servers.json`, exporting per-server
    environment variables via `eval "$(cppm-servers env <id>)"`.
-4. For each server, runs the certificate state decision tree:
+3. For each server, runs the certificate state decision tree:
    - `FORCE_RENEW=true` → `issue_cert.sh`
    - Flat `.cer` files exist → log expiry, nothing else
-   - acme.sh state exists but flat files missing → `install_cert.sh`
+   - Lego state exists but flat files missing → `install_cert.sh`
    - No cert found → `issue_cert.sh`
-5. Seeds `trust-exclusions.conf` to the volume if not already present.
-6. Starts `status_server.py` in the background.
-7. `exec supercronic` (becomes PID 1 subprocess).
+4. Performs one-time cleanup of legacy acme.sh state directories
+   (`<domain>_ecc/` and `<domain>/`) if certs are already present (guard
+   condition ensures this never fires on a fresh container with no certs).
+5. Starts `status_server.py` in the background.
+6. `exec supercronic` (becomes PID 1 subprocess).
 
 ---
 
@@ -30,12 +32,15 @@ On startup:
 
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/issue_cert.sh`
 
-Runs `acme.sh --issue` with the DNS provider configured for the current
-server (set via `eval "$(cppm-servers env <id>)"` before invocation).
+Delegates to `acme_cli.py issue` (which calls `LegoProvider.issue_cert()`).
+The server context must be set via `eval "$(cppm-servers env <id>)"` before
+manual invocation.
 
 - Exit 0 → new cert issued, calls `install_cert.sh`
-- Exit 2 → cert in acme.sh state, not due — calls `install_cert.sh` without contacting the ACME CA
 - Other → logs error and exits non-zero
+
+To force re-issue of an already valid cert set `FORCE_RENEW=true` (or use the
+`docker-compose.override.yml` flag and recreate the container).
 
 ---
 
@@ -43,9 +48,11 @@ server (set via `eval "$(cppm-servers env <id>)"` before invocation).
 
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh`
 
-Runs `acme.sh --install-cert --cert-home /data/certs` to copy flat files from
-acme.sh internal state to `/data/certs/`. Verifies all four files are present,
-then calls `deploy_hook.sh`. No DNS challenge, no Let's Encrypt contact.
+Delegates to `acme_cli.py install` (which calls `LegoProvider.install_cert()`).
+Copies the four flat cert files from Lego's internal state directories
+(`lego-ecc/` and `lego-rsa/`) to the server cert directory. Verifies all eight
+files (four per key type) are present, then calls `deploy_hook.sh`. No DNS
+challenge, no ACME CA contact.
 
 ---
 
@@ -54,18 +61,32 @@ then calls `deploy_hook.sh`. No DNS challenge, no Let's Encrypt contact.
 **Called by:** supercronic at 02:00 and 14:00 UTC.
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/renew.sh`
 
-Runs `acme.sh --renew`. On success calls `install_cert.sh`. Exit 2 (not due)
-is logged and treated as clean exit.
+Delegates to `acme_cli.py renew` (which calls `LegoProvider.renew_cert()`).
+Lego always exits 0 from `lego renew`; true renewal is detected by comparing
+the cert file mtime before and after the call. Exit codes propagated by
+`acme_cli.py`:
+
+- Exit 0 → cert renewed → calls `install_cert.sh`
+- Exit 2 → not due (>30 days remaining) → logged and treated as clean exit
+- Other → error → status_write FAILED
 
 ---
 
 ## deploy_hook.sh
 
-**Called by:** `install_cert.sh` (via `--reloadcmd`).
+**Called by:** `install_cert.sh` after cert files are verified.
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh`
+**Web UI:** **Servers → Upload to ClearPass** button.
 
 Resolves cert file paths and invokes `clearpass_upload.py`. Set
-`SKIP_UPLOAD=true` in `.env` to disable the upload without removing the hook.
+`SKIP_UPLOAD: "true"` in `docker-compose.override.yml` to disable the upload
+without removing the hook.
+
+Uses `flock` on a lockfile (`/tmp/cppm_upload_<port>.lock`) so only one instance
+can run at a time. If a second invocation arrives while one is already in progress
+(e.g. a scheduled renewal upload and a manual upload triggered simultaneously),
+the second exits immediately and writes a WARN to the Activity Log. The lock is
+released automatically when the process exits.
 
 ---
 
@@ -194,54 +215,8 @@ Behaviour:
 1. Skips a server if its domain certificates have not yet been issued.
 2. Calls `clearpass_upload.py --only-trust-check` with both the ECC and RSA
    CA chain paths, so intermediates unique to either chain are always checked.
-3. Applies trust exclusions: per-server exclusions from `servers.json` take
-   precedence; falls back to `trust-exclusions.conf` if none are configured.
-4. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
+3. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
    and writes a `TRUST` entry to the per-server `status.log`.
-
----
-
-## trust-exclusions.conf
-
-**Global fallback file (admin-editable):**
-```
-/opt/cppm-certs/trust-exclusions.conf   (host path)
-/data/certs/trust-exclusions.conf       (container path)
-```
-
-**Image default (read-only reference):**
-```
-/opt/cppm/acme-ca-certs/trust-exclusions.conf
-```
-
-**Priority:** Per-server exclusions configured in the web UI
-(**Servers → Edit → ACME Provider → Trust Exclusions**) and stored in `servers.json` always take
-precedence. This file is only read when a server has no per-server exclusions
-configured — it acts as a global fallback for backwards compatibility.
-
-Controls which ACME CA and intermediate CA certificates are excluded from all
-trust list operations (both post-renewal uploads and weekly checks). Excluded
-certificates are silently skipped — they are never uploaded, never patched,
-and no error is raised if they are absent from the trust list.
-
-The file is seeded to the persistent volume by `entrypoint.sh` on first start.
-Edit the host-side copy — changes take effect at the next scheduled or manual
-trust check without restarting the container.
-
-**Format:** one entry per line, matched case-insensitively as a partial
-substring against the certificate's Subject CN. Lines starting with `#` are
-comments.
-
-```
-# Exclude R11 — already managed separately in this environment
-R11
-
-# Exclude ECDSA intermediates — RADIUS uses RSA-only EAP
-E5
-E6
-E7
-E8
-```
 
 ---
 
@@ -256,17 +231,20 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 |---|---|---|
 | `GET /` | No (configurable) | Multi-server certificate dashboard |
 | `GET /server/<id>` | No (configurable) | Per-server detail with connectivity status |
-| `GET /settings` | Yes | ClearPass server list — add, edit, delete |
+| `GET /settings` | Yes | ClearPass server list — add, edit, delete, run, upload |
 | `GET /settings/add` | Yes | Add server form |
 | `GET /settings/edit/<id>` | Yes | Edit server form |
-| `GET /settings/trust-exclusions/<id>` | Yes | Per-server trust exclusions (reached via Edit → ACME Provider) |
+| `POST /settings/add` | Yes | Save new server; auto-triggers cert pipeline in background |
+| `POST /settings/edit/<id>` | Yes | Save edited server |
+| `POST /settings/delete` | Yes | Delete server |
+| `POST /settings/run/<id>` | Yes | Force full cert re-issue (Issue Cert Now); redirects to `/server/<id>` |
+| `POST /settings/upload/<id>` | Yes | Re-upload existing certs to ClearPass (Upload to ClearPass); redirects to `/server/<id>` |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |
 
-All server configuration (ClearPass credentials, DNS provider, domain, ACME
-settings, trust exclusions) is stored in `/data/certs/servers.json` and
-managed through these routes. Admin credentials are stored in
+All server configuration (ClearPass credentials, DNS provider, domain, and ACME
+settings) is stored in `/data/certs/servers.json` and managed through these routes. Admin credentials are stored in
 `/data/certs/admin.htpasswd` (bcrypt). Sessions are HMAC-SHA256 signed cookies
 using a secret in `/data/certs/.session-secret`.
 
@@ -276,7 +254,7 @@ Logs to `/data/certs/.logs/status_server.log`.
 
 ## acme_provider.py
 
-**Used by:** `acme_sh_provider.py`, `lego_provider.py`. Not called directly.
+**Used by:** `acme_cli.py`, `lego_provider.py`, `acme_sh_provider.py`. Not called directly.
 
 Abstract base class and shared result types that define the common interface
 for all ACME certificate providers.
@@ -295,7 +273,7 @@ for all ACME certificate providers.
 |---|---|
 | `register_account(email, server)` | Register or verify an ACME account (idempotent) |
 | `issue_cert(*, domain, acme_server, cert_dir, key_types, dns_provider, dns_env, log_file, force)` | Issue new certificates via DNS-01 challenge |
-| `renew_cert(*, domain, acme_server, cert_dir, key_types, log_file)` | Renew existing certificates; attempts all key types before raising |
+| `renew_cert(*, domain, acme_server, cert_dir, key_types, dns_provider, dns_env, log_file)` | Renew existing certificates; attempts all key types before raising |
 | `install_cert(*, domain, cert_dir, key_types, log_file)` | Copy provider-managed state to flat `.cer`/`.key` files; verifies all expected files exist |
 | `revoke_cert(*, domain, cert_dir, key_types, log_file)` | Revoke issued certificates; attempts all key types before raising |
 
@@ -304,8 +282,8 @@ for all ACME certificate providers.
 ```python
 from acme_provider import get_provider
 
-provider = get_provider("acme_sh")   # AcmeShProvider (current default)
-provider = get_provider("lego")      # LegoProvider (stub — not yet implemented)
+provider = get_provider("lego")      # LegoProvider (default)
+provider = get_provider("acme_sh")   # AcmeShProvider (legacy)
 ```
 
 All path arguments must be absolute. `key_types` is a list containing any combination of `"ecc"` and `"rsa"`. `dns_env` is a dict of DNS provider credential env vars (e.g. `{"CF_Token": "..."}`) merged into the subprocess environment so credentials are never globally exported.
@@ -314,54 +292,114 @@ All path arguments must be absolute. `key_types` is a list containing any combin
 
 ## acme_sh_provider.py
 
-**Used by:** future Python callers replacing the shell scripts. Not called directly.
+**Status:** Legacy — not the active code path. Kept for reference.
 
-Concrete `AcmeProvider` implementation backed by the `acme.sh` CLI at
-`/usr/local/bin/acme.sh`. All ACME operations that the shell scripts currently
-perform are mirrored here as Python methods.
-
-### DNS plugin mapping
-
-Translates the `dns_provider` value from `servers.json` to the acme.sh dnsapi plugin name:
-
-| `dns_provider` value | acme.sh plugin |
-|---|---|
-| `cloudflare`, `cf` | `dns_cf` |
-| `porkbun` | `dns_porkbun` |
-| `route53`, `aws`, `r53` | `dns_aws` |
-| `digitalocean`, `do` | `dns_dgon` |
-| `godaddy`, `gd` | `dns_gd` |
-| anything else | `dns_{provider}` (passthrough) |
+Concrete `AcmeProvider` implementation backed by the `acme.sh` CLI. Accepts
+`dns_provider` and `dns_env` on `renew_cert()` for interface compatibility
+(acme.sh stores DNS credentials in per-cert `.conf` files so they are not
+needed at renewal time and are silently ignored).
 
 ### Behaviour notes
 
-- **`register_account`** — mirrors `entrypoint.sh`'s `|| true`; any non-zero exit is tolerated (idempotent, transient CA errors are non-fatal).
-- **`issue_cert`** — raises `AcmeError` immediately on failure (consistent with `die` in `issue_cert.sh`). acme.sh exit 2 (cert exists, not due) maps to `issued=False`, not an error.
-- **`renew_cert`** — tries all requested key types before raising, matching `renew.sh`'s `RENEW_FAILED` accumulator pattern. An ECC failure does not prevent RSA from being attempted.
-- **`install_cert`** — verifies all expected flat files exist after `--install-cert` returns exit 0, mirroring the post-install check in `install_cert.sh`.
-- **`DEBUG` env var** — stripped from the subprocess environment before every acme.sh call to prevent Alpine ash integer-range errors (same as `unset DEBUG` in all shell scripts).
-- **Subprocess timeout** — defaults to 600 seconds (10 minutes) to accommodate DNS propagation delays. `subprocess.TimeoutExpired` is caught and re-raised as `AcmeError`.
+- **`register_account`** — any non-zero exit is tolerated (idempotent).
+- **`issue_cert`** — acme.sh exit 2 (cert exists, not due) maps to `issued=False`, not an error.
+- **`renew_cert`** — tries all requested key types before raising; an ECC failure does not prevent RSA from being attempted.
+- **`DEBUG` env var** — stripped from the subprocess environment before every call.
+- **Subprocess timeout** — defaults to 600 seconds.
 
 ---
 
 ## lego_provider.py
 
-**Status:** Stub — not yet implemented.
+**Status:** Active — the default `AcmeProvider` implementation.
 
-Placeholder `AcmeProvider` for an eventual transition from `acme.sh` to
-[Lego](https://github.com/go-acme/lego). All methods raise `NotImplementedError`.
-The file serves as the starting point for the migration and documents the key
-differences to address during implementation:
+Concrete `AcmeProvider` backed by the `lego` CLI at `/usr/local/bin/lego`.
 
-| Aspect | acme.sh (current) | Lego (future) |
+### DNS plugin mapping
+
+Translates the `dns_provider` value from `servers.json` to the Lego plugin name:
+
+| `dns_provider` value | Lego plugin |
+|---|---|
+| `cloudflare`, `cf` | `cloudflare` |
+| `porkbun` | `porkbun` |
+| `route53`, `aws`, `r53` | `route53` |
+| `digitalocean`, `do` | `digitalocean` |
+| `godaddy`, `gd` | `godaddy` |
+| `infoblox` | `infoblox` |
+| `rfc2136` | `rfc2136` |
+| anything else | passthrough as-is |
+
+### Credential remapping
+
+`servers.json` stores credentials using acme.sh-style names for backward
+compatibility. `_map_dns_env()` translates them to Lego names at runtime:
+
+| servers.json key | Lego env var |
+|---|---|
+| `CF_Token` | `CF_DNS_API_TOKEN` |
+| `CF_Key` | `CF_API_KEY` |
+| `CF_Email` | `CF_API_EMAIL` |
+| `DO_API_KEY` | `DO_AUTH_TOKEN` |
+| `GD_Key` | `GODADDY_API_KEY` |
+| `GD_Secret` | `GODADDY_API_SECRET` |
+| `AWS_DEFAULT_REGION` | `AWS_REGION` |
+| `CF_Zone_ID`, `CF_Account_ID` | dropped (not used by Lego) |
+| `INFOBLOX_*` keys | passed through as-is (Lego uses these names natively) |
+| `RFC2136_*` keys | passed through as-is (Lego uses these names natively) |
+
+### Behaviour notes
+
+- **`issue_cert`** — for `force=True`, deletes the domain's cert files from
+  `lego-{ecc,rsa}/certificates/` before `lego run` to ensure a fresh issue.
+- **`renew_cert`** — uses mtime comparison before/after `lego renew --days 30`
+  to detect true renewal (Lego always exits 0 regardless of whether it renewed).
+- **`install_cert`** — copies `.crt` → `.fullchain.cer`, extracts first PEM → `.cer`,
+  `.key` → `.key` (chmod 600), `.issuer.crt` → `.ca.cer` (fallback: strip leaf
+  from fullchain).
+- **`DEBUG` env var** — popped from subprocess environment before each call.
+- **Subprocess timeout** — defaults to 600 seconds; `TimeoutExpired` is caught
+  and re-raised as `AcmeError`.
+
+### Logging
+
+`lego_provider` logs at `INFO` and `DEBUG` via Python's `logging` module
+(logger name `lego_provider`). Controlled by `LOG_LEVEL` in
+`docker-compose.override.yml`.
+
+| Level | Message pattern | When |
 |---|---|---|
-| Binary | `acme.sh` | `lego` |
-| DNS plugin names | `dns_cf`, `dns_porkbun`, `dns_aws`, … | `cloudflare`, `porkbun`, `route53`, … |
-| Key-type flag | `--keylength ec-256` / `2048` | `--key-type ec256` / `rsa2048` |
-| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/.lego/certificates/` |
-| Install step | Separate `--install-cert` required | Files written directly on issue/renew |
-| Account registration | Explicit `--register-account` | Implicit on first `run` |
-| ACME server flag | `--server` | `--server` (same) |
+| `INFO` | `issue_cert: domain=… ca=… plugin=… types=… force=…` | Start of each issuance |
+| `DEBUG` | `issue_cert: mapped dns env keys: […]` | Credential keys passed to Lego |
+| `INFO` | `lego run (ECC/RSA) succeeded for <domain>` | Per-key-type success |
+| `ERROR` | `lego run (ECC/RSA) failed (exit N) for <domain>` | Per-key-type failure |
+| `INFO` | `renew_cert: domain=… ca=… plugin=… types=…` | Start of each renewal check |
+| `INFO` | `lego renew (ECC/RSA) for <domain>: renewed/not due (mtime before=… after=…)` | Per-key-type renewal result |
+| `ERROR` | `lego renew (ECC/RSA) failed (exit N) for <domain>` | Per-key-type failure |
+| `INFO` | `install_cert: domain=… types=…` | Start of cert install |
+| `INFO` | `install_cert: installed ECC/RSA cert files for <domain>` | Per-key-type install |
+| `DEBUG` | `lego <args>` | Every Lego subprocess invocation |
+
+### acme_cli.py
+
+**Called by:** `issue_cert.sh`, `renew.sh`, `install_cert.sh`. Also callable manually.
+
+CLI bridge between the shell scripts and the Python provider layer.
+
+```bash
+docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py issue
+docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py issue --force
+docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py renew
+docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py install
+docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py revoke
+```
+
+Exit codes: `0` = action taken (issued/renewed/installed), `2` = not due
+(renew only — used by `renew.sh` to distinguish "not due" from "error"),
+`1` = error.
+
+Reads server context from environment variables set by
+`eval "$(cppm-servers env <id>)"` — the same env block used by all shell scripts.
 
 ---
 
@@ -376,10 +414,11 @@ Python module providing the `servers.json` CRUD layer:
 |---|---|
 | `load_servers()` | Return all server entries as a list |
 | `get_server(id)` | Return a single server entry by UUID |
-| `add_server(entry)` | Validate, check for duplicate host, write |
+| `add_server(entry)` | Validate, check for duplicate host, write; returns the new server UUID |
 | `update_server(id, entry)` | Replace an existing entry |
 | `delete_server(id)` | Remove an entry |
-| `get_server_shell_env(id)` | Return `export KEY='VALUE'` lines for `eval` in shell scripts |
+| `get_server_env_dict(id)` | Return per-server environment variables as a `dict[str, str]` (used by web-triggered pipelines) |
+| `get_server_shell_env(id)` | Return `export KEY='VALUE'` lines for `eval` in shell scripts (wraps `get_server_env_dict`) |
 | `migrate_from_env()` | One-time migration: reads legacy `.env` vars, writes first `servers.json` entry |
 
 ---
@@ -434,10 +473,11 @@ write to the global `/data/certs/status.log`.
 
 Variables are split into two categories depending on where they are configured.
 
-### Set in `.env` — container-level
+### Set in `docker-compose.override.yml` — container-level
 
 These control Docker-level behaviour and must be known before the container
-starts. They apply to the whole container, not to individual servers.
+starts. They apply to the whole container, not to individual servers. Defaults
+are defined in `docker-compose.yml`; override only what you need to change.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -461,8 +501,8 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 |---|---|
 | `DOMAIN` | FQDN for the certificate (e.g. `cppm.example.com`) |
 | `ACME_EMAIL` | ACME account contact email |
-| `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass` |
-| `DNS_PROVIDER` | acme.sh DNS plugin selector (e.g. `cloudflare`, `porkbun`, `route53`) |
+| `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass`, `buypass_test`, or any ACME directory URL for a custom/private CA |
+| `DNS_PROVIDER` | Lego DNS plugin selector (e.g. `cloudflare`, `porkbun`, `route53`) |
 | `CPPM_HOST` | ClearPass hostname or IP |
 | `CPPM_CLIENT_ID` | ClearPass API client ID |
 | `CPPM_CLIENT_SECRET` | ClearPass API client secret |
@@ -470,5 +510,4 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 | `CPPM_CERT_PASSPHRASE` | PKCS12 export passphrase (transient — never stored on disk) |
 | `CPPM_CALLBACK_HOST` | Docker host LAN IP that ClearPass can route to |
 | `CPPM_CALLBACK_PORT` | Mirrors the container-level value for per-server use |
-| `TRUST_EXCLUSIONS` | Newline-separated CA CN patterns to exclude from trust list operations |
 | `CF_Token`, `CF_Zone_ID`, … | DNS provider credentials — keys vary by provider |
