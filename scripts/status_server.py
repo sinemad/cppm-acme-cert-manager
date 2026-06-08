@@ -2514,7 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             server_id = add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
-            _spawn_cert_pipeline(server_id, force=False)
+            _spawn_cert_pipeline(server_id, force=True)
             self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
