@@ -20,6 +20,7 @@ import datetime
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -44,7 +45,7 @@ from auth_utils import (
 )
 from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
-    server_cert_dir,
+    server_cert_dir, get_server_env_dict,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -577,6 +578,34 @@ def _build_health() -> dict:
         _health_cache["data"] = result
         _health_cache["ts"]   = time.time()
     return result
+
+
+# ── Cert pipeline trigger ─────────────────────────────────────────────────────
+
+_ISSUE_SCRIPT = Path("/opt/cppm/issue_cert.sh")
+
+def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
+    """Run issue_cert.sh for server_id in a background daemon thread."""
+    def _run():
+        if not _ISSUE_SCRIPT.exists():
+            _log.warning("cert pipeline: %s not found (not in container?)", _ISSUE_SCRIPT)
+            return
+        env_dict = get_server_env_dict(server_id)
+        if env_dict is None:
+            _log.error("cert pipeline: server %s not found", server_id)
+            return
+        Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, **env_dict}
+        if force:
+            env["FORCE_RENEW"] = "true"
+        _log.info("cert pipeline: starting for %s (force=%s)", server_id, force)
+        try:
+            rc = subprocess.run([str(_ISSUE_SCRIPT)], env=env, check=False).returncode
+            _log.info("cert pipeline: finished for %s (rc=%d)", server_id, rc)
+        except Exception as exc:
+            _log.error("cert pipeline: error for %s: %s", server_id, exc)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ── Settings helpers ─────────────────────────────────────────────────────────
@@ -1134,6 +1163,12 @@ def _settings_list_page(servers: list, username: str,
                 f' onclick="hideDelConfirm(\'{sid}\')">No</button>'
                 f'</span>'
             )
+            run_btn = (
+                f'<form method="POST" action="/settings/run/{sid}"'
+                f' style="display:inline;margin-right:0.4rem">'
+                f'<button type="submit" class="btn btn-ghost">&#9654; Run Now</button>'
+                f'</form>'
+            )
             rows += (
                 f'<tr>'
                 f'<td><strong>{label}</strong></td>'
@@ -1142,6 +1177,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
+                f'{run_btn}'
                 f'{del_btn}'
                 f'</td>'
                 f'</tr>'
@@ -2357,6 +2393,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_delete()
         elif path.startswith("/settings/edit/"):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
+        elif path.startswith("/settings/run/"):
+            self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -2462,7 +2500,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
-            self._redirect("/settings?ft=ok&fm=Server+added")
+            _spawn_cert_pipeline(entry["id"], force=False)
+            self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
             self._serve_html(
@@ -2500,6 +2539,18 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/settings?ft=ok&fm=Server+deleted")
         else:
             self._redirect("/settings?ft=err&fm=Server+not+found")
+
+    def _handle_settings_run(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        srv = get_server(server_id)
+        if srv is None:
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        _log.info("settings: '%s' triggered cert pipeline for '%s'", username, srv.get("label"))
+        _spawn_cert_pipeline(server_id, force=True)
+        label = _url_enc(srv.get("label") or server_id)
+        self._redirect(f"/settings?ft=ok&fm=Certificate+pipeline+started+for+{label}")
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.
