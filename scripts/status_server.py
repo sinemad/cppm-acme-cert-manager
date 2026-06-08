@@ -606,6 +606,30 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+_DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
+
+def _spawn_upload_pipeline(server_id: str) -> None:
+    """Run deploy_hook.sh for server_id in a background daemon thread."""
+    def _run():
+        if not _DEPLOY_SCRIPT.exists():
+            _log.warning("upload pipeline: %s not found (not in container?)", _DEPLOY_SCRIPT)
+            return
+        env_dict = get_server_env_dict(server_id)
+        if env_dict is None:
+            _log.error("upload pipeline: server %s not found", server_id)
+            return
+        Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, **env_dict}
+        _log.info("upload pipeline: starting for %s", server_id)
+        try:
+            rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
+            _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
+        except Exception as exc:
+            _log.error("upload pipeline: error for %s: %s", server_id, exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 # ── Settings helpers ─────────────────────────────────────────────────────────
 
 # DNS credential keys per provider — used both to build form fields and to
@@ -1171,11 +1195,17 @@ def _settings_list_page(servers: list, username: str,
                 f'<form method="POST" action="/settings/run/{sid}"'
                 f' style="display:inline;margin-right:0.4rem"'
                 f' onsubmit="return confirm('
-                f"'Force a full certificate re-issue for {label}?\\n\\n"
+                f"'Issue new ACME certificates for {label}?\\n\\n"
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
-                f"Only proceed if you need to re-issue now.')\">"
-                f'<button type="submit" class="btn btn-ghost">&#9654; Run Now</button>'
+                f"Use Upload to ClearPass instead if certs are already issued and just need uploading.')\">"
+                f'<button type="submit" class="btn btn-ghost">&#9654; Issue Cert Now</button>'
+                f'</form>'
+            )
+            upload_btn = (
+                f'<form method="POST" action="/settings/upload/{sid}"'
+                f' style="display:inline;margin-right:0.4rem">'
+                f'<button type="submit" class="btn btn-ghost">&#8679; Upload to ClearPass</button>'
                 f'</form>'
             )
             rows += (
@@ -1187,6 +1217,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
                 f'{run_btn}'
+                f'{upload_btn}'
                 f'{del_btn}'
                 f'</td>'
                 f'</tr>'
@@ -2409,6 +2440,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
         elif path.startswith("/settings/run/"):
             self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
+        elif path.startswith("/settings/upload/"):
+            self._handle_settings_upload(path[len("/settings/upload/"):].strip("/"))
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -2565,6 +2598,20 @@ class Handler(BaseHTTPRequestHandler):
         _spawn_cert_pipeline(server_id, force=True)
         self._redirect(
             f"/server/{server_id}?ft=ok&fm=Certificate+pipeline+started."
+            f"+Results+will+appear+in+the+Activity+Log+below."
+        )
+
+    def _handle_settings_upload(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        srv = get_server(server_id)
+        if srv is None:
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        _log.info("settings: '%s' triggered upload pipeline for '%s'", username, srv.get("label"))
+        _spawn_upload_pipeline(server_id)
+        self._redirect(
+            f"/server/{server_id}?ft=ok&fm=Upload+pipeline+started."
             f"+Results+will+appear+in+the+Activity+Log+below."
         )
 

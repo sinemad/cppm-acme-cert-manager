@@ -97,8 +97,13 @@ if [[ $UPLOAD_EXIT -eq 0 ]]; then
     log "Upload succeeded."
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
-    UPLOAD_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC→HTTPS + RSA→RADIUS" || \
-                     [[ "$ISSUE_ECC" == "true" ]] && echo "ECC→HTTPS" || echo "RSA→RADIUS" )"
+    if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
+        UPLOAD_LABEL="ECC→HTTPS + RSA→RADIUS"
+    elif [[ "$ISSUE_ECC" == "true" ]]; then
+        UPLOAD_LABEL="ECC→HTTPS"
+    else
+        UPLOAD_LABEL="RSA→RADIUS"
+    fi
     status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
 else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"

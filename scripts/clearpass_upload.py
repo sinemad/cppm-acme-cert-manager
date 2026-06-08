@@ -646,8 +646,12 @@ def _serve_pkcs12_and_upload(
         def log_message(self, *_):
             pass
 
-    # Bind on 0.0.0.0 so Docker port mapping reaches us
-    httpd    = socketserver.TCPServer(("0.0.0.0", callback_port), _SilentHandler)
+    # allow_reuse_address lets the HTTPS and RADIUS uploads both bind the same
+    # port in the same process run without hitting TIME_WAIT between them.
+    class _PkcsServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    httpd    = _PkcsServer(("0.0.0.0", callback_port), _SilentHandler)
     thread   = threading.Thread(target=httpd.serve_forever, daemon=True)
     orig_dir = os.getcwd()
 
@@ -1100,7 +1104,11 @@ def main() -> int:
             )
             log.info("RADIUS upload response: %s", json.dumps(result, indent=2)
                      if isinstance(result, dict) else result)
-            if isinstance(result, dict) and result.get("status") != "skipped":
+            if isinstance(result, dict) and result.get("status") == "skipped":
+                status_write("INFO", "UPLOAD",
+                             f"RADIUS step skipped – CPPM uses a unified HTTPS/RADIUS cert; "
+                             f"HTTPS upload already covers RADIUS on {host}")
+            else:
                 status_write("OK", "UPLOAD", f"RADIUS(RSA) cert uploaded to {host}")
         except Exception as exc:
             log.error("RADIUS upload FAILED: %s", exc)
