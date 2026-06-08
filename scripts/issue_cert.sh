@@ -38,17 +38,13 @@ die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
 
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
-CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC + RSA" || \
-               [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
-
-log "=== Certificate Issuance (${CERT_LABEL}) ==="
-log "  Domain   : ${DOMAIN:-NOT SET}"
-log "  CPPM     : ${CPPM_HOST:-NOT SET}"
-log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
-log "  ACME CA  : ${ACME_CA_LABEL}"
-log "  Types    : ${CERT_LABEL}"
-log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
-status_write "INFO" "CERT" "Starting issuance (${CERT_LABEL}) – domain=${DOMAIN:-?} dns=${DNS_PROVIDER:-?} ca=${ACME_CA_LABEL}"
+if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
+    CERT_LABEL="ECC + RSA"
+elif [[ "$ISSUE_ECC" == "true" ]]; then
+    CERT_LABEL="ECC"
+else
+    CERT_LABEL="RSA"
+fi
 
 # Build a human-readable CA label for log/status messages.
 ACME_CA_LABEL="${ACME_SERVER:-letsencrypt}"
@@ -60,6 +56,15 @@ case "$ACME_CA_LABEL" in
     buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
     http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
 esac
+
+log "=== Certificate Issuance (${CERT_LABEL}) ==="
+log "  Domain   : ${DOMAIN:-NOT SET}"
+log "  CPPM     : ${CPPM_HOST:-NOT SET}"
+log "  DNS      : ${DNS_PROVIDER:-NOT SET}"
+log "  ACME CA  : ${ACME_CA_LABEL}"
+log "  Types    : ${CERT_LABEL}"
+log "  Callback : http://${CPPM_CALLBACK_HOST:-not set}:${CPPM_CALLBACK_PORT:-8765}/"
+status_write "INFO" "CERT" "Starting issuance (${CERT_LABEL}) – domain=${DOMAIN:-?} dns=${DNS_PROVIDER:-?} ca=${ACME_CA_LABEL}"
 
 FORCE_FLAG=""
 [[ "${FORCE_RENEW:-false}" == "true" ]] && FORCE_FLAG="--force"

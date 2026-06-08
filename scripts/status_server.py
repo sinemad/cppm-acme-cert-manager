@@ -595,9 +595,7 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
             _log.error("cert pipeline: server %s not found", server_id)
             return
         Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, **env_dict}
-        if force:
-            env["FORCE_RENEW"] = "true"
+        env = {**os.environ, **env_dict, "FORCE_RENEW": "true" if force else "false"}
         _log.info("cert pipeline: starting for %s (force=%s)", server_id, force)
         try:
             rc = subprocess.run([str(_ISSUE_SCRIPT)], env=env, check=False).returncode
@@ -1165,7 +1163,12 @@ def _settings_list_page(servers: list, username: str,
             )
             run_btn = (
                 f'<form method="POST" action="/settings/run/{sid}"'
-                f' style="display:inline;margin-right:0.4rem">'
+                f' style="display:inline;margin-right:0.4rem"'
+                f' onsubmit="return confirm('
+                f"'Force a full certificate re-issue for {label}?\\n\\n"
+                f"Warning: this counts against your ACME CA rate limit "
+                f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
+                f"Only proceed if you need to re-issue now.')\">"
                 f'<button type="submit" class="btn btn-ghost">&#9654; Run Now</button>'
                 f'</form>'
             )
@@ -2498,9 +2501,9 @@ class Handler(BaseHTTPRequestHandler):
         f     = self._parse_form()
         entry = _parse_server_form(f)
         try:
-            add_server(entry)
+            server_id = add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
-            _spawn_cert_pipeline(entry["id"], force=False)
+            _spawn_cert_pipeline(server_id, force=False)
             self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
