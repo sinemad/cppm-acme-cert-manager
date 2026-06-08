@@ -271,6 +271,10 @@ _health_cache:       dict           = {}
 _HEALTH_TTL                         = 120  # seconds
 _health_prev_states: dict           = {}   # {server_id: {check_type: status_str}}
 
+# Serializes upload pipeline runs and the callback-port health check — both
+# bind the same fixed callback port, so they must not run concurrently.
+_UPLOAD_LOCK: threading.Lock = threading.Lock()
+
 # Level map for health check results → status.log level column
 _HEALTH_LEVEL: dict[str, str] = {
     "ok":      "OK",
@@ -477,7 +481,13 @@ def _check_callback(server: dict = None) -> dict:
     probe.close()
     _log.debug("callback-check [%s]: port %d is bindable", label, callback_port)
 
-    # Step 2 — spin up a minimal HTTP server and try reaching it via the external URL
+    # Step 2 — spin up a minimal HTTP server and try reaching it via the external URL.
+    # Skip if an upload pipeline is already holding the port.
+    if not _UPLOAD_LOCK.acquire(blocking=False):
+        _log.debug("callback-check [%s]: upload in progress — skipping round-trip test", label)
+        return {"status": "warn",
+                "message": f"Upload in progress — callback port {callback_port} is in use"}
+
     class _PingHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -486,9 +496,12 @@ def _check_callback(server: dict = None) -> dict:
         def log_message(self, *_):
             pass
 
+    class _PingServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
     httpd = None
     try:
-        httpd = socketserver.TCPServer(("0.0.0.0", callback_port), _PingHandler)
+        httpd = _PingServer(("0.0.0.0", callback_port), _PingHandler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         import requests as _req
         r = _req.get(url, timeout=4)
@@ -514,6 +527,7 @@ def _check_callback(server: dict = None) -> dict:
     finally:
         if httpd:
             httpd.shutdown()
+        _UPLOAD_LOCK.release()
 
 
 def _build_health() -> dict:
@@ -607,11 +621,6 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
 
 
 _DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
-
-# Only one upload pipeline may hold the callback port at a time — prevent
-# concurrent runs from different servers or rapid button clicks.
-_UPLOAD_LOCK = threading.Lock()
-
 
 def _status_write(status_log: str, level: str, category: str, message: str) -> None:
     """Write a single status entry directly to a server's status.log."""
