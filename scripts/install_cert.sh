@@ -29,8 +29,13 @@ die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
 
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
-CERT_LABEL="$( [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]] && echo "ECC + RSA" || \
-               [[ "$ISSUE_ECC" == "true" ]] && echo "ECC" || echo "RSA" )"
+if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
+    CERT_LABEL="ECC + RSA"
+elif [[ "$ISSUE_ECC" == "true" ]]; then
+    CERT_LABEL="ECC"
+else
+    CERT_LABEL="RSA"
+fi
 
 log "=== Install Cert Files (${CERT_LABEL}) ==="
 log "  Domain : $DOMAIN"

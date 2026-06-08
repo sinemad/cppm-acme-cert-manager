@@ -608,6 +608,22 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
 
 _DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
 
+# Only one upload pipeline may hold the callback port at a time — prevent
+# concurrent runs from different servers or rapid button clicks.
+_UPLOAD_LOCK = threading.Lock()
+
+
+def _status_write(status_log: str, level: str, category: str, message: str) -> None:
+    """Write a single status entry directly to a server's status.log."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        Path(status_log).parent.mkdir(parents=True, exist_ok=True)
+        with open(status_log, "a") as f:
+            f.write(f"{ts}\t{level}\t{category}\t{message}\n")
+    except Exception as exc:
+        _log.warning("status_write failed: %s", exc)
+
+
 def _spawn_upload_pipeline(server_id: str) -> None:
     """Run deploy_hook.sh for server_id in a background daemon thread."""
     def _run():
@@ -619,13 +635,24 @@ def _spawn_upload_pipeline(server_id: str) -> None:
             _log.error("upload pipeline: server %s not found", server_id)
             return
         Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, **env_dict}
-        _log.info("upload pipeline: starting for %s", server_id)
+        status_log = env_dict.get("STATUS_LOG", "")
+
+        if not _UPLOAD_LOCK.acquire(blocking=False):
+            _log.warning("upload pipeline: another upload is already running, skipping %s", server_id)
+            if status_log:
+                _status_write(status_log, "WARN", "UPLOAD",
+                              "Upload skipped – another upload is already in progress. Try again in a moment.")
+            return
+
         try:
+            env = {**os.environ, **env_dict}
+            _log.info("upload pipeline: starting for %s", server_id)
             rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
             _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
         except Exception as exc:
             _log.error("upload pipeline: error for %s: %s", server_id, exc)
+        finally:
+            _UPLOAD_LOCK.release()
 
     threading.Thread(target=_run, daemon=True).start()
 

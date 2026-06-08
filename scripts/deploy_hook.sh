@@ -23,6 +23,17 @@ err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/
 
 source /opt/cppm/status.sh
 
+# Serialize all upload invocations — the callback HTTP server binds a fixed
+# port, so two concurrent deploy_hook.sh runs (e.g. cert pipeline + manual
+# upload trigger) would both fail with "Address in use".
+UPLOAD_LOCK="/tmp/cppm_upload_${CPPM_CALLBACK_PORT:-8765}.lock"
+exec 9>"$UPLOAD_LOCK"
+if ! flock -n 9; then
+    log "Another upload is already in progress – skipping this run."
+    status_write "WARN" "UPLOAD" "Upload skipped – another upload was already in progress. Try again shortly."
+    exit 0
+fi
+
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"
 
