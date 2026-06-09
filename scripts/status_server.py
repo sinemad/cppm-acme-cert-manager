@@ -47,6 +47,7 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict,
     get_server_notifications, update_server_notifications,
+    get_traefik_config, save_traefik_config, generate_traefik_compose,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -995,6 +996,7 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
         right = (
             _link("/", "Dashboard", "dashboard")
             + _link("/settings", "Servers", "settings")
+            + _link("/settings/traefik", "Traefik", "traefik")
             + _link("/admin/users", "Users", "users")
             + '<span class="nav-sep"></span>'
             + f'<span class="nav-user">{_esc(username)}</span>'
@@ -1094,6 +1096,335 @@ def _setup_page(error: str = "") -> str:
     </div>
   </div>
 </div>""")
+
+
+def _traefik_page(
+    cfg: dict,
+    error: str = "",
+    success: str = "",
+    is_setup: bool = False,
+    username: str = "",
+) -> str:
+    """Traefik HTTPS configuration page (shared: setup wizard step 1 + settings)."""
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    ok_html  = f'<div class="flash flash-ok">{_esc(success)}</div>' if success else ""
+
+    action     = "/setup/traefik" if is_setup else "/settings/traefik"
+    skip_href  = "/setup?step=admin" if is_setup else "/settings"
+    skip_label = "Skip" if is_setup else "Cancel"
+
+    enabled_chk = " checked" if cfg.get("enabled") else ""
+    challenge   = cfg.get("challenge", "http")
+    dns_prov    = cfg.get("dns_provider", "cloudflare")
+    creds       = cfg.get("dns_credentials") or {}
+
+    def cv(k, d=""): return _esc(str(creds.get(k, d)))
+    def sel(a, b):   return " selected" if a == b else ""
+    def vis(p):      return "" if p == dns_prov else ' style="display:none"'
+
+    dns_vis  = "" if challenge == "dns" else ' style="display:none"'
+    body_vis = "" if cfg.get("enabled") else ' style="display:none"'
+
+    # ── DNS credential sections (same providers as server settings) ───────────
+    dns_html = f"""
+      <div class="form-section-title" style="margin-top:1rem">DNS Provider</div>
+      <div class="field">
+        <label>Provider</label>
+        <select name="dns_provider" id="dns_provider" onchange="switchDns(this.value)">
+          <option value="cloudflare"{sel(dns_prov,'cloudflare')}>Cloudflare</option>
+          <option value="porkbun"{sel(dns_prov,'porkbun')}>Porkbun</option>
+          <option value="route53"{sel(dns_prov,'route53')}>AWS Route 53</option>
+          <option value="digitalocean"{sel(dns_prov,'digitalocean')}>DigitalOcean</option>
+          <option value="godaddy"{sel(dns_prov,'godaddy')}>GoDaddy</option>
+          <option value="infoblox"{sel(dns_prov,'infoblox')}>Infoblox</option>
+          <option value="rfc2136"{sel(dns_prov,'rfc2136')}>RFC 2136 (nsupdate / AD DNS)</option>
+        </select>
+      </div>
+      <div id="dns-cloudflare" class="dns-section"{vis('cloudflare')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>API Token <span class="hint">(Zone DNS, scoped — recommended)</span></label>
+            <input type="password" name="CF_Token" value="{cv('CF_Token')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>Zone ID</label>
+            <input type="text" name="CF_Zone_ID" value="{cv('CF_Zone_ID')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>Account ID <span class="hint">(optional with token)</span></label>
+            <input type="text" name="CF_Account_ID" value="{cv('CF_Account_ID')}" autocomplete="off">
+          </div>
+          <div class="field" style="opacity:0.65">
+            <label>Global API Key <span class="hint">(alternative to token)</span></label>
+            <input type="password" name="CF_Key" value="{cv('CF_Key')}" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="field" style="opacity:0.65;margin-bottom:0">
+          <label>Account Email <span class="hint">(required with global key only)</span></label>
+          <input type="email" name="CF_Email" value="{cv('CF_Email')}" autocomplete="off">
+        </div>
+      </div>
+      <div id="dns-porkbun" class="dns-section"{vis('porkbun')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>API Key</label>
+            <input type="password" name="PORKBUN_API_KEY" value="{cv('PORKBUN_API_KEY')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>Secret API Key</label>
+            <input type="password" name="PORKBUN_SECRET_API_KEY" value="{cv('PORKBUN_SECRET_API_KEY')}" autocomplete="new-password">
+          </div>
+        </div>
+      </div>
+      <div id="dns-route53" class="dns-section"{vis('route53')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Access Key ID</label>
+            <input type="text" name="AWS_ACCESS_KEY_ID" value="{cv('AWS_ACCESS_KEY_ID')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Secret Access Key</label>
+            <input type="password" name="AWS_SECRET_ACCESS_KEY" value="{cv('AWS_SECRET_ACCESS_KEY')}" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>Region</label>
+          <input type="text" name="AWS_DEFAULT_REGION" value="{cv('AWS_DEFAULT_REGION','us-east-1')}" autocomplete="off">
+        </div>
+      </div>
+      <div id="dns-digitalocean" class="dns-section"{vis('digitalocean')}>
+        <div class="field" style="margin-bottom:0">
+          <label>API Token</label>
+          <input type="password" name="DO_API_KEY" value="{cv('DO_API_KEY')}" autocomplete="new-password">
+        </div>
+      </div>
+      <div id="dns-godaddy" class="dns-section"{vis('godaddy')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>API Key</label>
+            <input type="text" name="GD_Key" value="{cv('GD_Key')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>API Secret</label>
+            <input type="password" name="GD_Secret" value="{cv('GD_Secret')}" autocomplete="new-password">
+          </div>
+        </div>
+      </div>
+      <div id="dns-infoblox" class="dns-section"{vis('infoblox')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Grid Master Host</label>
+            <input type="text" name="INFOBLOX_HOST" value="{cv('INFOBLOX_HOST')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Username</label>
+            <input type="text" name="INFOBLOX_USERNAME" value="{cv('INFOBLOX_USERNAME')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>Password</label>
+            <input type="password" name="INFOBLOX_PASSWORD" value="{cv('INFOBLOX_PASSWORD')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>DNS View <span class="hint">(default: default)</span></label>
+            <input type="text" name="INFOBLOX_VIEW" value="{cv('INFOBLOX_VIEW','default')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col" style="margin-bottom:0">
+          <div class="field">
+            <label>WAPI Version <span class="hint">(default: 2.5)</span></label>
+            <input type="text" name="INFOBLOX_WAPI_VERSION" value="{cv('INFOBLOX_WAPI_VERSION','2.5')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>SSL Verify</label>
+            <input type="text" name="INFOBLOX_SSL_VERIFY" value="{cv('INFOBLOX_SSL_VERIFY','true')}" autocomplete="off">
+          </div>
+        </div>
+      </div>
+      <div id="dns-rfc2136" class="dns-section"{vis('rfc2136')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>Nameserver <span class="hint">(host or host:port)</span></label>
+            <input type="text" name="RFC2136_NAMESERVER" value="{cv('RFC2136_NAMESERVER')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>TSIG Key Name</label>
+            <input type="text" name="RFC2136_TSIG_KEY" value="{cv('RFC2136_TSIG_KEY')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>TSIG Secret</label>
+            <input type="password" name="RFC2136_TSIG_SECRET" value="{cv('RFC2136_TSIG_SECRET')}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>TSIG Algorithm <span class="hint">(default: hmac-md5)</span></label>
+            <input type="text" name="RFC2136_TSIG_ALGORITHM" value="{cv('RFC2136_TSIG_ALGORITHM','hmac-md5')}" autocomplete="off">
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>DNS Timeout <span class="hint">(seconds, default: 10)</span></label>
+          <input type="text" name="RFC2136_DNS_TIMEOUT" value="{cv('RFC2136_DNS_TIMEOUT','10')}" autocomplete="off">
+        </div>
+      </div>"""
+
+    # ── Generated compose block ───────────────────────────────────────────────
+    compose_block = ""
+    if cfg.get("enabled") and cfg.get("host"):
+        host_esc      = _esc(cfg["host"])
+        compose_esc   = _esc(generate_traefik_compose(cfg))
+        setup_note    = (
+            f'<p style="font-size:0.82rem;color:var(--muted);margin:0.6rem 0 0">'
+            f'After running the command above, continue setup at '
+            f'<a href="https://{host_esc}/setup?step=admin" style="color:var(--accent);word-break:break-all">'
+            f'https://{host_esc}/setup?step=admin</a></p>'
+        ) if is_setup else ""
+        compose_block = f"""
+<div class="card" style="margin-top:1.25rem">
+  <div class="form-section-title" style="margin-bottom:0.5rem">Apply Configuration</div>
+  <p style="font-size:0.82rem;color:var(--muted);margin-bottom:0.6rem">
+    Save the generated file as <code>docker-compose.traefik.yml</code> in your project
+    directory, then run:
+  </p>
+  <div style="background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.45rem 0.75rem;font-family:monospace;font-size:0.8rem;color:var(--accent);margin-bottom:0.75rem;display:flex;align-items:center;justify-content:space-between">
+    <span id="traefik-cmd">docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d</span>
+    <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem;margin-left:0.75rem;white-space:nowrap" onclick="copyId('traefik-cmd',this)">Copy</button>
+  </div>
+  <div style="margin-bottom:0.3rem;font-size:0.75rem;color:var(--subtle);display:flex;align-items:center;justify-content:space-between">
+    <span>docker-compose.traefik.yml</span>
+    <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem" onclick="copyId('compose-out-ta',this)">Copy</button>
+  </div>
+  <textarea id="compose-out-ta" readonly rows="26" style="width:100%;background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.65rem;font-family:monospace;font-size:0.72rem;color:var(--muted);resize:vertical;box-sizing:border-box">{compose_esc}</textarea>
+  {setup_note}
+</div>"""
+
+    # ── Form ─────────────────────────────────────────────────────────────────
+    form_html = f"""
+    {err_html}{ok_html}
+    <form method="POST" action="{action}">
+
+      <div class="form-section-title">HTTPS Integration</div>
+      <div class="field" style="margin-bottom:0.75rem">
+        <label>
+          <input type="checkbox" name="enabled" value="true"{enabled_chk}
+                 style="margin-right:0.4rem;accent-color:var(--accent)"
+                 onchange="toggleTraefik(this.checked)">
+          Enable Traefik HTTPS for this interface
+        </label>
+      </div>
+
+      <div id="traefik-body"{body_vis}>
+        <div class="field">
+          <label>Hostname <span class="hint">(the public DNS name for this interface)</span></label>
+          <input type="text" name="host" value="{_esc(str(cfg.get('host','')))}"
+                 placeholder="cert-mgr.example.com" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Let's Encrypt Email <span class="hint">(for certificate notifications)</span></label>
+          <input type="email" name="email" value="{_esc(str(cfg.get('email','')))}"
+                 placeholder="admin@example.com" autocomplete="off">
+        </div>
+
+        <div class="form-section-title" style="margin-top:1rem">ACME Challenge</div>
+        <div class="field">
+          <label>Challenge Type</label>
+          <select name="challenge" onchange="switchTraefikChallenge(this.value)">
+            <option value="http"{sel(challenge,'http')}>HTTP-01 (requires public port 80)</option>
+            <option value="dns"{sel(challenge,'dns')}>DNS-01 (works on private networks)</option>
+          </select>
+          <p class="hint" style="margin-top:0.3rem">
+            Use HTTP-01 if this host is reachable from the internet on port 80.
+            Use DNS-01 for private/internal deployments — requires the same DNS provider
+            credentials as your certificate servers.
+          </p>
+        </div>
+
+        <div id="traefik-dns-section"{dns_vis}>
+{dns_html}
+        </div>
+      </div>
+
+      <div style="margin-top:1.25rem;display:flex;gap:0.75rem;align-items:center">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <a href="{skip_href}" class="btn btn-ghost">{skip_label}</a>
+      </div>
+    </form>
+{compose_block}"""
+
+    # ── JavaScript ────────────────────────────────────────────────────────────
+    script = """
+<script>
+function toggleTraefik(on) {
+  document.getElementById('traefik-body').style.display = on ? '' : 'none';
+}
+function switchTraefikChallenge(val) {
+  var sec = document.getElementById('traefik-dns-section');
+  sec.style.display = val === 'dns' ? '' : 'none';
+  var prov = document.getElementById('dns_provider');
+  if (prov) switchDns(prov.value);
+}
+function switchDns(val) {
+  document.querySelectorAll('.dns-section').forEach(function(el) {
+    var active = el.id === 'dns-' + val;
+    el.style.display = active ? '' : 'none';
+    el.querySelectorAll('input').forEach(function(inp) { inp.disabled = !active; });
+  });
+}
+function copyId(id, btn) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var txt = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
+  navigator.clipboard.writeText(txt).then(function() {
+    var orig = btn.textContent; btn.textContent = 'Copied!';
+    setTimeout(function() { btn.textContent = orig; }, 2000);
+  });
+}
+(function() {
+  var prov = document.getElementById('dns_provider');
+  if (prov) switchDns(prov.value);
+})();
+</script>"""
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    if is_setup:
+        content = f"""
+<div class="auth-wrap">
+  <div class="auth-card" style="max-width:660px;width:100%">
+    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.75rem">
+      <h1 class="auth-title" style="margin-bottom:0">Configure HTTPS (Step 1 of 2)</h1>
+      <a href="/setup?step=admin" style="font-size:0.78rem;color:var(--subtle)">Skip →</a>
+    </div>
+    <p class="auth-desc">
+      Optionally set up Traefik to serve this interface over HTTPS with an
+      automatically-renewed Let's Encrypt certificate. You can also do this later at
+      <strong>Settings → Traefik</strong>.
+    </p>
+    {form_html}
+  </div>
+</div>{script}"""
+        return _base("Configure HTTPS", content)
+    else:
+        content = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">Traefik HTTPS Configuration</span>
+  </div>
+  <div class="card">
+    <p style="font-size:0.82rem;color:var(--muted);margin-bottom:1rem">
+      Configure Traefik as a reverse proxy to serve this interface over HTTPS.
+      Hostname changes take effect immediately (Traefik file provider hot-reload).
+      Challenge type, email, and DNS credential changes require restarting the
+      Traefik container.
+    </p>
+    {form_html}
+  </div>
+</div>{script}"""
+        return _base("Traefik HTTPS", content,
+                     nav_user=username, active="traefik", show_nav=True)
 
 
 def _users_page(users: dict, current_user: str,
@@ -2689,9 +3020,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # Setup wizard — only available when no users exist
         if path == "/setup":
-            if needs_setup():
+            if not needs_setup():
+                return self._redirect("/login")
+            qs   = parse_qs(urlparse(self.path).query)
+            step = qs.get("step", [""])[0]
+            skip = qs.get("skip_traefik", [""])[0]
+            if step == "admin" or skip == "1":
                 return self._serve_html(_setup_page())
-            return self._redirect("/login")
+            return self._serve_html(_traefik_page(get_traefik_config(), is_setup=True))
 
         # Login / logout — always accessible
         if path == "/login":
@@ -2842,6 +3178,11 @@ class Handler(BaseHTTPRequestHandler):
                 _settings_form_page(srv, is_edit=True, username=username)
             )
 
+        if path == "/settings/traefik":
+            return self._serve_html(
+                _traefik_page(get_traefik_config(), username=username)
+            )
+
         if path.startswith("/settings/notifications/"):
             rest = path[len("/settings/notifications/"):].strip("/")
             parts = rest.split("/")
@@ -2898,6 +3239,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/setup":
             self._handle_setup()
+        elif path == "/setup/traefik":
+            if needs_setup():
+                self._handle_traefik_save(is_setup=True)
+            else:
+                self._redirect("/login")
+        elif path == "/settings/traefik":
+            username = self._get_session_user()
+            if not username:
+                return self._redirect("/login")
+            self._handle_traefik_save(is_setup=False)
         elif path == "/login":
             self._handle_login()
         elif path == "/admin/users/add":
@@ -2958,6 +3309,54 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_html(_setup_page(f"Could not create user: {e}"))
         _log.info("setup: admin user '%s' created", username)
         self._redirect("/login?msg=setup_complete")
+
+    def _handle_traefik_save(self, is_setup: bool = False):
+        _ALL_CRED_KEYS = [
+            "CF_Token", "CF_Zone_ID", "CF_Account_ID", "CF_Key", "CF_Email",
+            "PORKBUN_API_KEY", "PORKBUN_SECRET_API_KEY",
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION",
+            "DO_API_KEY", "GD_Key", "GD_Secret",
+            "INFOBLOX_HOST", "INFOBLOX_USERNAME", "INFOBLOX_PASSWORD",
+            "INFOBLOX_VIEW", "INFOBLOX_WAPI_VERSION", "INFOBLOX_SSL_VERIFY",
+            "RFC2136_NAMESERVER", "RFC2136_TSIG_KEY", "RFC2136_TSIG_SECRET",
+            "RFC2136_TSIG_ALGORITHM", "RFC2136_DNS_TIMEOUT",
+        ]
+        f         = self._parse_form()
+        enabled   = f.get("enabled", "") == "true"
+        host      = f.get("host", "").strip().lower()
+        email     = f.get("email", "").strip()
+        challenge = f.get("challenge", "http")
+        dns_prov  = f.get("dns_provider", "cloudflare")
+        dns_creds = {k: f.get(k, "") for k in _ALL_CRED_KEYS if f.get(k, "").strip()}
+        cfg = {
+            "enabled":         enabled,
+            "host":            host,
+            "email":           email,
+            "challenge":       challenge,
+            "dns_provider":    dns_prov,
+            "dns_credentials": dns_creds,
+        }
+        if enabled and not host:
+            return self._serve_html(_traefik_page(cfg, error="Hostname is required.",
+                                                  is_setup=is_setup))
+        if enabled and not email:
+            return self._serve_html(_traefik_page(cfg, error="Let's Encrypt email is required.",
+                                                  is_setup=is_setup))
+        try:
+            save_traefik_config(cfg)
+        except Exception as e:
+            _log.error("traefik save failed: %s\n%s", e, traceback.format_exc())
+            return self._serve_html(_traefik_page(cfg, error=f"Save failed: {e}",
+                                                  is_setup=is_setup))
+        _log.info("traefik config saved: enabled=%s host=%s challenge=%s",
+                  enabled, host, challenge)
+        uname = self._get_session_user() or ""
+        self._serve_html(_traefik_page(
+            cfg,
+            success="Configuration saved. Dynamic routing updated." if enabled else "Traefik disabled.",
+            is_setup=is_setup,
+            username=uname,
+        ))
 
     def _handle_login(self):
         f        = self._parse_form()

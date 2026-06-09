@@ -1,25 +1,30 @@
 # ── Traefik HTTPS overlay ─────────────────────────────────────────────────────
-# Adds Traefik as a reverse proxy providing automatic HTTPS for the web UI.
+# Adds Traefik as a reverse proxy with automatic HTTPS for the web UI.
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
 #
-# Required — set in a .env file or export before running:
-#   TRAEFIK_HOST   hostname the cert manager UI is served on  e.g. cert-mgr.example.com
-#   TRAEFIK_EMAIL  contact address for Let's Encrypt notifications
-#
-# ── Challenge method ──────────────────────────────────────────────────────────
-# The default configuration uses the HTTP-01 challenge, which requires:
-#   • Port 80 accessible from the internet (Let's Encrypt must be able to
-#     reach http://<TRAEFIK_HOST>/.well-known/acme-challenge/)
-#   • A public DNS record for TRAEFIK_HOST pointing to this host
-#
-# For internal / air-gapped deployments use DNS-01 instead — see the
-# "DNS-01 challenge" section at the bottom of this file.
-#
-# ── Before first run ──────────────────────────────────────────────────────────
+# Before first run:
 #   sudo mkdir -p /opt/traefik-acme
 #   sudo chmod 700 /opt/traefik-acme
+#   sudo mkdir -p /opt/cppm-certs/traefik/dynamic   # created by UI on first save; needed for manual setup
+#
+# ── Option A: configure via the web UI (recommended) ──────────────────────────
+#   1. Start the stack: docker compose up -d   (HTTP only, no Traefik yet)
+#   2. Open http://<host>:8080/ → complete the setup wizard → step 1 generates
+#      this file populated with your hostname, email, and challenge settings.
+#   3. Replace this file with the generated content, then run:
+#        docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+#
+# ── Option B: configure manually ──────────────────────────────────────────────
+# Set TRAEFIK_EMAIL below (or export it) and fill in the challenge section.
+# The hostname and routing are written by the web UI to:
+#   /opt/cppm-certs/traefik/dynamic/cppm.yml
+# That file must exist before Traefik starts (the UI creates it on save).
+#
+# ── Challenge method ──────────────────────────────────────────────────────────
+# Default: HTTP-01 — requires port 80 accessible from the internet.
+# For private/internal networks, see the DNS-01 section at the bottom.
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -33,25 +38,23 @@ services:
     container_name: traefik
     restart: unless-stopped
     command:
-      # ── Security ─────────────────────────────────────────────────────────────
-      # Disable the insecure dashboard endpoint. Enable it only for debugging by
-      # changing to: --api.insecure=true  and adding port "8081:8080" below.
+      # ── Security ────────────────────────────────────────────────────────────
       - "--api.insecure=false"
 
-      # ── Docker provider ───────────────────────────────────────────────────────
-      # Only route to containers that explicitly opt in with traefik.enable=true.
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=traefik_net"
+      # ── File provider — reads routing from the shared data volume ────────────
+      # The web UI writes /opt/cppm-certs/traefik/dynamic/cppm.yml.
+      # Traefik hot-reloads it when the hostname changes — no restart needed.
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
 
-      # ── Entrypoints ───────────────────────────────────────────────────────────
+      # ── Entrypoints ─────────────────────────────────────────────────────────
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
       - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
 
-      # ── Let's Encrypt — HTTP-01 challenge (default) ───────────────────────────
-      # Swap these four lines for the DNS-01 block below if this host is internal.
+      # ── Let's Encrypt — HTTP-01 challenge (default) ──────────────────────────
+      # Replace with the DNS-01 block below for private networks.
       - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
@@ -62,8 +65,10 @@ services:
       - "443:443"
 
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik_acme:/acme
+      # Dynamic routing config written by the web UI — mounted read-only into Traefik.
+      # Uses CPPM_DATA_PATH (default: /opt/cppm-certs) so it matches the data volume.
+      - ${CPPM_DATA_PATH:-/opt/cppm-certs}/traefik/dynamic:/etc/traefik/dynamic:ro
 
     networks:
       - traefik_net
@@ -74,17 +79,11 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ── Attach the cert manager to the Traefik network and add routing labels ───
+  # ── Attach the cert manager to the Traefik network ──────────────────────────
+  # No labels needed — routing is handled by the file provider above.
   cppm-acme-cert-manager:
     networks:
       - traefik_net
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.cppm-ui.rule=Host(`${TRAEFIK_HOST}`)"
-      - "traefik.http.routers.cppm-ui.entrypoints=websecure"
-      - "traefik.http.routers.cppm-ui.tls=true"
-      - "traefik.http.routers.cppm-ui.tls.certresolver=letsencrypt"
-      - "traefik.http.services.cppm-ui.loadbalancer.server.port=8080"
 
 volumes:
   traefik_acme:
@@ -96,16 +95,16 @@ volumes:
 
 # ── DNS-01 challenge (internal / air-gapped deployments) ─────────────────────
 #
-# Replace the four HTTP-01 command lines in the traefik service with:
+# Replace the two HTTP-01 command lines above with:
 #
 #   - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL}"
 #   - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
 #   - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
 #   - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=<provider>"
 #
-# Then add the matching credentials as environment variables on the traefik
-# service. Traefik uses the same Lego DNS providers as this project, so the
-# variable names are identical to what you already configured per-server.
+# Then add the provider credentials as environment variables. Traefik uses the
+# same Lego DNS providers — variable names match what you configured in the
+# web UI. The web UI generates this block automatically when DNS-01 is selected.
 #
 # Cloudflare:
 #   environment:
@@ -123,5 +122,4 @@ volumes:
 #     AWS_REGION: ${AWS_DEFAULT_REGION}
 #
 # Full provider list: https://doc.traefik.io/traefik/https/acme/#providers
-# (provider names and env vars match Lego — https://go-acme.github.io/lego/dns/)
 # ─────────────────────────────────────────────────────────────────────────────

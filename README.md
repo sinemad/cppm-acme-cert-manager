@@ -58,6 +58,7 @@ Two certificates are issued and maintained simultaneously:
 6. [Certificate Files](#certificate-files)
 7. [Web UI](#web-ui)
    - [HTTPS with Traefik](#https-with-traefik-optional)
+   - [Notifications](#notifications)
 8. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
 9. [Maintenance](#maintenance)
 10. [Troubleshooting](#troubleshooting)
@@ -445,8 +446,10 @@ http://<docker-host>:8080/
 | **Dashboard** — multi-server overview table | `/` | No (public by default) |
 | **Server Detail** — per-server certificate status | `/server/<id>` | No (public by default) |
 | **Servers** — ClearPass server configuration | `/settings` | Yes |
+| **Notifications** — alert channels (Slack, Discord, Teams, Webhook) | `/settings/notifications` | Yes |
+| **Traefik** — HTTPS reverse proxy configuration | `/settings/traefik` | Yes |
 | **Users** — admin account management | `/admin/users` | Yes |
-| **Setup** — first-time admin account creation | `/setup` | No (only before first user exists) |
+| **Setup** — first-time wizard (Traefik → Admin account) | `/setup` | No (only before first user exists) |
 
 Set `REQUIRE_AUTH_FOR_STATUS: "true"` in `docker-compose.override.yml` to
 require sign-in for the Dashboard as well. The Servers and Users pages always
@@ -547,22 +550,63 @@ Web UI startup, HTTP requests, and errors are written to:
 
 ### HTTPS with Traefik (optional)
 
-The web UI runs on HTTP by default. For HTTPS with an automatically-renewed
-Let's Encrypt certificate, use the included Traefik overlay.
+The web UI runs on HTTP by default. Add Traefik as a reverse proxy to serve the
+web UI over HTTPS with an automatically-renewed Let's Encrypt certificate.
 
-**1. Create the storage directory for Traefik's ACME state:**
+#### Configure via the web UI (recommended)
+
+The easiest path is the built-in Traefik configuration page.
+
+**During initial setup** — the setup wizard opens a Traefik configuration step
+*before* admin account creation. Fill in your hostname, contact email, and
+challenge type. The wizard generates a ready-to-paste compose snippet and links
+you to the admin account step when done.
+
+**After setup** — navigate to **Settings → Traefik** to configure or update the
+integration at any time.
+
+#### Challenge types
+
+**HTTP-01 (default):** Let's Encrypt sends an HTTP request to port 80 on your
+domain to verify ownership. Requires the host to be publicly reachable from the
+internet on port 80. No additional credentials are needed.
+
+**DNS-01:** Let's Encrypt verifies ownership by checking a `_acme-challenge`
+TXT record in your DNS zone. Works on internal or air-gapped networks where
+port 80 is not reachable from the internet. Uses the same DNS provider
+credentials you already saved for certificate issuance — select your provider
+in the Traefik settings page and the credentials are pre-populated.
+
+Traefik uses [Lego](https://go-acme.github.io/lego/dns/) for DNS-01 challenges,
+with slightly different variable names from this project's ACME configuration.
+The web UI translates them automatically when generating the compose snippet:
+
+| DNS Provider | Traefik / Lego env vars |
+|---|---|
+| **Cloudflare** | `CF_DNS_API_TOKEN` (from `CF_Token`) |
+| **Porkbun** | `PORKBUN_API_KEY`, `PORKBUN_SECRET_API_KEY` |
+| **AWS Route 53** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| **DigitalOcean** | `DO_AUTH_TOKEN` (from `DO_API_KEY`) |
+| **GoDaddy** | `GODADDY_API_KEY` (from `GD_Key`), `GODADDY_API_SECRET` (from `GD_Secret`) |
+| **Infoblox** | `INFOBLOX_USERNAME`, `INFOBLOX_PASSWORD` |
+| **RFC 2136** | `RFC2136_NAMESERVER`, `RFC2136_TSIG_KEY`, `RFC2136_TSIG_SECRET` |
+
+#### Deploying Traefik
+
+**1. Create the required host directories:**
 
 ```bash
 sudo mkdir -p /opt/traefik-acme
 sudo chmod 700 /opt/traefik-acme
+# Only needed for manual (Option B) setup — the web UI creates this automatically on save:
+sudo mkdir -p /opt/cppm-certs/traefik/dynamic
 ```
 
-**2. Create a `.env` file with your hostnames and email:**
+**2. Save the generated compose snippet:**
 
-```bash
-cp .env.traefik.example .env
-# Edit .env — set TRAEFIK_HOST and TRAEFIK_EMAIL
-```
+In the web UI (Settings → Traefik), scroll to **Generated docker-compose
+snippet**, click **Copy**, and save the output as `docker-compose.traefik.yml`
+in the project directory.
 
 **3. Start with the Traefik overlay:**
 
@@ -570,20 +614,124 @@ cp .env.traefik.example .env
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
 ```
 
-The web UI is now available at `https://<TRAEFIK_HOST>/`. HTTP (port 80)
+The web UI is now available at `https://<your-hostname>/`. HTTP (port 80)
 redirects automatically to HTTPS. Port 8080 remains accessible directly for
 local access or debugging.
 
-> **Internal deployments:** If this host is not reachable from the internet,
-> Let's Encrypt cannot complete the default HTTP-01 challenge. Switch to DNS-01
-> instead — see the **DNS-01 challenge** block at the bottom of
-> `docker-compose.traefik.yml`. Traefik uses the same
-> [Lego DNS providers](https://go-acme.github.io/lego/dns/) as this project, so
-> you can reuse the same `CF_Token`, `PORKBUN_API_KEY`, `AWS_ACCESS_KEY_ID`,
-> etc. you already configured for certificate issuance.
-
 > **Note:** The PKCS12 callback port (8765) is not routed through Traefik.
 > ClearPass connects to it directly over HTTP — this is expected and required.
+
+#### Manual setup (Option B)
+
+A template is provided at `docker-compose.traefik.yml` and `.env.traefik.example`.
+Edit the file to add your challenge settings and credentials, then copy the env
+template:
+
+```bash
+cp .env.traefik.example .env
+# Edit .env — set TRAEFIK_EMAIL; add DNS credentials if using DNS-01
+```
+
+See the inline comments in `docker-compose.traefik.yml` for the full DNS-01
+provider block.
+
+#### How routing works
+
+The web UI writes a routing configuration file to the shared data volume:
+
+```
+/opt/cppm-certs/traefik/dynamic/cppm.yml
+```
+
+Traefik watches this directory via the file provider and hot-reloads it whenever
+the hostname changes — no Traefik restart needed. The ACME certificate is stored
+separately in `/opt/traefik-acme/acme.json`.
+
+---
+
+### Notifications
+
+The web UI can send notifications to external services when certificates are
+issued, renewed, approaching expiry, or when a ClearPass upload succeeds or
+fails. Configure channels at **Settings → Notifications → + Add Channel**.
+
+#### Notification events
+
+| Event | Triggered when |
+|---|---|
+| **Certificate issued** | New cert successfully issued for the first time |
+| **Certificate renewed** | Cert successfully renewed |
+| **Expiry warning** | Certificate is within 30 days of expiry and has not been renewed |
+| **Upload success** | Cert uploaded to ClearPass successfully |
+| **Upload failure** | Cert upload to ClearPass failed |
+| **ACME error** | Certificate issuance or renewal failed |
+
+Each channel can subscribe to any combination of events via checkboxes on the
+channel configuration form.
+
+#### Slack
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App →
+   From scratch**.
+2. Under **Add features and functionality**, click **Incoming Webhooks** and
+   toggle it on.
+3. Click **Add New Webhook to Workspace**, choose a channel, and click **Allow**.
+4. Copy the webhook URL (format: `https://hooks.slack.com/services/T…/B…/…`).
+5. In the web UI: **Settings → Notifications → + Add Channel → Slack** — paste
+   the URL and select the events to subscribe to.
+
+Reference: [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks)
+
+#### Discord
+
+1. Open the Discord channel where you want notifications.
+2. Click the **gear icon** (Edit Channel) → **Integrations → Webhooks → New
+   Webhook**.
+3. Give it a name and click **Copy Webhook URL**
+   (format: `https://discord.com/api/webhooks/…/…`).
+4. In the web UI: **Settings → Notifications → + Add Channel → Discord** — paste
+   the URL and select the events to subscribe to.
+
+Reference: [Discord Webhooks guide](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks)
+
+#### Microsoft Teams
+
+Microsoft Teams uses the **Workflows** app for incoming webhooks (the legacy
+Office 365 Connector was retired in 2024).
+
+1. In the Teams channel, click **+** → search for **"Post to a channel when a
+   webhook request is received"** and add it.
+2. Follow the Workflows wizard — it creates a flow in Power Automate.
+3. Copy the webhook URL shown at the end of the wizard.
+4. In the web UI: **Settings → Notifications → + Add Channel → Teams** — paste
+   the URL and select the events to subscribe to.
+
+Reference: [Microsoft Teams incoming webhooks](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook)
+
+#### Generic Webhook
+
+Any HTTP endpoint that accepts `POST` with a JSON body can receive notifications.
+
+In the web UI: **Settings → Notifications → + Add Channel → Generic Webhook**
+— enter your endpoint URL and select the events to subscribe to.
+
+**Payload format:**
+
+```json
+{
+  "event":   "cert_renewed",
+  "server":  "Production ClearPass",
+  "host":    "cppm.example.com",
+  "message": "Certificates renewed successfully for cppm.example.com",
+  "level":   "success",
+  "ts":      "2026-06-09T14:32:01Z"
+}
+```
+
+| Field | Values |
+|---|---|
+| `event` | `cert_issued`, `cert_renewed`, `expiry_warning`, `upload_ok`, `upload_failed`, `acme_error` |
+| `level` | `success`, `warning`, `error` |
 
 ---
 
