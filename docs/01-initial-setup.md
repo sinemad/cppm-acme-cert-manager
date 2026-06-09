@@ -14,7 +14,22 @@ Run these steps once on the host before the container is ever started.
 
 ---
 
-## Step 1 – Prepare the host directory
+## Step 1 – Get the code
+
+Clone the repository to your Docker host. `/opt` is the recommended location:
+
+```bash
+cd /opt
+git clone https://github.com/sinemad/cppm-acme-cert-manager.git
+cd cppm-acme-cert-manager
+```
+
+> There is no pre-built release or Docker Hub image yet — cloning the repository
+> and building locally is the only installation method at this time.
+
+---
+
+## Step 2 – Prepare the host directory
 
 ```bash
 cd /opt/cppm-acme-cert-manager
@@ -28,7 +43,7 @@ chmod +x setup.sh && ./setup.sh
 
 ---
 
-## Step 2 – Configure local overrides (optional)
+## Step 3 – Configure local overrides (optional)
 
 `docker-compose.override.yml` controls **container-level behaviour only** —
 timezone, ports, and operational flags. ClearPass server credentials, DNS
@@ -69,7 +84,7 @@ Optional flags (uncomment to enable):
 
 ---
 
-## Step 3 – Create the ClearPass API client
+## Step 4 – Create the ClearPass API client
 
 1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
 2. Configure:
@@ -90,7 +105,7 @@ Optional flags (uncomment to enable):
 
 ---
 
-## Step 4 – Build the image
+## Step 5 – Build the image
 
 ```bash
 docker compose build --no-cache
@@ -102,7 +117,7 @@ Expected build time: 2–4 minutes depending on network speed.
 
 ---
 
-## Step 5 – Start the container
+## Step 6 – Start the container
 
 ```bash
 docker compose up -d
@@ -126,7 +141,7 @@ This is expected — the container stays running and waits for you to add a serv
 
 ---
 
-## Step 6 – Web UI first-time setup
+## Step 7 – Web UI first-time setup
 
 Open a browser to `http://<docker-host>:8080/`. On first access the navigation
 bar shows a **Setup** link because no admin accounts exist yet.
@@ -147,7 +162,7 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 
 ---
 
-## Step 7 – Add your ClearPass server
+## Step 8 – Add your ClearPass server
 
 All ClearPass server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
 
@@ -267,7 +282,7 @@ First-run time including DNS propagation: approximately 2–5 minutes.
 
 ---
 
-## Step 8 – Enable SSL verification
+## Step 9 – Enable SSL verification
 
 Once the certificate is installed and CPPM is accessible via HTTPS with the
 new cert:
