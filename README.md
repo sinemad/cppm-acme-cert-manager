@@ -57,6 +57,7 @@ Two certificates are issued and maintained simultaneously:
 5. [How It Works](#how-it-works)
 6. [Certificate Files](#certificate-files)
 7. [Web UI](#web-ui)
+   - [HTTPS with Traefik](#https-with-traefik-optional)
 8. [Verifying the Certificates in CPPM](#verifying-the-certificates-in-cppm)
 9. [Maintenance](#maintenance)
 10. [Troubleshooting](#troubleshooting)
@@ -543,6 +544,46 @@ Web UI startup, HTTP requests, and errors are written to:
 ```
 /opt/cppm-certs/.logs/status_server.log
 ```
+
+### HTTPS with Traefik (optional)
+
+The web UI runs on HTTP by default. For HTTPS with an automatically-renewed
+Let's Encrypt certificate, use the included Traefik overlay.
+
+**1. Create the storage directory for Traefik's ACME state:**
+
+```bash
+sudo mkdir -p /opt/traefik-acme
+sudo chmod 700 /opt/traefik-acme
+```
+
+**2. Create a `.env` file with your hostnames and email:**
+
+```bash
+cp .env.traefik.example .env
+# Edit .env — set TRAEFIK_HOST and TRAEFIK_EMAIL
+```
+
+**3. Start with the Traefik overlay:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+```
+
+The web UI is now available at `https://<TRAEFIK_HOST>/`. HTTP (port 80)
+redirects automatically to HTTPS. Port 8080 remains accessible directly for
+local access or debugging.
+
+> **Internal deployments:** If this host is not reachable from the internet,
+> Let's Encrypt cannot complete the default HTTP-01 challenge. Switch to DNS-01
+> instead — see the **DNS-01 challenge** block at the bottom of
+> `docker-compose.traefik.yml`. Traefik uses the same
+> [Lego DNS providers](https://go-acme.github.io/lego/dns/) as this project, so
+> you can reuse the same `CF_Token`, `PORKBUN_API_KEY`, `AWS_ACCESS_KEY_ID`,
+> etc. you already configured for certificate issuance.
+
+> **Note:** The PKCS12 callback port (8765) is not routed through Traefik.
+> ClearPass connects to it directly over HTTP — this is expected and required.
 
 ---
 
