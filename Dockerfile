@@ -119,6 +119,7 @@ RUN mkdir -p /opt/cppm/acme-ca-certs \
 # ── Copy application scripts ──────────────────────────────────────────────────
 RUN mkdir -p /opt/cppm
 COPY scripts/ /opt/cppm/
+COPY docs/ /opt/cppm/docs/
 COPY VERSION  /opt/cppm/VERSION
 COPY config/crontab /etc/crontabs/root
 # Stamp build time — readable by status_server.py for display in the UI footer

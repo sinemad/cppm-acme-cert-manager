@@ -787,6 +787,346 @@ def _default_server_from_env() -> dict:
     }
 
 
+# ── Docs directory (populated in container by COPY docs/ /opt/cppm/docs/) ────
+
+_SCRIPT_DIR = Path(__file__).parent
+_DOCS_DIR   = _SCRIPT_DIR / "docs" if (_SCRIPT_DIR / "docs").exists() else _SCRIPT_DIR.parent / "docs"
+
+
+def _render_md(text: str) -> str:
+    """Standalone line-by-line Markdown → HTML renderer (no external deps).
+
+    Handles: ATX headings (#–####), fenced code blocks, horizontal rules,
+    blockquotes, tables, unordered/ordered lists, paragraphs, and inline
+    bold/italic/code/links.
+    """
+    import re as _re
+    import html as _html
+
+    def _slug(s: str) -> str:
+        s = s.lower()
+        s = _re.sub(r"[^\w\s-]", "", s)
+        s = _re.sub(r"[\s_]+", "-", s.strip())
+        return s
+
+    def _inline(s: str) -> str:
+        """Apply inline transforms to an already HTML-escaped string."""
+        # inline code  (must go first — content must not be further transformed)
+        parts = s.split("`")
+        if len(parts) > 2:
+            out = []
+            for i, p in enumerate(parts):
+                if i % 2 == 1:
+                    out.append(f"<code>{p}</code>")
+                else:
+                    out.append(p)
+            s = "".join(out)
+        # bold
+        s = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        # italic (single *)
+        s = _re.sub(r"\*(.+?)\*", r"<em>\1</em>", s)
+        # links  [text](url)
+        def _link_repl(m):
+            txt = m.group(1)
+            url = m.group(2)
+            safe = _re.sub(r"[\x00-\x1f\"<>]", "", url)
+            return f'<a href="{safe}" target="_blank">{txt}</a>'
+        s = _re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _link_repl, s)
+        return s
+
+    lines = text.splitlines()
+    html_parts: list = []
+
+    # State machine
+    in_code  = False
+    code_lang = ""
+    code_buf: list = []
+    in_table = False
+    table_buf: list = []
+    list_stack: list = []   # stack of ("ul"|"ol")
+    para_buf: list = []
+
+    def _flush_para():
+        nonlocal para_buf
+        if para_buf:
+            content = _inline(" ".join(para_buf))
+            html_parts.append(f"<p>{content}</p>")
+            para_buf = []
+
+    def _flush_table():
+        nonlocal in_table, table_buf
+        if not table_buf:
+            in_table = False
+            return
+        rows_html = []
+        header_done = False
+        for i, row in enumerate(table_buf):
+            # strip separator row
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if _re.match(r"^[\s\-|:]+$", row):
+                header_done = True
+                continue
+            tag = "th" if not header_done else "td"
+            cells_html = "".join(f"<{tag}>{_inline(_html.escape(c))}</{tag}>" for c in cells)
+            rows_html.append(f"<tr>{cells_html}</tr>")
+        if rows_html:
+            html_parts.append(f"<table><thead>{rows_html[0]}</thead>"
+                               f"<tbody>{''.join(rows_html[1:])}</tbody></table>")
+        table_buf = []
+        in_table = False
+
+    def _close_lists(to_depth: int = 0):
+        while len(list_stack) > to_depth:
+            tag = "ul" if list_stack[-1] == "ul" else "ol"
+            html_parts.append(f"</{tag}>")
+            list_stack.pop()
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+
+        # ── fenced code block ──────────────────────────────────────────────────
+        if in_code:
+            if line.startswith("```"):
+                lang_cls = f' class="lang-{_html.escape(code_lang)}"' if code_lang else ""
+                html_parts.append(f"<pre><code{lang_cls}>"
+                                   + _html.escape("\n".join(code_buf))
+                                   + "</code></pre>")
+                code_buf = []
+                in_code = False
+            else:
+                code_buf.append(raw_line)
+            continue
+
+        fence_m = _re.match(r"^```(\w*)$", line)
+        if fence_m:
+            _flush_para()
+            _close_lists()
+            _flush_table()
+            code_lang = fence_m.group(1)
+            in_code = True
+            continue
+
+        # ── table row ─────────────────────────────────────────────────────────
+        if line.startswith("|"):
+            _flush_para()
+            _close_lists()
+            in_table = True
+            table_buf.append(line)
+            continue
+        elif in_table:
+            _flush_table()
+
+        # ── blank line ────────────────────────────────────────────────────────
+        if not line.strip():
+            _flush_para()
+            _close_lists()
+            continue
+
+        # ── ATX heading ───────────────────────────────────────────────────────
+        h_m = _re.match(r"^(#{1,4})\s+(.+)$", line)
+        if h_m:
+            _flush_para()
+            _close_lists()
+            level = len(h_m.group(1))
+            text_raw = h_m.group(2)
+            anchor = _slug(text_raw)
+            html_parts.append(
+                f'<h{level} id="{_html.escape(anchor)}">'
+                f'{_inline(_html.escape(text_raw))}'
+                f'</h{level}>'
+            )
+            continue
+
+        # ── horizontal rule ───────────────────────────────────────────────────
+        if _re.match(r"^-{3,}$", line.strip()):
+            _flush_para()
+            _close_lists()
+            html_parts.append("<hr>")
+            continue
+
+        # ── blockquote ────────────────────────────────────────────────────────
+        bq_m = _re.match(r"^>\s?(.*)", line)
+        if bq_m:
+            _flush_para()
+            _close_lists()
+            html_parts.append(f"<blockquote><p>{_inline(_html.escape(bq_m.group(1)))}</p></blockquote>")
+            continue
+
+        # ── unordered list ────────────────────────────────────────────────────
+        ul_m = _re.match(r"^(\s*)[-*+]\s+(.+)$", line)
+        if ul_m:
+            _flush_para()
+            depth = len(ul_m.group(1)) // 2 + 1
+            while len(list_stack) < depth:
+                html_parts.append("<ul>")
+                list_stack.append("ul")
+            while len(list_stack) > depth:
+                tag = "ul" if list_stack[-1] == "ul" else "ol"
+                html_parts.append(f"</{tag}>")
+                list_stack.pop()
+            if list_stack and list_stack[-1] != "ul":
+                html_parts.append(f"</{list_stack[-1]}>")
+                list_stack.pop()
+                html_parts.append("<ul>")
+                list_stack.append("ul")
+            html_parts.append(f"<li>{_inline(_html.escape(ul_m.group(2)))}</li>")
+            continue
+
+        # ── ordered list ─────────────────────────────────────────────────────
+        ol_m = _re.match(r"^(\s*)\d+\.\s+(.+)$", line)
+        if ol_m:
+            _flush_para()
+            depth = len(ol_m.group(1)) // 2 + 1
+            while len(list_stack) < depth:
+                html_parts.append("<ol>")
+                list_stack.append("ol")
+            while len(list_stack) > depth:
+                tag = "ul" if list_stack[-1] == "ul" else "ol"
+                html_parts.append(f"</{tag}>")
+                list_stack.pop()
+            if list_stack and list_stack[-1] != "ol":
+                html_parts.append(f"</{list_stack[-1]}>")
+                list_stack.pop()
+                html_parts.append("<ol>")
+                list_stack.append("ol")
+            html_parts.append(f"<li>{_inline(_html.escape(ol_m.group(2)))}</li>")
+            continue
+
+        # ── paragraph text ────────────────────────────────────────────────────
+        _close_lists()
+        para_buf.append(line)
+
+    # Flush any remaining state
+    _flush_para()
+    _close_lists()
+    _flush_table()
+    if in_code and code_buf:
+        html_parts.append("<pre><code>" + _html.escape("\n".join(code_buf)) + "</code></pre>")
+
+    return "\n".join(html_parts)
+
+
+# ── Help doc registry ─────────────────────────────────────────────────────────
+
+_HELP_DOCS = [
+    ("initial-setup",    "Initial Setup",       "01-initial-setup.md"),
+    ("how-it-works",     "How It Works",        "02-how-it-works.md"),
+    ("monitoring",       "Monitoring",           "03-monitoring.md"),
+    ("maintenance",      "Maintenance",          "04-maintenance.md"),
+    ("troubleshooting",  "Troubleshooting",      "05-troubleshooting.md"),
+    ("script-reference", "Script Reference",     "06-script-reference.md"),
+    ("quick-reference",  "Quick Reference",      "07-quick-reference.md"),
+]
+
+_HELP_DESC = {
+    "initial-setup":    "Step-by-step guide for deploying the container and creating your first server configuration.",
+    "how-it-works":     "Architecture overview: how DNS-01 challenges, certificate issuance, and ClearPass uploads fit together.",
+    "monitoring":       "Understanding the status dashboard, health checks, and activity logs.",
+    "maintenance":      "Routine tasks — renewing credentials, updating DNS providers, and managing certificate files.",
+    "troubleshooting":  "Common error messages, diagnostics, and fixes for ACME, DNS, callback, and upload failures.",
+    "script-reference": "Reference for all included shell scripts and Python CLIs (cppm-servers, cppm-users, etc.).",
+    "quick-reference":  "At-a-glance cheatsheet: ports, paths, environment variables, and key commands.",
+}
+
+
+def _help_index_page(username: str = "") -> str:
+    cards = []
+    for slug, title, _ in _HELP_DOCS:
+        desc = _HELP_DESC.get(slug, "")
+        cards.append(
+            f'<a href="/help/{slug}" style="text-decoration:none">'
+            f'<div class="card" style="display:flex;flex-direction:column;gap:0.35rem;'
+            f'transition:border-color .15s;border-color:var(--border)" '
+            f'onmouseover="this.style.borderColor=\'var(--accent)\'" '
+            f'onmouseout="this.style.borderColor=\'var(--border)\'">'
+            f'<div style="font-size:0.9rem;font-weight:600;color:var(--accent)">{_esc(title)}</div>'
+            f'<div style="font-size:0.8rem;color:var(--muted)">{_esc(desc)}</div>'
+            f'</div></a>'
+        )
+    grid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1rem">' + "".join(cards) + "</div>"
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">Documentation</span>
+  </div>
+  <div class="card" style="margin-bottom:1.25rem">
+    <div class="card-title">Reference Guides</div>
+    <p style="font-size:0.82rem;color:var(--muted);margin-bottom:1rem">
+      Complete documentation for ClearPass ACME Certificate Manager.
+      Select a topic to read it inline.
+    </p>
+    {grid}
+  </div>
+</div>"""
+    return _base("Documentation", body, nav_user=username, active="help", show_nav=True)
+
+
+def _help_doc_page(slug: str, username: str = "") -> tuple:
+    """Render a single help document. Returns (html, status_code)."""
+    entry = next((e for e in _HELP_DOCS if e[0] == slug), None)
+    if entry is None:
+        body = """
+<div class="app">
+  <div class="page-hdr"><span class="page-title">Not Found</span></div>
+  <div class="card">
+    <p style="color:var(--muted)">Documentation page not found.
+    <a href="/help" style="color:var(--accent)">Back to documentation index.</a></p>
+  </div>
+</div>"""
+        return _base("Not Found", body, nav_user=username, active="help", show_nav=True), 404
+
+    _, title, filename = entry
+    doc_path = _DOCS_DIR / filename
+    try:
+        md_text = doc_path.read_text(encoding="utf-8")
+    except OSError:
+        md_text = f"*Documentation file `{filename}` not found on disk.*"
+
+    content_html = _render_md(md_text)
+
+    # Sidebar
+    sidebar_links = []
+    for s, t, _ in _HELP_DOCS:
+        active_cls = ' style="color:var(--accent);font-weight:600"' if s == slug else ""
+        sidebar_links.append(
+            f'<li><a href="/help/{s}" class="nav-link{" active" if s == slug else ""}"{active_cls}>{_esc(t)}</a></li>'
+        )
+    sidebar = (
+        '<nav class="help-sidebar">'
+        '<div class="card-title" style="padding:0.75rem 1rem 0.5rem">Contents</div>'
+        '<ul style="list-style:none;padding:0 0 1rem">' + "".join(sidebar_links) + "</ul>"
+        '</nav>'
+    )
+
+    body = f"""
+<div class="app" style="max-width:1100px">
+  <div style="margin-bottom:1rem">
+    <a href="/help" class="btn btn-ghost">&#8592; Documentation</a>
+  </div>
+  <div style="display:flex;gap:1.5rem;align-items:flex-start">
+    {sidebar}
+    <div class="help-content">
+      <h1 style="font-size:1.25rem;font-weight:700;margin-bottom:1rem;color:var(--text)">{_esc(title)}</h1>
+      {content_html}
+    </div>
+  </div>
+</div>"""
+    return _base(title, body, nav_user=username, active="help", show_nav=True), 200
+
+
+# ── Inline help toggle helper ─────────────────────────────────────────────────
+
+def _help_toggle(field_id: str, html_content: str) -> str:
+    """Return a ? button and hidden help panel for a form field."""
+    return (
+        f'<button type="button" class="help-icon" '
+        f'onclick="toggleHelp(\'{field_id}\')" aria-label="Help">?</button>'
+        f'<div id="help-{field_id}" class="help-block" style="display:none">'
+        f'{html_content}'
+        f'</div>'
+    )
+
+
 # ── Shared CSS ────────────────────────────────────────────────────────────────
 
 _CSS = """
@@ -969,6 +1309,32 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .events-grid label{display:flex;align-items:center;gap:0.35rem;font-size:0.8rem;color:var(--text);cursor:pointer}
 .events-grid input[type=checkbox]{accent-color:var(--accent);width:13px;height:13px}
 .ch-fields{display:none}.ch-fields.active{display:block}
+
+/* ── Help system ── */
+.help-icon{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--border2);color:var(--muted);font-size:0.65rem;font-weight:700;border:none;cursor:pointer;vertical-align:middle;margin-left:0.3rem;line-height:1;transition:background .15s,color .15s;flex-shrink:0}
+.help-icon:hover{background:var(--accent);color:#0f172a}
+.help-block{margin-top:0.4rem;padding:0.55rem 0.75rem;border-left:3px solid var(--accent);background:rgba(56,189,248,.06);border-radius:0 0.4rem 0.4rem 0;font-size:0.8rem;color:var(--muted);line-height:1.55}
+.help-sidebar{min-width:180px;border-right:1px solid var(--border);margin-right:0;padding-right:0;flex-shrink:0}
+.help-sidebar ul li{padding:0}
+.help-sidebar .nav-link{display:block;padding:0.3rem 1rem;font-size:0.82rem;border-radius:0}
+.help-content{flex:1;padding:0 1rem 2rem;min-width:0}
+.help-content h2{font-size:1.05rem;font-weight:600;color:var(--text);margin:1.5rem 0 0.5rem;padding-bottom:0.35rem;border-bottom:1px solid var(--border)}
+.help-content h3{font-size:0.95rem;font-weight:600;color:var(--text);margin:1.25rem 0 0.4rem}
+.help-content h4{font-size:0.88rem;font-weight:600;color:var(--muted);margin:1rem 0 0.35rem}
+.help-content p{margin:0.5rem 0;font-size:0.85rem;color:var(--muted);line-height:1.65}
+.help-content pre{background:#0a0f1a;border:1px solid var(--border);border-radius:0.4rem;padding:0.75rem;font-family:monospace;font-size:0.75rem;overflow-x:auto;white-space:pre;color:var(--muted);margin:0.75rem 0;line-height:1.5}
+.help-content code{font-family:monospace;font-size:0.8em;background:rgba(56,189,248,.08);padding:0.1em 0.35em;border-radius:3px;color:var(--accent)}
+.help-content pre code{background:none;padding:0;color:var(--muted);font-size:1em}
+.help-content table{width:100%;border-collapse:collapse;margin:0.75rem 0;font-size:0.82rem}
+.help-content table th,.help-content table td{padding:0.4rem 0.65rem;border:1px solid var(--border);text-align:left;color:var(--muted)}
+.help-content table th{background:rgba(255,255,255,.04);color:var(--text);font-weight:600}
+.help-content blockquote{border-left:3px solid var(--accent);margin:0.75rem 0;padding:0.5rem 0.75rem;background:rgba(56,189,248,.05);border-radius:0 0.35rem 0.35rem 0}
+.help-content blockquote p{margin:0;color:var(--muted)}
+.help-content ul,.help-content ol{padding-left:1.5rem;margin:0.5rem 0;color:var(--muted);font-size:0.85rem;line-height:1.65}
+.help-content li{margin:0.2rem 0}
+.help-content hr{border:none;border-top:1px solid var(--border);margin:1.25rem 0}
+.help-content a{color:var(--accent)}
+.help-content a:hover{opacity:.8}
 """
 
 
@@ -1005,14 +1371,15 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
             + _link("/settings", "Servers", "settings")
             + _link("/settings/traefik", f"Traefik{t_dot}", "traefik")
             + _link("/admin/users", "Users", "users")
+            + _link("/help", "Help", "help")
             + '<span class="nav-sep"></span>'
             + f'<span class="nav-user">{_esc(username)}</span>'
             + '<a href="/logout" class="nav-link nav-logout">Sign&nbsp;Out</a>'
         )
     elif needs_setup():
-        right = '<a href="/setup" class="nav-link">Setup</a>'
+        right = '<a href="/setup" class="nav-link">Setup</a><a href="/help" class="nav-link">Help</a>'
     else:
-        right = '<a href="/login" class="nav-link">Sign In</a>'
+        right = '<a href="/login" class="nav-link">Sign In</a><a href="/help" class="nav-link">Help</a>'
 
     return f"""<nav class="nav">
   <span class="nav-brand">ClearPass ACME Certificate Manager</span>
@@ -1051,6 +1418,10 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
   }}
   if(document.getElementById('nav-traefik-dot')){{_pnd();setInterval(_pnd,30000);}}
 }})();
+function toggleHelp(id){{
+  var el=document.getElementById('help-'+id);
+  if(el)el.style.display=el.style.display==='none'?'':'none';
+}}
 </script>
 </body>
 </html>"""
@@ -1881,7 +2252,7 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>
       <div class="form-2col">
         <div class="field">
-          <label>Callback Host <span class="hint">(Docker host LAN IP)</span></label>
+          <label>Callback Host <span class="hint">(Docker host LAN IP)</span>{_help_toggle('callback_host', 'The LAN IP of the Docker host &mdash; not the container IP. ClearPass fetches the certificate from this address. Find it with: <code>ip route get &lt;cppm-ip&gt;</code> &mdash; look for <code>src X.X.X.X</code>. Must be reachable from your ClearPass server on the callback port (default 8765).')}</label>
           <input type="text" name="cppm_callback_host" value="{fv('cppm_callback_host')}"
                  placeholder="10.0.0.5">
         </div>
@@ -1896,7 +2267,7 @@ def _settings_form_page(server: dict = None, error: str = "",
         <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
           <input type="checkbox" name="cppm_verify_ssl" value="true"{verify}
                  style="width:auto;margin:0">
-          Verify SSL (enable after initial certificate install)
+          Verify SSL (enable after initial certificate install){_help_toggle('verify_ssl', 'Enable this <strong>after</strong> the first certificate has been successfully installed and is trusted by ClearPass. Enabling it before the cert is trusted will cause uploads to fail with an SSL verification error.')}
         </label>
       </div>
     </div>
@@ -3172,6 +3543,16 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers=[("Set-Cookie", self._clear_cookie_header())],
             )
             return
+
+        # ── Help pages — public, no auth required ────────────────────────────
+        username = self._get_session_user()
+        if path == "/help":
+            return self._serve_html(_help_index_page(username or ""))
+
+        if path.startswith("/help/"):
+            slug = path[len("/help/"):].strip("/")
+            page, status = _help_doc_page(slug, username or "")
+            return self._serve_html(page, status=status)
 
         # ── Dashboard and status API ─────────────────────────────────────────
         # Public by default (REQUIRE_AUTH_FOR_STATUS=false).
