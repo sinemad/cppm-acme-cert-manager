@@ -1187,6 +1187,8 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .btn-ghost:hover{color:var(--text);border-color:var(--muted)}
 .btn-danger{background:rgba(239,68,68,.1);color:var(--danger);border:1px solid rgba(239,68,68,.25)}
 .btn-danger:hover{background:rgba(239,68,68,.2)}
+.btn-warn{background:rgba(245,158,11,.1);color:var(--warn);border:1px solid rgba(245,158,11,.25)}
+.btn-warn:hover{background:rgba(245,158,11,.2)}
 .big-val{font-size:1.6rem;font-weight:700;color:var(--accent);line-height:1}
 .sub-val{font-size:0.78rem;color:var(--muted);margin-top:0.2rem;margin-bottom:0.85rem}
 .log-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow)}
@@ -2121,7 +2123,7 @@ def _settings_list_page(servers: list, username: str,
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
                 f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
-                f'<button type="submit" class="btn btn-ghost" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
+                f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
                 f'</form>'
             )
             upload_btn = (
@@ -2131,7 +2133,7 @@ def _settings_list_page(servers: list, username: str,
                 f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
-                f'<button type="submit" class="btn btn-ghost" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
+                f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
                 f'</form>'
             )
             rows += (
@@ -2172,6 +2174,11 @@ function hideDelConfirm(id) {
     <a href="/settings/add" class="btn btn-primary">&#43; Add Server</a>
   </div>
   {flash_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    Certificates are issued and uploaded to ClearPass automatically on the renewal schedule.
+    <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force ClearPass Upload</strong>
+    are manual overrides — only use them when troubleshooting a failed renewal or upload.
+  </p>
   <div class="card">
     <table class="settings-table">
       <thead><tr>
@@ -2180,11 +2187,6 @@ function hideDelConfirm(id) {
       <tbody>{rows}</tbody>
     </table>
   </div>
-  <p style="font-size:0.78rem;color:var(--muted);margin-top:0.6rem">
-    Certificates are issued and uploaded to ClearPass automatically on the renewal schedule.
-    <strong style="color:var(--text)">Force Cert Issue</strong> and <strong style="color:var(--text)">Force ClearPass Upload</strong>
-    are manual overrides — only use them when troubleshooting a failed renewal or upload.
-  </p>
 </div>"""
     return _base("Servers", body + script,
                  nav_user=username, active="settings", show_nav=True)
