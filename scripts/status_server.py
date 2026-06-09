@@ -993,10 +993,17 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
         return f'<a href="{href}" class="nav-link{cls}">{label}</a>'
 
     if username:
+        traefik_cfg = get_traefik_config()
+        t_dot = (
+            '<span id="nav-traefik-dot" style="display:inline-block;width:7px;height:7px;'
+            'border-radius:50%;background:var(--muted);margin-left:5px;vertical-align:middle'
+            ';transition:background 0.4s"></span>'
+            if traefik_cfg.get("enabled") else ""
+        )
         right = (
             _link("/", "Dashboard", "dashboard")
             + _link("/settings", "Servers", "settings")
-            + _link("/settings/traefik", "Traefik", "traefik")
+            + _link("/settings/traefik", f"Traefik{t_dot}", "traefik")
             + _link("/admin/users", "Users", "users")
             + '<span class="nav-sep"></span>'
             + f'<span class="nav-user">{_esc(username)}</span>'
@@ -1033,6 +1040,18 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 <footer style="text-align:center;padding:1.5rem 1rem;font-size:0.68rem;color:var(--subtle)">
   ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
 </footer>
+<script>
+(function(){{
+  function _pnd(){{
+    fetch('/api/traefik/status').then(function(r){{return r.json();}}).then(function(d){{
+      var dot=document.getElementById('nav-traefik-dot');
+      if(!dot)return;
+      dot.style.background=d.status==='ok'?'#22c55e':d.status==='cert_pending'?'#f59e0b':'#ef4444';
+    }}).catch(function(){{}});
+  }}
+  if(document.getElementById('nav-traefik-dot')){{_pnd();setInterval(_pnd,30000);}}
+}})();
+</script>
 </body>
 </html>"""
 
@@ -1373,15 +1392,15 @@ def _traefik_page(
         <button type="submit" class="btn btn-primary">Save</button>
         <a href="{skip_href}" class="btn btn-ghost">{skip_label}</a>
       </div>
-    </form>
-{compose_block}"""
+    </form>"""
 
-    # ── Status + log cards (settings page only) ──────────────────────────────
-    status_cards = ""
+    # ── Status card (top of settings page) + log card (bottom) ──────────────
+    status_card = ""
+    log_card    = ""
     if not is_setup and cfg.get("enabled") and cfg.get("host"):
         host_esc = _esc(cfg["host"])
-        status_cards = f"""
-<div class="card" style="margin-top:1.25rem">
+        status_card = f"""
+<div class="card" style="margin-bottom:1.25rem">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
     <div class="form-section-title" style="margin:0">Traefik Status</div>
     <a href="https://{host_esc}/" target="_blank" class="btn btn-ghost" style="font-size:0.78rem">
@@ -1389,11 +1408,12 @@ def _traefik_page(
     </a>
   </div>
   <div style="display:flex;align-items:center;gap:0.65rem">
-    <span id="ts-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted);flex-shrink:0"></span>
+    <span id="ts-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background 0.4s"></span>
     <span id="ts-label" style="font-size:0.85rem;color:var(--muted)">Checking…</span>
   </div>
-  <p id="ts-detail" style="font-size:0.78rem;color:var(--muted);margin:0.4rem 0 0;padding-left:1.4rem"></p>
-</div>
+  <p id="ts-detail" style="font-size:0.78rem;color:var(--muted);margin:0.4rem 0 0;padding-left:1.5rem"></p>
+</div>"""
+        log_card = f"""
 <div class="card" style="margin-top:1.25rem">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
     <div class="form-section-title" style="margin:0">Traefik Log</div>
@@ -1432,28 +1452,24 @@ function copyId(id, btn) {
 }
 function pollTraefikStatus() {
   fetch('/api/traefik/status').then(function(r){return r.json();}).then(function(d) {
-    var dot = document.getElementById('ts-dot');
-    var lbl = document.getElementById('ts-label');
-    var det = document.getElementById('ts-detail');
-    if (!dot) return;
+    var dot  = document.getElementById('ts-dot');
+    var lbl  = document.getElementById('ts-label');
+    var det  = document.getElementById('ts-detail');
+    var ndot = document.getElementById('nav-traefik-dot');
+    var color, text;
     if (d.status === 'ok') {
-      dot.style.background = 'var(--ok, #22c55e)';
-      lbl.style.color = 'var(--ok, #22c55e)';
-      lbl.textContent = 'Running — HTTPS active';
+      color = '#22c55e'; text = 'Running — HTTPS active';
     } else if (d.status === 'cert_pending') {
-      dot.style.background = '#f59e0b';
-      lbl.style.color = '#f59e0b';
-      lbl.textContent = 'Running — certificate being issued';
+      color = '#f59e0b'; text = 'Running — certificate being issued';
     } else if (d.status === 'disabled') {
-      dot.style.background = 'var(--muted)';
-      lbl.style.color = 'var(--muted)';
-      lbl.textContent = 'Disabled';
+      color = 'var(--muted)'; text = 'Disabled';
     } else {
-      dot.style.background = 'var(--err, #ef4444)';
-      lbl.style.color = 'var(--err, #ef4444)';
-      lbl.textContent = 'Not reachable';
+      color = '#ef4444'; text = 'Not reachable';
     }
-    if (det) det.textContent = d.detail || '';
+    if (dot) { dot.style.background = color; }
+    if (lbl) { lbl.style.color = color; lbl.textContent = text; }
+    if (det) { det.textContent = d.detail || ''; }
+    if (ndot) { ndot.style.background = color; }
   }).catch(function(){});
 }
 function loadTraefikLog() {
@@ -1495,6 +1511,7 @@ function loadTraefikLog() {
       <strong>Settings → Traefik</strong>.
     </p>
     {form_html}
+    {compose_block}
   </div>
 </div>{script}"""
         return _base("Configure HTTPS", content)
@@ -1504,6 +1521,7 @@ function loadTraefikLog() {
   <div class="page-hdr">
     <span class="page-title">Traefik HTTPS Configuration</span>
   </div>
+  {status_card}
   <div class="card">
     <p style="font-size:0.82rem;color:var(--muted);margin-bottom:1rem">
       Configure Traefik as a reverse proxy to serve this interface over HTTPS.
@@ -1513,7 +1531,8 @@ function loadTraefikLog() {
     </p>
     {form_html}
   </div>
-  {status_cards}
+  {compose_block}
+  {log_card}
 </div>{script}"""
         return _base("Traefik HTTPS", content,
                      nav_user=username, active="traefik", show_nav=True)
