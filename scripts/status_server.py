@@ -1849,7 +1849,7 @@ def _parse_channel_form(f: dict) -> tuple:
 
     if not name:
         return {}, "Channel name is required."
-    if ch_type not in ("slack", "discord", "teams", "webhook", "email"):
+    if ch_type not in ("slack", "discord", "teams", "webhook"):
         return {}, f"Unknown channel type: {ch_type!r}"
 
     channel: dict = {"type": ch_type, "name": name, "enabled": enabled, "events": events}
@@ -1895,7 +1895,13 @@ def _parse_channel_form(f: dict) -> tuple:
     return channel, ""
 
 
-_CH_TYPES = ["slack", "discord", "teams", "webhook", "email"]
+_CH_TYPES = ["slack", "discord", "teams", "webhook"]
+
+_WEBHOOK_URL_PLACEHOLDERS = {
+    "slack":   "https://hooks.slack.com/services/T.../B.../...",
+    "discord": "https://discord.com/api/webhooks/1234567890/...",
+    "teams":   "https://outlook.office.com/webhook/.../IncomingWebhook/...",
+}
 
 
 def _notifications_page(server_id: str, username: str,
@@ -2020,8 +2026,9 @@ def _notification_form_page(server_id: str, channel: dict = None,
         for k, v in _EVENT_LABELS.items()
     )
 
-    cur_type = ch.get("type", "slack")
-    type_opts = "".join(
+    cur_type    = ch.get("type", "slack")
+    webhook_ph  = _WEBHOOK_URL_PLACEHOLDERS.get(cur_type, _WEBHOOK_URL_PLACEHOLDERS["slack"])
+    type_opts   = "".join(
         f'<option value="{t}"{sel(cur_type, t)}>{t.capitalize()}</option>'
         for t in _CH_TYPES
     )
@@ -2029,10 +2036,6 @@ def _notification_form_page(server_id: str, channel: dict = None,
     # Webhook headers as key:value text
     raw_headers = ch.get("headers") or {}
     headers_txt = "\n".join(f"{k}: {v}" for k, v in raw_headers.items()) if isinstance(raw_headers, dict) else str(raw_headers)
-
-    # Email to list
-    to_raw = ch.get("to") or []
-    to_txt = ", ".join(to_raw) if isinstance(to_raw, list) else str(to_raw)
 
     body = f"""
 <div class="app">
@@ -2071,7 +2074,7 @@ def _notification_form_page(server_id: str, channel: dict = None,
       <div class="ch-fields{' active' if cur_type in ('slack','discord','teams') else ''}" id="fields-webhook-url"{vis('slack') if cur_type not in ('slack','discord','teams') else ''}>
         <div class="field">
           <label>Webhook URL</label>
-          <input type="url" name="webhook_url" value="{fv('webhook_url')}" placeholder="https://hooks.slack.com/...">
+          <input type="url" name="webhook_url" value="{fv('webhook_url')}" placeholder="{webhook_ph}" id="webhook-url-input">
         </div>
       </div>
 
@@ -2095,43 +2098,6 @@ def _notification_form_page(server_id: str, channel: dict = None,
         </div>
       </div>
 
-      <div class="ch-fields{' active' if cur_type == 'email' else ''}" id="fields-email"{vis('email')}>
-        <div class="form-2col">
-          <div class="field">
-            <label>SMTP Host</label>
-            <input type="text" name="smtp_host" value="{fv('smtp_host')}" placeholder="smtp.example.com">
-          </div>
-          <div class="field">
-            <label>SMTP Port</label>
-            <input type="number" name="smtp_port" value="{fv('smtp_port','587')}" min="1" max="65535">
-          </div>
-        </div>
-        <div class="form-2col">
-          <div class="field">
-            <label>SMTP Username</label>
-            <input type="text" name="smtp_user" value="{fv('smtp_user')}" autocomplete="off">
-          </div>
-          <div class="field">
-            <label>SMTP Password</label>
-            <input type="password" name="smtp_pass" value="{fv('smtp_pass')}" autocomplete="new-password">
-          </div>
-        </div>
-        <div class="form-2col">
-          <div class="field">
-            <label>From Address</label>
-            <input type="email" name="from_addr" value="{fv('from_addr')}" placeholder="alerts@example.com">
-          </div>
-          <div class="field">
-            <label><input type="checkbox" name="smtp_tls" value="true"{checked('smtp_tls')}
-                   style="margin-right:0.4rem;accent-color:var(--accent)"> Use STARTTLS / SSL</label>
-          </div>
-        </div>
-        <div class="field">
-          <label>To Addresses <span class="hint">(comma-separated)</span></label>
-          <input type="text" name="to" value="{_esc(to_txt)}" placeholder="admin@example.com, ops@example.com">
-        </div>
-      </div>
-
       <div style="margin-top:1.5rem;display:flex;gap:0.75rem">
         <button type="submit" class="btn btn-primary">{_esc(submit)}</button>
         <a href="/settings/notifications/{sid}" class="btn btn-ghost">Cancel</a>
@@ -2145,17 +2111,26 @@ var _TYPE_GROUPS = {{
   discord: ['fields-webhook-url'],
   teams: ['fields-webhook-url'],
   webhook: ['fields-webhook'],
-  email: ['fields-email'],
+}};
+var _WEBHOOK_PLACEHOLDERS = {{
+  slack:   'https://hooks.slack.com/services/T.../B.../...',
+  discord: 'https://discord.com/api/webhooks/1234567890/...',
+  teams:   'https://outlook.office.com/webhook/.../IncomingWebhook/...',
 }};
 function switchType(t) {{
-  ['fields-webhook-url','fields-webhook','fields-email'].forEach(function(id) {{
+  ['fields-webhook-url','fields-webhook'].forEach(function(id) {{
     var el = document.getElementById(id);
-    if (el) el.className = 'ch-fields';
+    if (el) {{ el.className = 'ch-fields'; el.removeAttribute('style'); }}
   }});
   (_TYPE_GROUPS[t] || []).forEach(function(id) {{
     var el = document.getElementById(id);
-    if (el) el.className = 'ch-fields active';
+    if (el) {{ el.className = 'ch-fields active'; el.removeAttribute('style'); }}
   }});
+  var ph = _WEBHOOK_PLACEHOLDERS[t];
+  if (ph) {{
+    var inp = document.getElementById('webhook-url-input');
+    if (inp) inp.placeholder = ph;
+  }}
 }}
 </script>"""
     return _base(title, body, nav_user=username, active="settings", show_nav=True)
