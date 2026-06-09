@@ -559,11 +559,14 @@ The easiest path is the built-in Traefik configuration page.
 
 **During initial setup** — the setup wizard opens a Traefik configuration step
 *before* admin account creation. Fill in your hostname, contact email, and
-challenge type. The wizard generates a ready-to-paste compose snippet and links
-you to the admin account step when done.
+challenge type, then click **Save**. The web UI writes
+`docker-compose.traefik.yml` to `/opt/cppm-certs/` automatically and shows the
+one command to run. After starting Traefik, follow the link to the admin account
+creation step.
 
 **After setup** — navigate to **Settings → Traefik** to configure or update the
-integration at any time.
+integration at any time. The page shows a live status card at the top and a log
+viewer at the bottom for troubleshooting.
 
 #### Challenge types
 
@@ -579,7 +582,7 @@ in the Traefik settings page and the credentials are pre-populated.
 
 Traefik uses [Lego](https://go-acme.github.io/lego/dns/) for DNS-01 challenges,
 with slightly different variable names from this project's ACME configuration.
-The web UI translates them automatically when generating the compose snippet:
+The web UI translates them automatically when writing the compose file:
 
 | DNS Provider | Traefik / Lego env vars |
 |---|---|
@@ -596,8 +599,9 @@ The web UI translates them automatically when generating the compose snippet:
 **1. Configure in the web UI:**
 
 Open the setup wizard or navigate to **Settings → Traefik**, fill in the
-hostname, contact email, and challenge type, then click **Save**. The web UI
-writes `docker-compose.traefik.yml` to `/opt/cppm-certs/` automatically.
+hostname, contact email, and challenge type, then click **Save**. The web UI:
+- Writes `docker-compose.traefik.yml` to `/opt/cppm-certs/` automatically
+- Creates `/opt/cppm-certs/traefik/dynamic/` and `/opt/cppm-certs/traefik/logs/`
 
 **2. Start Traefik (one command, from your project directory):**
 
@@ -605,9 +609,9 @@ writes `docker-compose.traefik.yml` to `/opt/cppm-certs/` automatically.
 docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml up -d
 ```
 
-Traefik's ACME state (`acme.json`) is stored in a Docker-managed named volume
-created automatically on first run — no `mkdir` needed. The web UI also creates
-`/opt/cppm-certs/traefik/dynamic/` on first save.
+No directories to pre-create — Docker manages the ACME storage volume and the
+web UI creates everything else on first save. The `cppm-acme-cert-manager`
+container is briefly recreated to join the Traefik network (takes a few seconds).
 
 The web UI is now available at `https://<your-hostname>/`. HTTP (port 80)
 redirects automatically to HTTPS. Port 8080 remains accessible directly for
@@ -632,15 +636,33 @@ provider block.
 
 #### How routing works
 
-The web UI writes a routing configuration file to the shared data volume:
+The web UI manages three files in the shared data volume:
 
-```
-/opt/cppm-certs/traefik/dynamic/cppm.yml
-```
+| File | Purpose |
+|---|---|
+| `/opt/cppm-certs/docker-compose.traefik.yml` | Compose overlay — written on every save, deleted when disabled |
+| `/opt/cppm-certs/traefik/dynamic/cppm.yml` | Traefik file-provider routing config — hot-reloaded by Traefik on hostname change |
+| `/opt/cppm-certs/traefik/logs/traefik.log` | Traefik process log — readable in the web UI log viewer |
 
-Traefik watches this directory via the file provider and hot-reloads it whenever
-the hostname changes — no Traefik restart needed. The ACME certificate is stored
-separately in `/opt/traefik-acme/acme.json`.
+Hostname changes take effect immediately without restarting Traefik (file
+provider hot-reload). Changes to the challenge type, email, or DNS credentials
+require re-running the compose command to pick up the updated overlay.
+
+The ACME certificate and account key are stored in a Docker-managed named
+volume (`traefik_acme`) — created automatically on first run, persists across
+container rebuilds.
+
+#### Monitoring Traefik from the web UI
+
+The **Settings → Traefik** page provides built-in visibility into Traefik's state:
+
+- **Status card** (top of page) — live connectivity probe updated every 15 seconds:
+  - 🟢 Running — HTTPS active (TLS handshake succeeds)
+  - 🟡 Running — certificate being issued (Traefik up, ACME in progress)
+  - 🔴 Not reachable (compose command not yet run, or Traefik stopped)
+  - **Open `https://<hostname>/` ↗** button in the top-right corner
+- **Nav bar dot** — same three-state indicator visible on every page while Traefik is enabled, updated every 30 seconds
+- **Traefik Log** (bottom of page) — last 150 lines of `traefik.log` with a Refresh button; useful for diagnosing ACME failures, DNS challenge errors, and certificate renewal events
 
 ---
 
