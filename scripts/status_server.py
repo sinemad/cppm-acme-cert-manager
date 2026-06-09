@@ -2115,17 +2115,23 @@ def _settings_list_page(servers: list, username: str,
                 f'<form method="POST" action="/settings/run/{sid}"'
                 f' style="display:inline;margin-right:0.4rem"'
                 f' onsubmit="return confirm('
-                f"'Issue new ACME certificates for {label}?\\n\\n"
+                f"'Force-issue new ACME certificates for {label}?\\n\\n"
+                f"Only use this to recover from a failed renewal. "
+                f"Normal renewals happen automatically and do not require this button.\\n\\n"
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
-                f"Use Upload to ClearPass instead if certs are already issued and just need to be uploaded.')\">"
-                f'<button type="submit" class="btn btn-ghost">&#9654; Issue Cert Now</button>'
+                f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
+                f'<button type="submit" class="btn btn-ghost" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
                 f'</form>'
             )
             upload_btn = (
                 f'<form method="POST" action="/settings/upload/{sid}"'
-                f' style="display:inline;margin-right:0.4rem">'
-                f'<button type="submit" class="btn btn-ghost">&#8679; Upload to ClearPass</button>'
+                f' style="display:inline;margin-right:0.4rem"'
+                f' onsubmit="return confirm('
+                f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
+                f"Only use this to recover from a failed upload. "
+                f"Normal uploads happen automatically after each renewal.')\">"
+                f'<button type="submit" class="btn btn-ghost" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
                 f'</form>'
             )
             rows += (
@@ -2137,6 +2143,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
                 f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">&#128276; Notifications</a>'
+                f'<span style="border-left:1px solid var(--border);margin:0 0.4rem 0 0;display:inline-block;height:1.2em;vertical-align:middle"></span>'
                 f'{run_btn}'
                 f'{upload_btn}'
                 f'{del_btn}'
@@ -2173,6 +2180,11 @@ function hideDelConfirm(id) {
       <tbody>{rows}</tbody>
     </table>
   </div>
+  <p style="font-size:0.78rem;color:var(--muted);margin-top:0.6rem">
+    Certificates are issued and uploaded to ClearPass automatically on the renewal schedule.
+    <strong style="color:var(--text)">Force Cert Issue</strong> and <strong style="color:var(--text)">Force ClearPass Upload</strong>
+    are manual overrides — only use them when troubleshooting a failed renewal or upload.
+  </p>
 </div>"""
     return _base("Servers", body + script,
                  nav_user=username, active="settings", show_nav=True)
