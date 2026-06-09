@@ -636,15 +636,53 @@ def _serve_pkcs12_and_upload(
       ports:
         - "<CPPM_CALLBACK_PORT>:<CPPM_CALLBACK_PORT>"
     """
-    import http.server, socketserver, threading
+    import http.server, socketserver, threading, socket as _socket
     import requests as _req
 
     pfx_name = Path(pfx_path).name
     pfx_url  = f"http://{callback_host}:{callback_port}/{pfx_name}"
 
+    # Resolve the CPPM hostname to IPs so the callback server only responds
+    # to requests from the configured ClearPass host.
+    _allowed_ips: set = set()
+    try:
+        for _ai in _socket.getaddrinfo(host, None):
+            _allowed_ips.add(_ai[4][0])
+    except OSError:
+        pass
+    if _allowed_ips:
+        log.debug("  Callback allowlist: %s → %s", host, sorted(_allowed_ips))
+    else:
+        log.warning("  Could not resolve %s — callback server will accept connections from any source", host)
+
+    # Mutable container so the handler thread can write back to the main thread.
+    _state = {"rejected_ip": None}
+
     class _SilentHandler(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *_):
             pass
+
+        def _check_request(self) -> bool:
+            """Return True if the request should be served; send error and return False otherwise."""
+            client_ip = self.client_address[0]
+            if _allowed_ips and client_ip not in _allowed_ips:
+                _state["rejected_ip"] = client_ip
+                log.warning("  Callback: rejected request from %s (not a configured CPPM host)", client_ip)
+                self.send_error(403, "Forbidden")
+                return False
+            # Only serve the exact PKCS12 file — no directory listings or other paths
+            if self.path.lstrip("/") != pfx_name:
+                self.send_error(404, "Not Found")
+                return False
+            return True
+
+        def do_GET(self):
+            if self._check_request():
+                super().do_GET()
+
+        def do_HEAD(self):
+            if self._check_request():
+                super().do_HEAD()
 
     # allow_reuse_address lets the HTTPS and RADIUS uploads both bind the same
     # port in the same process run without hitting TIME_WAIT between them.
@@ -675,6 +713,14 @@ def _serve_pkcs12_and_upload(
         log.debug("  PUT %s → HTTP %d  body=%s",
                   url.split("/api/")[1], resp.status_code, resp.text[:300])
         if resp.status_code not in (200, 201, 204):
+            if _state["rejected_ip"] is not None:
+                resolved = sorted(_allowed_ips) if _allowed_ips else ["(resolution failed)"]
+                raise RuntimeError(
+                    f"Callback server rejected a connection from {_state['rejected_ip']} "
+                    f"(not in resolved IPs for {host}: {resolved}). "
+                    f"CPPM may be connecting from a NAT or cluster IP not covered by DNS. "
+                    f"Upload failed with HTTP {resp.status_code}."
+                )
             try:
                 detail = resp.json()
             except Exception:
@@ -682,6 +728,12 @@ def _serve_pkcs12_and_upload(
             raise RuntimeError(
                 f"CPPM rejected cert upload (HTTP {resp.status_code}) "
                 f"for {service_name}: {detail}"
+            )
+        if _state["rejected_ip"] is not None:
+            log.warning(
+                "  Callback: connection from %s was rejected but upload succeeded — "
+                "an unexpected host probed port %d during the upload window",
+                _state["rejected_ip"], callback_port,
             )
     finally:
         httpd.shutdown()
