@@ -34,7 +34,16 @@ err() { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
 source /opt/cppm/status.sh
 unset DEBUG
 
-die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
+die() {
+    err "$*"
+    status_write "FAILED" "CERT" "$*"
+    python3 /opt/cppm/notify.py \
+        --server-id "${SERVER_ID:-}" \
+        --event acme_error \
+        --message "$*" \
+        2>/dev/null || true
+    exit 1
+}
 
 ISSUE_ECC="${ISSUE_ECC:-true}"
 ISSUE_RSA="${ISSUE_RSA:-true}"

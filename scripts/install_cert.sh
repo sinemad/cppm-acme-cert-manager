@@ -68,6 +68,11 @@ if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
     log "RSA certificate expires ${RSA_EXPIRY}"
 fi
 status_write "OK" "CERT" "${CERT_LABEL} cert(s) installed – expires ${EXPIRY} (${DAYS_LEFT} days remaining)"
+python3 /opt/cppm/notify.py \
+    --server-id "${SERVER_ID:-}" \
+    --event cert_issued \
+    --message "${CERT_LABEL} cert(s) installed for ${DOMAIN:-?} – expires ${EXPIRY} (${DAYS_LEFT} days remaining)" \
+    2>/dev/null || true
 
 log "Triggering ClearPass upload..."
 /opt/cppm/deploy_hook.sh

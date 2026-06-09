@@ -116,9 +116,19 @@ if [[ $UPLOAD_EXIT -eq 0 ]]; then
         UPLOAD_LABEL="RSA→RADIUS"
     fi
     status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
+    python3 /opt/cppm/notify.py \
+        --server-id "${SERVER_ID:-}" \
+        --event upload_success \
+        --message "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}" \
+        2>/dev/null || true
 else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"
     status_write "FAILED" "UPLOAD" "ClearPass upload failed (exit ${UPLOAD_EXIT}) – check cppm_upload.log"
+    python3 /opt/cppm/notify.py \
+        --server-id "${SERVER_ID:-}" \
+        --event upload_failed \
+        --message "ClearPass upload failed (exit ${UPLOAD_EXIT}) for ${CPPM_HOST} – check cppm_upload.log" \
+        2>/dev/null || true
 fi
 
 log "=== Deploy Hook Complete ==="

@@ -46,6 +46,7 @@ from auth_utils import (
 from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict,
+    get_server_notifications, update_server_notifications,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -591,7 +592,63 @@ def _build_health() -> dict:
             }
         _health_cache["data"] = result
         _health_cache["ts"]   = time.time()
+    threading.Thread(target=_check_expiry_warnings, daemon=True).start()
     return result
+
+
+# ── Expiry warning notifications ──────────────────────────────────────────────
+
+_expiry_warn_last: dict = {}  # {server_id: epoch_float of last warning sent}
+_EXPIRY_WARN_INTERVAL = 86_400  # re-notify at most once per day
+
+
+def _check_expiry_warnings() -> None:
+    """Fire cert_expiry notifications for servers below their warning threshold.
+
+    Called from _build_health after each successful cache refresh.  Silently
+    skips if notify.py is not available (outside the container).
+    """
+    try:
+        import notify as _notify
+    except ImportError:
+        return
+
+    now = time.time()
+    for s in load_servers():
+        sid = s.get("id", "")
+        if not sid:
+            continue
+        notif_cfg = s.get("notifications") or {}
+        threshold = int(notif_cfg.get("expiry_warning_days") or 14)
+        channels  = notif_cfg.get("channels") or []
+        if not any(ch.get("enabled", True) and "cert_expiry" in (ch.get("events") or [])
+                   for ch in channels):
+            continue  # no channels subscribed to expiry — skip cert read
+
+        last_sent = _expiry_warn_last.get(sid, 0)
+        if now - last_sent < _EXPIRY_WARN_INTERVAL:
+            continue
+
+        try:
+            status = build_server_status(s)
+        except Exception:
+            continue
+
+        days  = None
+        certs = status.get("certs") or {}
+        for cert_key in ("ecc", "rsa"):
+            c = certs.get(cert_key) or {}
+            if c.get("exists") and c.get("days_left") is not None:
+                d = c["days_left"]
+                days = d if days is None else min(days, d)
+
+        if days is not None and days <= threshold:
+            srv_label = s.get("label") or s.get("cppm_host", sid)
+            msg       = (f"[{srv_label}] Certificate for {s.get('domain', '?')} expires in "
+                         f"{days} day(s). Renewal runs automatically at ≤30 days, "
+                         f"but manual action may be needed.")
+            _notify.send_notification(sid, "cert_expiry", msg)
+            _expiry_warn_last[sid] = now  # rate-limit regardless of send errors
 
 
 # ── Cert pipeline trigger ─────────────────────────────────────────────────────
@@ -899,6 +956,18 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .sdot.unknown,.sdot.checking{background:var(--subtle)}
 @keyframes sdot-pulse{0%,100%{opacity:.55}50%{opacity:1}}
 .sdot.checking{animation:sdot-pulse 1.2s ease-in-out infinite}
+
+/* ── Notification pages ── */
+.ch-type{display:inline-block;padding:0.1rem 0.45rem;border-radius:3px;font-size:0.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.ch-type-slack{background:rgba(74,21,75,.25);color:#e879f9}
+.ch-type-discord{background:rgba(88,101,242,.2);color:#818cf8}
+.ch-type-teams{background:rgba(0,120,212,.15);color:#60a5fa}
+.ch-type-webhook{background:rgba(56,189,248,.1);color:var(--accent)}
+.ch-type-email{background:rgba(34,197,94,.1);color:var(--ok)}
+.events-grid{display:flex;flex-wrap:wrap;gap:0.4rem 1.2rem;margin-top:0.3rem}
+.events-grid label{display:flex;align-items:center;gap:0.35rem;font-size:0.8rem;color:var(--text);cursor:pointer}
+.events-grid input[type=checkbox]{accent-color:var(--accent);width:13px;height:13px}
+.ch-fields{display:none}.ch-fields.active{display:block}
 """
 
 
@@ -1252,6 +1321,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
+                f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="margin-right:0.4rem">&#128276; Notifications</a>'
                 f'{run_btn}'
                 f'{upload_btn}'
                 f'{del_btn}'
@@ -1757,6 +1827,373 @@ def _overview_rows(servers: list) -> str:
             f'</td></tr>'
         )
     return "".join(rows)
+
+
+# ── Notification settings pages ───────────────────────────────────────────────
+
+_EVENT_LABELS = {
+    "cert_issued":    "Cert Issued / Renewed",
+    "upload_success": "Upload Succeeded",
+    "upload_failed":  "Upload Failed",
+    "cert_expiry":    "Cert Expiry Warning",
+    "acme_error":     "ACME / DNS Error",
+}
+
+
+def _parse_channel_form(f: dict) -> tuple:
+    """Parse a channel add/edit form submission. Returns (channel_dict, error_str)."""
+    ch_type = f.get("type", "slack").strip()
+    name    = f.get("name", "").strip()
+    enabled = f.get("enabled", "") == "true"
+    events  = [k for k in _EVENT_LABELS if f.get(f"event_{k}") == "true"]
+
+    if not name:
+        return {}, "Channel name is required."
+    if ch_type not in ("slack", "discord", "teams", "webhook", "email"):
+        return {}, f"Unknown channel type: {ch_type!r}"
+
+    channel: dict = {"type": ch_type, "name": name, "enabled": enabled, "events": events}
+
+    if ch_type in ("slack", "discord", "teams"):
+        url = f.get("webhook_url", "").strip()
+        if not url:
+            return channel, "Webhook URL is required."
+        channel["webhook_url"] = url
+
+    elif ch_type == "webhook":
+        url = f.get("url", "").strip()
+        if not url:
+            return channel, "URL is required."
+        channel["url"]    = url
+        channel["method"] = f.get("method", "POST").upper()
+        raw = f.get("headers", "").strip()
+        headers = {}
+        for line in raw.splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                headers[k.strip()] = v.strip()
+        channel["headers"] = headers
+
+    elif ch_type == "email":
+        smtp_host = f.get("smtp_host", "").strip()
+        to_raw    = f.get("to", "").strip()
+        if not smtp_host:
+            return channel, "SMTP Host is required."
+        if not to_raw:
+            return channel, "At least one To address is required."
+        to_list = [a.strip() for a in to_raw.replace(",", "\n").splitlines() if a.strip()]
+        channel.update({
+            "smtp_host": smtp_host,
+            "smtp_port": (lambda v: int(v) if str(v).isdigit() else 587)(f.get("smtp_port") or 587),
+            "smtp_user": f.get("smtp_user", "").strip(),
+            "smtp_pass": f.get("smtp_pass", ""),
+            "smtp_tls":  f.get("smtp_tls", "") == "true",
+            "from_addr": f.get("from_addr", "").strip(),
+            "to":        to_list,
+        })
+
+    return channel, ""
+
+
+_CH_TYPES = ["slack", "discord", "teams", "webhook", "email"]
+
+
+def _notifications_page(server_id: str, username: str,
+                        flash_type: str = "", flash_msg: str = "") -> str:
+    srv = get_server(server_id)
+    if not srv:
+        return _settings_list_page(load_servers(), username, "err", "Server not found")
+
+    flash_html = ""
+    if flash_msg:
+        flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+
+    label     = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    sid       = _esc(server_id)
+    notif_cfg = srv.get("notifications") or {}
+    channels  = notif_cfg.get("channels") or []
+    threshold = int(notif_cfg.get("expiry_warning_days") or 14)
+
+    if channels:
+        rows = ""
+        for ch in channels:
+            cid     = _esc(str(ch.get("id", "")))
+            ch_name = _esc(ch.get("name") or ch.get("type", ""))
+            ch_type = ch.get("type", "")
+            enabled = ch.get("enabled", True)
+            evts    = ", ".join(_EVENT_LABELS.get(e, e) for e in (ch.get("events") or []))
+            badge   = f'<span class="ch-type ch-type-{_esc(ch_type)}">{_esc(ch_type)}</span>'
+            en_badge = ('<span class="badge badge-ok">Enabled</span>' if enabled
+                        else '<span class="badge badge-none">Disabled</span>')
+            rows += (
+                f'<tr>'
+                f'<td><strong>{ch_name}</strong></td>'
+                f'<td>{badge}</td>'
+                f'<td style="font-size:0.75rem;color:var(--muted)">{_esc(evts) or "—"}</td>'
+                f'<td>{en_badge}</td>'
+                f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/notifications/{sid}/edit/{cid}" class="btn btn-ghost" style="margin-right:0.4rem">Edit</a>'
+                f'<form method="POST" action="/settings/notifications/{sid}/test/{cid}" style="display:inline;margin-right:0.4rem">'
+                f'<button type="submit" class="btn btn-ghost">&#9654; Test</button></form>'
+                f'<button type="button" class="btn btn-danger" id="del-ch-btn-{cid}" onclick="showChDel(\'{cid}\')">'
+                f'Delete</button>'
+                f'<span id="del-ch-conf-{cid}" style="display:none;align-items:center;gap:0.4rem">'
+                f'<span style="font-size:0.75rem;color:var(--muted)">Delete {ch_name}?</span>'
+                f'<form method="POST" action="/settings/notifications/{sid}/delete" style="display:inline">'
+                f'<input type="hidden" name="channel_id" value="{cid}">'
+                f'<button type="submit" class="btn btn-danger">Yes</button></form>'
+                f'<button type="button" class="btn btn-ghost" onclick="hideChDel(\'{cid}\')">No</button>'
+                f'</span>'
+                f'</td></tr>'
+            )
+    else:
+        rows = (f'<tr><td colspan="5"><div class="empty">'
+                f'No notification channels configured yet.&nbsp; '
+                f'<a href="/settings/notifications/{sid}/add" style="color:var(--accent)">Add the first channel</a>.'
+                f'</div></td></tr>')
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <div>
+      <span class="page-title">Notifications — {label}</span>
+      <div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem">
+        Expiry warning threshold: <strong>{threshold} days</strong>
+        &nbsp;·&nbsp;
+        <a href="/settings/notifications/{sid}/threshold" style="color:var(--accent);font-size:0.73rem">Change</a>
+      </div>
+    </div>
+    <a href="/settings/notifications/{sid}/add" class="btn btn-primary">&#43; Add Channel</a>
+  </div>
+  {flash_html}
+  <div style="margin-bottom:1rem">
+    <a href="/settings" class="btn btn-ghost">&#8592; Back to Servers</a>
+  </div>
+  <div class="card">
+    <table class="settings-table">
+      <thead><tr>
+        <th>Name</th><th>Type</th><th>Events</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>
+<script>
+function showChDel(id) {{
+  document.getElementById('del-ch-btn-'+id).style.display='none';
+  document.getElementById('del-ch-conf-'+id).style.display='inline-flex';
+}}
+function hideChDel(id) {{
+  document.getElementById('del-ch-btn-'+id).style.display='';
+  document.getElementById('del-ch-conf-'+id).style.display='none';
+}}
+</script>"""
+    return _base(f"Notifications — {srv.get('label', '')}", body,
+                 nav_user=username, active="settings", show_nav=True)
+
+
+def _notification_form_page(server_id: str, channel: dict = None,
+                             error: str = "", username: str = "") -> str:
+    srv = get_server(server_id)
+    if not srv:
+        return _settings_list_page(load_servers(), username, "err", "Server not found")
+
+    is_edit  = bool(channel and channel.get("id"))
+    sid      = _esc(server_id)
+    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    ch       = channel or {}
+    cid      = _esc(str(ch.get("id", "")))
+    action   = (f"/settings/notifications/{sid}/edit/{cid}" if is_edit
+                else f"/settings/notifications/{sid}/add")
+    title    = "Edit Channel" if is_edit else "Add Notification Channel"
+    submit   = "Save Changes" if is_edit else "Add Channel"
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+
+    def fv(k, d=""):  return _esc(str(ch.get(k, d)))
+    def checked(k, default=True): return " checked" if ch.get(k, default) else ""
+    def ev_checked(evt): return " checked" if evt in (ch.get("events") or list(_EVENT_LABELS)) else ""
+    def sel(v, t):  return " selected" if v == t else ""
+    def vis(t):     return "" if t == ch.get("type", "slack") else ' style="display:none"'
+
+    events_html = "".join(
+        f'<label><input type="checkbox" name="event_{k}" value="true"{ev_checked(k)}> {_esc(v)}</label>'
+        for k, v in _EVENT_LABELS.items()
+    )
+
+    cur_type = ch.get("type", "slack")
+    type_opts = "".join(
+        f'<option value="{t}"{sel(cur_type, t)}>{t.capitalize()}</option>'
+        for t in _CH_TYPES
+    )
+
+    # Webhook headers as key:value text
+    raw_headers = ch.get("headers") or {}
+    headers_txt = "\n".join(f"{k}: {v}" for k, v in raw_headers.items()) if isinstance(raw_headers, dict) else str(raw_headers)
+
+    # Email to list
+    to_raw = ch.get("to") or []
+    to_txt = ", ".join(to_raw) if isinstance(to_raw, list) else str(to_raw)
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">{_esc(title)} — {label}</span>
+  </div>
+  <div style="margin-bottom:1rem">
+    <a href="/settings/notifications/{sid}" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  <div class="card">
+    <form method="POST" action="{action}">
+      <div class="form-section-title">Channel</div>
+      <div class="form-2col">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" value="{fv('name')}" placeholder="e.g. Ops Slack" required>
+        </div>
+        <div class="field">
+          <label>Type</label>
+          <select name="type" id="ch-type-sel" onchange="switchType(this.value)">
+            {type_opts}
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin-top:0.5rem">
+        <label><input type="checkbox" name="enabled" value="true"{checked('enabled')}
+               style="margin-right:0.4rem;accent-color:var(--accent)"> Enabled</label>
+      </div>
+
+      <div class="form-section-title" style="margin-top:1.25rem">Events</div>
+      <div class="events-grid">{events_html}</div>
+
+      <div class="form-section-title" style="margin-top:1.25rem">Channel Settings</div>
+
+      <div class="ch-fields{' active' if cur_type in ('slack','discord','teams') else ''}" id="fields-webhook-url"{vis('slack') if cur_type not in ('slack','discord','teams') else ''}>
+        <div class="field">
+          <label>Webhook URL</label>
+          <input type="url" name="webhook_url" value="{fv('webhook_url')}" placeholder="https://hooks.slack.com/...">
+        </div>
+      </div>
+
+      <div class="ch-fields{' active' if cur_type == 'webhook' else ''}" id="fields-webhook"{vis('webhook')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>URL</label>
+            <input type="url" name="url" value="{fv('url')}" placeholder="https://example.com/hook">
+          </div>
+          <div class="field">
+            <label>Method</label>
+            <select name="method">
+              <option value="POST"{sel(ch.get('method','POST'),'POST')}>POST</option>
+              <option value="GET"{sel(ch.get('method','POST'),'GET')}>GET</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Extra Headers <span class="hint">(one per line: Key: Value)</span></label>
+          <textarea name="headers" rows="3" style="width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.5rem;color:var(--text);font-size:0.82rem;font-family:monospace;resize:vertical">{_esc(headers_txt)}</textarea>
+        </div>
+      </div>
+
+      <div class="ch-fields{' active' if cur_type == 'email' else ''}" id="fields-email"{vis('email')}>
+        <div class="form-2col">
+          <div class="field">
+            <label>SMTP Host</label>
+            <input type="text" name="smtp_host" value="{fv('smtp_host')}" placeholder="smtp.example.com">
+          </div>
+          <div class="field">
+            <label>SMTP Port</label>
+            <input type="number" name="smtp_port" value="{fv('smtp_port','587')}" min="1" max="65535">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>SMTP Username</label>
+            <input type="text" name="smtp_user" value="{fv('smtp_user')}" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>SMTP Password</label>
+            <input type="password" name="smtp_pass" value="{fv('smtp_pass')}" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="form-2col">
+          <div class="field">
+            <label>From Address</label>
+            <input type="email" name="from_addr" value="{fv('from_addr')}" placeholder="alerts@example.com">
+          </div>
+          <div class="field">
+            <label><input type="checkbox" name="smtp_tls" value="true"{checked('smtp_tls')}
+                   style="margin-right:0.4rem;accent-color:var(--accent)"> Use STARTTLS / SSL</label>
+          </div>
+        </div>
+        <div class="field">
+          <label>To Addresses <span class="hint">(comma-separated)</span></label>
+          <input type="text" name="to" value="{_esc(to_txt)}" placeholder="admin@example.com, ops@example.com">
+        </div>
+      </div>
+
+      <div style="margin-top:1.5rem;display:flex;gap:0.75rem">
+        <button type="submit" class="btn btn-primary">{_esc(submit)}</button>
+        <a href="/settings/notifications/{sid}" class="btn btn-ghost">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+var _TYPE_GROUPS = {{
+  slack: ['fields-webhook-url'],
+  discord: ['fields-webhook-url'],
+  teams: ['fields-webhook-url'],
+  webhook: ['fields-webhook'],
+  email: ['fields-email'],
+}};
+function switchType(t) {{
+  ['fields-webhook-url','fields-webhook','fields-email'].forEach(function(id) {{
+    var el = document.getElementById(id);
+    if (el) el.className = 'ch-fields';
+  }});
+  (_TYPE_GROUPS[t] || []).forEach(function(id) {{
+    var el = document.getElementById(id);
+    if (el) el.className = 'ch-fields active';
+  }});
+}}
+</script>"""
+    return _base(title, body, nav_user=username, active="settings", show_nav=True)
+
+
+def _notification_threshold_page(server_id: str, error: str = "",
+                                  username: str = "") -> str:
+    srv = get_server(server_id)
+    if not srv:
+        return _settings_list_page(load_servers(), username, "err", "Server not found")
+    sid      = _esc(server_id)
+    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    notif    = srv.get("notifications") or {}
+    threshold = int(notif.get("expiry_warning_days") or 14)
+    err_html  = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    body = f"""
+<div class="app">
+  <div class="page-hdr"><span class="page-title">Expiry Warning Threshold — {label}</span></div>
+  <div style="margin-bottom:1rem">
+    <a href="/settings/notifications/{sid}" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  <div class="card" style="max-width:480px">
+    <form method="POST" action="/settings/notifications/{sid}/threshold">
+      <div class="field">
+        <label>Warn when certificate expires within <span class="hint">(days)</span></label>
+        <input type="number" name="expiry_warning_days" value="{threshold}" min="1" max="90" style="width:120px">
+      </div>
+      <div style="margin-top:1rem;display:flex;gap:0.75rem">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <a href="/settings/notifications/{sid}" class="btn btn-ghost">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>"""
+    return _base("Expiry Warning Threshold", body,
+                 nav_user=username, active="settings", show_nav=True)
+
 
 _OVERVIEW_SCRIPT = """
 <script>
@@ -2430,6 +2867,32 @@ class Handler(BaseHTTPRequestHandler):
                 _settings_form_page(srv, is_edit=True, username=username)
             )
 
+        if path.startswith("/settings/notifications/"):
+            rest = path[len("/settings/notifications/"):].strip("/")
+            parts = rest.split("/")
+            sid = parts[0] if parts else ""
+            if len(parts) == 1:
+                qs    = parse_qs(urlparse(self.path).query)
+                ftype = qs.get("ft", [""])[0]
+                fmsg  = qs.get("fm", [""])[0]
+                return self._serve_html(
+                    _notifications_page(sid, username, ftype, fmsg)
+                )
+            if len(parts) == 2 and parts[1] == "add":
+                return self._serve_html(_notification_form_page(sid, username=username))
+            if len(parts) == 2 and parts[1] == "threshold":
+                return self._serve_html(_notification_threshold_page(sid, username=username))
+            if len(parts) == 3 and parts[1] == "edit":
+                cid     = parts[2]
+                notif   = get_server_notifications(sid)
+                channel = next((c for c in (notif.get("channels") or [])
+                                if c.get("id") == cid), None)
+                if channel is None:
+                    return self._redirect(f"/settings/notifications/{sid}?ft=err&fm=Channel+not+found")
+                return self._serve_html(
+                    _notification_form_page(sid, channel=channel, username=username)
+                )
+
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2478,6 +2941,22 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
         elif path.startswith("/settings/upload/"):
             self._handle_settings_upload(path[len("/settings/upload/"):].strip("/"))
+        elif path.startswith("/settings/notifications/"):
+            rest  = path[len("/settings/notifications/"):].strip("/")
+            parts = rest.split("/")
+            sid   = parts[0] if parts else ""
+            if len(parts) == 2 and parts[1] == "add":
+                self._handle_notifications_add(sid)
+            elif len(parts) == 2 and parts[1] == "threshold":
+                self._handle_notifications_threshold(sid)
+            elif len(parts) == 2 and parts[1] == "delete":
+                self._handle_notifications_delete(sid)
+            elif len(parts) == 3 and parts[1] == "edit":
+                self._handle_notifications_edit(sid, parts[2])
+            elif len(parts) == 3 and parts[1] == "test":
+                self._handle_notifications_test(sid, parts[2])
+            else:
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -2650,6 +3129,106 @@ class Handler(BaseHTTPRequestHandler):
             f"/server/{server_id}?ft=ok&fm=Upload+pipeline+started."
             f"+Results+will+appear+in+the+Activity+Log+below."
         )
+
+    # ── Notification POST handlers ────────────────────────────────────────────
+
+    def _handle_notifications_add(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        if not get_server(server_id):
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        f = self._parse_form()
+        channel, err = _parse_channel_form(f)
+        if err:
+            return self._serve_html(
+                _notification_form_page(server_id, channel=channel, error=err, username=username)
+            )
+        import uuid as _uuid
+        channel["id"] = str(_uuid.uuid4())
+        notif = get_server_notifications(server_id)
+        notif.setdefault("channels", []).append(channel)
+        update_server_notifications(server_id, notif)
+        _log.info("notifications: '%s' added channel '%s' for server %s",
+                  username, channel.get("name"), server_id)
+        self._redirect(f"/settings/notifications/{server_id}?ft=ok&fm=Channel+added.")
+
+    def _handle_notifications_edit(self, server_id: str, channel_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        if not get_server(server_id):
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        f = self._parse_form()
+        channel, err = _parse_channel_form(f)
+        if err:
+            channel["id"] = channel_id
+            return self._serve_html(
+                _notification_form_page(server_id, channel=channel, error=err, username=username)
+            )
+        channel["id"] = channel_id
+        notif = get_server_notifications(server_id)
+        channels = notif.get("channels") or []
+        notif["channels"] = [channel if c.get("id") == channel_id else c for c in channels]
+        if not any(c.get("id") == channel_id for c in channels):
+            notif["channels"].append(channel)
+        update_server_notifications(server_id, notif)
+        _log.info("notifications: '%s' edited channel %s for server %s",
+                  username, channel_id, server_id)
+        self._redirect(f"/settings/notifications/{server_id}?ft=ok&fm=Channel+updated.")
+
+    def _handle_notifications_delete(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f          = self._parse_form()
+        channel_id = f.get("channel_id", "")
+        notif      = get_server_notifications(server_id)
+        before     = len(notif.get("channels") or [])
+        notif["channels"] = [c for c in (notif.get("channels") or [])
+                              if c.get("id") != channel_id]
+        if len(notif["channels"]) < before:
+            update_server_notifications(server_id, notif)
+            _log.info("notifications: '%s' deleted channel %s for server %s",
+                      username, channel_id, server_id)
+        self._redirect(f"/settings/notifications/{server_id}?ft=ok&fm=Channel+deleted.")
+
+    def _handle_notifications_test(self, server_id: str, channel_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        try:
+            import notify as _notify
+            ok, msg = _notify.send_test(server_id, channel_id)
+        except ImportError:
+            ok, msg = False, "notify.py not available (run inside the container)"
+        except Exception as exc:
+            ok, msg = False, str(exc)
+        ft  = "ok" if ok else "err"
+        fm  = _url_enc(msg)
+        self._redirect(f"/settings/notifications/{server_id}?ft={ft}&fm={fm}")
+
+    def _handle_notifications_threshold(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        if not get_server(server_id):
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        f = self._parse_form()
+        try:
+            days = int(f.get("expiry_warning_days", "14"))
+            if not 1 <= days <= 90:
+                raise ValueError()
+        except (ValueError, TypeError):
+            return self._serve_html(
+                _notification_threshold_page(server_id,
+                                             error="Warning threshold must be between 1 and 90 days.",
+                                             username=username)
+            )
+        notif = get_server_notifications(server_id)
+        notif["expiry_warning_days"] = days
+        update_server_notifications(server_id, notif)
+        self._redirect(f"/settings/notifications/{server_id}?ft=ok&fm=Threshold+updated.")
 
     # log_message and log_error are defined earlier in the class alongside the
     # other request-logging helpers — do not add a duplicate here.

@@ -234,6 +234,7 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "SERVER_CERT_DIR":      str(server_cert_dir(s)),
         "SERVER_LOG_DIR":       str(server_cert_dir(s) / ".logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
+        "SERVER_ID":            str(s.get("id", "")),
     }
     for k, v in creds.items():
         env[k] = str(v)
@@ -250,6 +251,27 @@ def get_server_shell_env(server_id: str) -> Optional[str]:
         return None
     lines = [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
     return "\n".join(lines)
+
+
+# ── Notification config ───────────────────────────────────────────────────────
+
+def get_server_notifications(server_id: str) -> dict:
+    """Return the notifications block for a server, or an empty default."""
+    s = get_server(server_id)
+    if not s:
+        return {"expiry_warning_days": 14, "channels": []}
+    return s.get("notifications") or {"expiry_warning_days": 14, "channels": []}
+
+
+def update_server_notifications(server_id: str, notifications: dict) -> bool:
+    """Replace the notifications block for a server. Returns True if found."""
+    servers = load_servers()
+    for i, s in enumerate(servers):
+        if s.get("id") == server_id:
+            servers[i]["notifications"] = notifications
+            _write(servers)
+            return True
+    return False
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
