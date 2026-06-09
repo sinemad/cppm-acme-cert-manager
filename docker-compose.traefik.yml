@@ -39,6 +39,10 @@ services:
       # ── Security ────────────────────────────────────────────────────────────
       - "--api.insecure=false"
 
+      # ── Logging — written to the shared data volume for the web UI ──────────
+      - "--log.filePath=/traefik-logs/traefik.log"
+      - "--log.level=INFO"
+
       # ── File provider — reads routing from the shared data volume ────────────
       # The web UI writes /opt/cppm-certs/traefik/dynamic/cppm.yml.
       # Traefik hot-reloads it when the hostname changes — no restart needed.
@@ -67,6 +71,8 @@ services:
       # Dynamic routing config written by the web UI — mounted read-only into Traefik.
       # Uses CPPM_DATA_PATH (default: /opt/cppm-certs) so it matches the data volume.
       - ${CPPM_DATA_PATH:-/opt/cppm-certs}/traefik/dynamic:/etc/traefik/dynamic:ro
+      # Log file — readable by the web UI for the built-in log viewer.
+      - ${CPPM_DATA_PATH:-/opt/cppm-certs}/traefik/logs:/traefik-logs
 
     networks:
       - traefik_net

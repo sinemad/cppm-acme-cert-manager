@@ -279,6 +279,8 @@ def update_server_notifications(server_id: str, notifications: dict) -> bool:
 _TRAEFIK_CONFIG_FILE  = SERVERS_FILE.parent / "traefik.json"
 _TRAEFIK_COMPOSE_FILE = SERVERS_FILE.parent / "docker-compose.traefik.yml"
 _TRAEFIK_DYNAMIC_DIR  = SERVERS_FILE.parent / "traefik" / "dynamic"
+_TRAEFIK_LOG_DIR      = SERVERS_FILE.parent / "traefik" / "logs"
+_TRAEFIK_LOG_FILE     = _TRAEFIK_LOG_DIR / "traefik.log"
 
 # Translate stored acme.sh-style credential names to Lego/Traefik env names.
 # Mirrors _DNS_ENV_REMAP in lego_provider.py — keep in sync.
@@ -326,6 +328,7 @@ def save_traefik_config(cfg: dict) -> None:
     # Keep the compose overlay in sync — write when enabled, remove when disabled
     # so the user can run one command without managing a separate file.
     if cfg.get("enabled") and cfg.get("host"):
+        _TRAEFIK_LOG_DIR.mkdir(parents=True, exist_ok=True)
         _TRAEFIK_COMPOSE_FILE.write_text(generate_traefik_compose(cfg), encoding="utf-8")
     else:
         _TRAEFIK_COMPOSE_FILE.unlink(missing_ok=True)
@@ -398,6 +401,8 @@ def generate_traefik_compose(cfg: dict) -> str:
         "    restart: unless-stopped",
         "    command:",
         '      - "--api.insecure=false"',
+        '      - "--log.filePath=/traefik-logs/traefik.log"',
+        '      - "--log.level=INFO"',
         '      - "--providers.file.directory=/etc/traefik/dynamic"',
         '      - "--providers.file.watch=true"',
         '      - "--entrypoints.web.address=:80"',
@@ -430,6 +435,7 @@ def generate_traefik_compose(cfg: dict) -> str:
         "    volumes:",
         "      - traefik_acme:/acme",
         "      - ${CPPM_DATA_PATH:-/opt/cppm-certs}/traefik/dynamic:/etc/traefik/dynamic:ro",
+        "      - ${CPPM_DATA_PATH:-/opt/cppm-certs}/traefik/logs:/traefik-logs",
         "    networks:",
         "      - traefik_net",
         "    logging:",
@@ -447,6 +453,17 @@ def generate_traefik_compose(cfg: dict) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def get_traefik_log(lines: int = 150) -> list:
+    """Return the last N lines of the Traefik log file, newest last."""
+    if not _TRAEFIK_LOG_FILE.exists():
+        return []
+    try:
+        text = _TRAEFIK_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+        return text.splitlines()[-lines:]
+    except Exception:
+        return []
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

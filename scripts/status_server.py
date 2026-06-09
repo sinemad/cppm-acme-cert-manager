@@ -47,7 +47,7 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict,
     get_server_notifications, update_server_notifications,
-    get_traefik_config, save_traefik_config,
+    get_traefik_config, save_traefik_config, get_traefik_log,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -1098,6 +1098,30 @@ def _setup_page(error: str = "") -> str:
 </div>""")
 
 
+def _traefik_probe(host: str) -> dict:
+    """TCP + TLS probe of the Traefik HTTPS endpoint. Returns status dict."""
+    import socket, ssl as _ssl
+    result: dict = {"host": host, "tcp": False, "tls": False, "status": "down", "detail": ""}
+    try:
+        with socket.create_connection((host, 443), timeout=4):
+            result["tcp"] = True
+    except Exception as exc:
+        result["detail"] = f"Port 443 not reachable — run the compose command to start Traefik ({exc})"
+        return result
+    try:
+        ctx = _ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=4) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host):
+                result["tls"] = True
+                result["status"] = "ok"
+    except _ssl.SSLCertVerificationError:
+        result["status"] = "cert_pending"
+        result["detail"] = "Traefik is running — Let's Encrypt certificate is being issued (may take a minute)"
+    except Exception as exc:
+        result["detail"] = str(exc)
+    return result
+
+
 def _traefik_page(
     cfg: dict,
     error: str = "",
@@ -1271,7 +1295,7 @@ def _traefik_page(
         </div>
       </div>"""
 
-    # ── Activate block (shown after a successful save with enabled=True) ─────────
+    # ── Activate block (shown when enabled=True and host is set) ─────────────────
     compose_block = ""
     if cfg.get("enabled") and cfg.get("host"):
         host_esc   = _esc(cfg["host"])
@@ -1292,6 +1316,10 @@ def _traefik_page(
     <span id="traefik-cmd" style="word-break:break-all">docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml up -d</span>
     <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem;white-space:nowrap" onclick="copyId('traefik-cmd',this)">Copy</button>
   </div>
+  <p style="font-size:0.82rem;color:var(--muted);margin:0.75rem 0 0">
+    Once running, the web UI will be available at
+    <a href="https://{host_esc}/" target="_blank" style="color:var(--accent)">https://{host_esc}/</a>
+  </p>
   {setup_note}
 </div>"""
 
@@ -1348,6 +1376,32 @@ def _traefik_page(
     </form>
 {compose_block}"""
 
+    # ── Status + log cards (settings page only) ──────────────────────────────
+    status_cards = ""
+    if not is_setup and cfg.get("enabled") and cfg.get("host"):
+        host_esc = _esc(cfg["host"])
+        status_cards = f"""
+<div class="card" style="margin-top:1.25rem">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+    <div class="form-section-title" style="margin:0">Traefik Status</div>
+    <a href="https://{host_esc}/" target="_blank" class="btn btn-ghost" style="font-size:0.78rem">
+      Open https://{host_esc}/ ↗
+    </a>
+  </div>
+  <div style="display:flex;align-items:center;gap:0.65rem">
+    <span id="ts-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted);flex-shrink:0"></span>
+    <span id="ts-label" style="font-size:0.85rem;color:var(--muted)">Checking…</span>
+  </div>
+  <p id="ts-detail" style="font-size:0.78rem;color:var(--muted);margin:0.4rem 0 0;padding-left:1.4rem"></p>
+</div>
+<div class="card" style="margin-top:1.25rem">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+    <div class="form-section-title" style="margin:0">Traefik Log</div>
+    <button type="button" class="btn btn-ghost" style="font-size:0.72rem;padding:0.15rem 0.5rem" onclick="loadTraefikLog()">↻ Refresh</button>
+  </div>
+  <div id="traefik-log-box" style="background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.65rem;font-family:monospace;font-size:0.72rem;color:var(--muted);height:280px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">Loading…</div>
+</div>"""
+
     # ── JavaScript ────────────────────────────────────────────────────────────
     script = """
 <script>
@@ -1376,9 +1430,52 @@ function copyId(id, btn) {
     setTimeout(function() { btn.textContent = orig; }, 2000);
   });
 }
+function pollTraefikStatus() {
+  fetch('/api/traefik/status').then(function(r){return r.json();}).then(function(d) {
+    var dot = document.getElementById('ts-dot');
+    var lbl = document.getElementById('ts-label');
+    var det = document.getElementById('ts-detail');
+    if (!dot) return;
+    if (d.status === 'ok') {
+      dot.style.background = 'var(--ok, #22c55e)';
+      lbl.style.color = 'var(--ok, #22c55e)';
+      lbl.textContent = 'Running — HTTPS active';
+    } else if (d.status === 'cert_pending') {
+      dot.style.background = '#f59e0b';
+      lbl.style.color = '#f59e0b';
+      lbl.textContent = 'Running — certificate being issued';
+    } else if (d.status === 'disabled') {
+      dot.style.background = 'var(--muted)';
+      lbl.style.color = 'var(--muted)';
+      lbl.textContent = 'Disabled';
+    } else {
+      dot.style.background = 'var(--err, #ef4444)';
+      lbl.style.color = 'var(--err, #ef4444)';
+      lbl.textContent = 'Not reachable';
+    }
+    if (det) det.textContent = d.detail || '';
+  }).catch(function(){});
+}
+function loadTraefikLog() {
+  var box = document.getElementById('traefik-log-box');
+  if (!box) return;
+  fetch('/api/traefik/log').then(function(r){return r.json();}).then(function(d) {
+    if (!d.lines || !d.lines.length) {
+      box.textContent = '(no log entries yet — Traefik may not be running)';
+      return;
+    }
+    box.textContent = d.lines.join('\\n');
+    box.scrollTop = box.scrollHeight;
+  }).catch(function(){ box.textContent = '(could not load log)'; });
+}
 (function() {
   var prov = document.getElementById('dns_provider');
   if (prov) switchDns(prov.value);
+  if (document.getElementById('ts-dot')) {
+    pollTraefikStatus();
+    setInterval(pollTraefikStatus, 15000);
+  }
+  if (document.getElementById('traefik-log-box')) loadTraefikLog();
 })();
 </script>"""
 
@@ -1416,6 +1513,7 @@ function copyId(id, btn) {
     </p>
     {form_html}
   </div>
+  {status_cards}
 </div>{script}"""
         return _base("Traefik HTTPS", content,
                      nav_user=username, active="traefik", show_nav=True)
@@ -3143,6 +3241,23 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._serve_json({"error": str(e)}, status=500)
             return self._serve_json({"error": "Not found"}, status=404)
+
+        # ── Traefik status + log API ─────────────────────────────────────────
+        if path == "/api/traefik/status":
+            cfg = get_traefik_config()
+            host = str(cfg.get("host", "")).strip()
+            if not cfg.get("enabled") or not host:
+                return self._serve_json({"status": "disabled"})
+            try:
+                return self._serve_json(_traefik_probe(host))
+            except Exception as exc:
+                return self._serve_json({"status": "error", "detail": str(exc)})
+
+        if path == "/api/traefik/log":
+            try:
+                return self._serve_json({"lines": get_traefik_log(150)})
+            except Exception as exc:
+                return self._serve_json({"error": str(exc)}, status=500)
 
         if path == "/admin/users":
             qs     = parse_qs(urlparse(self.path).query)
