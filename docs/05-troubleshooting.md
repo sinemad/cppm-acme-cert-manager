@@ -339,6 +339,105 @@ docker exec -it cppm-acme-cert-manager python3
 
 ---
 
+## Traefik troubleshooting
+
+### Status card shows "Not reachable" after running compose
+
+**Cause:** The compose command hasn't completed, Traefik is still issuing its
+certificate, or the hostname does not resolve to this host.
+
+Check the Traefik container state and log:
+
+```bash
+docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml ps
+docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml logs traefik --tail=50
+```
+
+Or read the log from the web UI: **Settings → Traefik → Traefik Log** (bottom of page).
+
+---
+
+### Certificate stays "pending" — ACME issuance never completes
+
+**HTTP-01:** Port 80 must be publicly reachable from the internet. Check your
+firewall, router port-forwarding, and that no other process binds port 80.
+
+```bash
+# Verify port 80 is free before starting Traefik
+ss -tlnp | grep ':80'
+```
+
+**DNS-01:** Check the Traefik log for `DNS_API_ERROR`. Common causes:
+
+- Credentials in the compose overlay are wrong — re-save via **Settings → Traefik**
+  to regenerate the file with current credentials.
+- API token missing write permission on the target zone (same as ACME DNS troubleshooting above).
+- DNS propagation timeout — increase `LEGO_CA_SERVER_TIMEOUT` or wait and retry.
+
+---
+
+### `no such file or directory` volume error on compose up
+
+**Symptom:** `error while mounting volume... no such file or directory` for
+`/opt/cppm-certs/traefik/dynamic` or similar.
+
+**Cause:** The web UI has not written the config yet (compose file generated
+before first Save), or `CPPM_DATA_PATH` is set to a path that doesn't exist.
+
+**Fix:** Open **Settings → Traefik**, confirm the hostname and email are filled
+in, and click **Save** again. Then re-run the compose command.
+
+---
+
+### Traefik starts but web UI shows HTTP (port 8080), not HTTPS
+
+Port 8080 remains accessible directly — this is expected. Traefik serves
+HTTPS on port 443 at your configured hostname. Navigate to
+`https://<hostname>/` to use the secure URL. Port 8080 is kept open for
+local/fallback access.
+
+---
+
+### Traefik container exits immediately
+
+```bash
+docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml logs traefik
+```
+
+Common causes:
+
+- **Port conflict:** Another process (nginx, Apache, existing Traefik) is
+  already bound to port 80 or 443. Stop it first.
+- **Dynamic config missing:** Traefik's file provider watches
+  `/opt/cppm-certs/traefik/dynamic/` — if the directory is empty or missing,
+  Traefik still starts but logs a warning. Open **Settings → Traefik** and
+  Save to regenerate the dynamic config.
+- **Malformed compose overlay:** Re-save via **Settings → Traefik** to
+  regenerate `docker-compose.traefik.yml` from the current settings.
+
+---
+
+### Hostname change not taking effect
+
+Hostname changes are picked up immediately via Traefik's file-provider
+hot-reload — no restart needed. If the new hostname is not working:
+
+1. Confirm the new hostname resolves in DNS.
+2. Check the Traefik log for a reload event: look for `Starting provider` or
+   `Configuration reloaded`.
+3. If using DNS-01, the new certificate issuance may take 1–2 minutes.
+
+---
+
+### PKCS12 callback still uses old HTTP address after enabling Traefik
+
+The PKCS12 callback port (8765) is **not** routed through Traefik — ClearPass
+connects to it directly. The **Callback Host** in **Servers → Edit** should
+always be the Docker host LAN IP, not the Traefik hostname. This is expected
+and does not need to change when enabling HTTPS.
+
+---
+
 ## Browsing the API on your CPPM instance
 
 Interactive Swagger UI:

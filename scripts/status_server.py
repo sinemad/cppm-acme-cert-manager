@@ -1016,6 +1016,7 @@ _HELP_DOCS = [
     ("troubleshooting",  "Troubleshooting",      "05-troubleshooting.md"),
     ("script-reference", "Script Reference",     "06-script-reference.md"),
     ("quick-reference",  "Quick Reference",      "07-quick-reference.md"),
+    ("traefik",          "HTTPS with Traefik",   "08-traefik.md"),
 ]
 
 _HELP_DESC = {
@@ -1026,6 +1027,7 @@ _HELP_DESC = {
     "troubleshooting":  "Common error messages, diagnostics, and fixes for ACME, DNS, callback, and upload failures.",
     "script-reference": "Reference for all included shell scripts and Python CLIs (cppm-servers, cppm-users, etc.).",
     "quick-reference":  "At-a-glance cheatsheet: ports, paths, environment variables, and key commands.",
+    "traefik":          "Enable HTTPS for the web UI using Traefik as a reverse proxy with automatic Let's Encrypt certificates.",
 }
 
 
