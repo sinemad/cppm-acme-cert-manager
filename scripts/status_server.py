@@ -47,7 +47,7 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict,
     get_server_notifications, update_server_notifications,
-    get_traefik_config, save_traefik_config, generate_traefik_compose,
+    get_traefik_config, save_traefik_config,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -1271,33 +1271,27 @@ def _traefik_page(
         </div>
       </div>"""
 
-    # ── Generated compose block ───────────────────────────────────────────────
+    # ── Activate block (shown after a successful save with enabled=True) ─────────
     compose_block = ""
     if cfg.get("enabled") and cfg.get("host"):
-        host_esc      = _esc(cfg["host"])
-        compose_esc   = _esc(generate_traefik_compose(cfg))
-        setup_note    = (
-            f'<p style="font-size:0.82rem;color:var(--muted);margin:0.6rem 0 0">'
-            f'After running the command above, continue setup at '
+        host_esc   = _esc(cfg["host"])
+        setup_note = (
+            f'<p style="font-size:0.82rem;color:var(--muted);margin:0.75rem 0 0">'
+            f'After Traefik starts, continue setup at '
             f'<a href="https://{host_esc}/setup?step=admin" style="color:var(--accent);word-break:break-all">'
             f'https://{host_esc}/setup?step=admin</a></p>'
         ) if is_setup else ""
         compose_block = f"""
 <div class="card" style="margin-top:1.25rem">
-  <div class="form-section-title" style="margin-bottom:0.5rem">Apply Configuration</div>
-  <p style="font-size:0.82rem;color:var(--muted);margin-bottom:0.6rem">
-    Save the generated file as <code>docker-compose.traefik.yml</code> in your project
-    directory, then run:
+  <div class="form-section-title" style="margin-bottom:0.5rem">Activate Traefik</div>
+  <p style="font-size:0.82rem;color:var(--muted);margin-bottom:0.75rem">
+    <code>docker-compose.traefik.yml</code> has been written to your data directory.
+    Run this command from your project directory to start Traefik:
   </p>
-  <div style="background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.45rem 0.75rem;font-family:monospace;font-size:0.8rem;color:var(--accent);margin-bottom:0.75rem;display:flex;align-items:center;justify-content:space-between">
-    <span id="traefik-cmd">docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d</span>
-    <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem;margin-left:0.75rem;white-space:nowrap" onclick="copyId('traefik-cmd',this)">Copy</button>
+  <div style="background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.55rem 0.75rem;font-family:monospace;font-size:0.8rem;color:var(--accent);display:flex;align-items:center;justify-content:space-between;gap:0.75rem">
+    <span id="traefik-cmd" style="word-break:break-all">docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml up -d</span>
+    <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem;white-space:nowrap" onclick="copyId('traefik-cmd',this)">Copy</button>
   </div>
-  <div style="margin-bottom:0.3rem;font-size:0.75rem;color:var(--subtle);display:flex;align-items:center;justify-content:space-between">
-    <span>docker-compose.traefik.yml</span>
-    <button type="button" class="btn btn-ghost" style="font-size:0.7rem;padding:0.15rem 0.5rem" onclick="copyId('compose-out-ta',this)">Copy</button>
-  </div>
-  <textarea id="compose-out-ta" readonly rows="26" style="width:100%;background:#0a0f1a;border:1px solid var(--border2);border-radius:4px;padding:0.65rem;font-family:monospace;font-size:0.72rem;color:var(--muted);resize:vertical;box-sizing:border-box">{compose_esc}</textarea>
   {setup_note}
 </div>"""
 

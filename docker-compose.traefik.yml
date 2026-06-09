@@ -4,10 +4,8 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
 #
-# Before first run:
-#   sudo mkdir -p /opt/traefik-acme
-#   sudo chmod 700 /opt/traefik-acme
-#   sudo mkdir -p /opt/cppm-certs/traefik/dynamic   # created by UI on first save; needed for manual setup
+# Before first run (manual / Option B setup only):
+#   sudo mkdir -p /opt/cppm-certs/traefik/dynamic   # created automatically by the web UI on first save
 #
 # ── Option A: configure via the web UI (recommended) ──────────────────────────
 #   1. Start the stack: docker compose up -d   (HTTP only, no Traefik yet)
@@ -87,11 +85,8 @@ services:
 
 volumes:
   traefik_acme:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /opt/traefik-acme
+    # Docker-managed named volume — created automatically on first run.
+    # Inspect path: docker volume inspect cppm-acme-cert-manager_traefik_acme
 
 # ── DNS-01 challenge (internal / air-gapped deployments) ─────────────────────
 #

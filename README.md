@@ -593,26 +593,21 @@ The web UI translates them automatically when generating the compose snippet:
 
 #### Deploying Traefik
 
-**1. Create the required host directories:**
+**1. Configure in the web UI:**
+
+Open the setup wizard or navigate to **Settings → Traefik**, fill in the
+hostname, contact email, and challenge type, then click **Save**. The web UI
+writes `docker-compose.traefik.yml` to `/opt/cppm-certs/` automatically.
+
+**2. Start Traefik (one command, from your project directory):**
 
 ```bash
-sudo mkdir -p /opt/traefik-acme
-sudo chmod 700 /opt/traefik-acme
-# Only needed for manual (Option B) setup — the web UI creates this automatically on save:
-sudo mkdir -p /opt/cppm-certs/traefik/dynamic
+docker compose -f docker-compose.yml -f /opt/cppm-certs/docker-compose.traefik.yml up -d
 ```
 
-**2. Save the generated compose snippet:**
-
-In the web UI (Settings → Traefik), scroll to **Generated docker-compose
-snippet**, click **Copy**, and save the output as `docker-compose.traefik.yml`
-in the project directory.
-
-**3. Start with the Traefik overlay:**
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
-```
+Traefik's ACME state (`acme.json`) is stored in a Docker-managed named volume
+created automatically on first run — no `mkdir` needed. The web UI also creates
+`/opt/cppm-certs/traefik/dynamic/` on first save.
 
 The web UI is now available at `https://<your-hostname>/`. HTTP (port 80)
 redirects automatically to HTTPS. Port 8080 remains accessible directly for

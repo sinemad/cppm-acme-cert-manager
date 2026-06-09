@@ -276,8 +276,9 @@ def update_server_notifications(server_id: str, notifications: dict) -> bool:
 
 # ── Traefik integration ───────────────────────────────────────────────────────
 
-_TRAEFIK_CONFIG_FILE = SERVERS_FILE.parent / "traefik.json"
-_TRAEFIK_DYNAMIC_DIR = SERVERS_FILE.parent / "traefik" / "dynamic"
+_TRAEFIK_CONFIG_FILE  = SERVERS_FILE.parent / "traefik.json"
+_TRAEFIK_COMPOSE_FILE = SERVERS_FILE.parent / "docker-compose.traefik.yml"
+_TRAEFIK_DYNAMIC_DIR  = SERVERS_FILE.parent / "traefik" / "dynamic"
 
 # Translate stored acme.sh-style credential names to Lego/Traefik env names.
 # Mirrors _DNS_ENV_REMAP in lego_provider.py — keep in sync.
@@ -315,13 +316,19 @@ def get_traefik_config() -> dict:
 
 
 def save_traefik_config(cfg: dict) -> None:
-    """Persist Traefik config and rewrite the dynamic routing file."""
+    """Persist Traefik config, rewrite the dynamic routing file, and write the compose overlay."""
     _TRAEFIK_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     # Write dynamic config first: if it fails, traefik.json is unchanged and
     # the two files stay consistent.
     _write_traefik_dynamic(cfg)
     _TRAEFIK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     _TRAEFIK_CONFIG_FILE.chmod(0o600)
+    # Keep the compose overlay in sync — write when enabled, remove when disabled
+    # so the user can run one command without managing a separate file.
+    if cfg.get("enabled") and cfg.get("host"):
+        _TRAEFIK_COMPOSE_FILE.write_text(generate_traefik_compose(cfg), encoding="utf-8")
+    else:
+        _TRAEFIK_COMPOSE_FILE.unlink(missing_ok=True)
 
 
 def _write_traefik_dynamic(cfg: dict) -> None:
@@ -437,11 +444,6 @@ def generate_traefik_compose(cfg: dict) -> str:
         "",
         "volumes:",
         "  traefik_acme:",
-        "    driver: local",
-        "    driver_opts:",
-        "      type: none",
-        "      o: bind",
-        "      device: /opt/traefik-acme",
         "",
     ]
     return "\n".join(lines)
