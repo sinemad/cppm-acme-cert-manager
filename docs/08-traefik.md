@@ -71,11 +71,15 @@ creation. Fill in your hostname, contact email, and challenge type, then
 click **Save**. After running the compose command, follow the link in the UI
 to proceed to admin account creation.
 
+![Traefik first-time setup wizard](screenshots/traefik-setup-wizard.png)
+
 ### After setup
 
 Navigate to **Settings → Traefik** at any time to configure or update the
 integration. The page shows a live status card at the top and a log viewer at
 the bottom for troubleshooting.
+
+![Traefik settings page](screenshots/traefik-settings.png)
 
 ---
 

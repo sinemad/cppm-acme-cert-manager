@@ -825,6 +825,12 @@ def _render_md(text: str) -> str:
         s = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
         # italic (single *)
         s = _re.sub(r"\*(.+?)\*", r"<em>\1</em>", s)
+        # images  ![alt](src)  — must come before link pattern
+        def _img_repl(m):
+            alt  = _re.sub(r'[\x00-\x1f"<>]', "", m.group(1))
+            src  = _re.sub(r'[\x00-\x1f"<>]', "", m.group(2))
+            return f'<img src="{src}" alt="{alt}" style="max-width:100%;border-radius:0.4rem;margin:0.75rem 0;display:block">'
+        s = _re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", _img_repl, s)
         # links  [text](url)
         def _link_repl(m):
             txt = m.group(1)
@@ -3480,6 +3486,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_image(self, path: Path) -> None:
+        ext = path.suffix.lower()
+        mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp"}.get(ext.lstrip("."), "application/octet-stream")
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_json(self, data, status: int = 200) -> None:
         body = json.dumps(data, default=str).encode("utf-8")
         self.send_response(status)
@@ -3564,6 +3582,13 @@ class Handler(BaseHTTPRequestHandler):
         username = self._get_session_user()
         if path == "/help":
             return self._serve_html(_help_index_page(username or ""))
+
+        if path.startswith("/help/screenshots/"):
+            fname = path[len("/help/screenshots/"):].strip("/")
+            img = _DOCS_DIR / "screenshots" / Path(fname).name
+            if img.exists() and img.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                return self._serve_image(img)
+            self._serve_404(); return
 
         if path.startswith("/help/"):
             slug = path[len("/help/"):].strip("/")
