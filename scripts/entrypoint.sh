@@ -237,11 +237,15 @@ if output:
                          | cut -d= -f2 || echo "unknown")
         PRIMARY_SUBJECT=$(openssl x509 -subject -noout -in "$PRIMARY_FLAT" 2>/dev/null \
                           | sed 's/subject=//' || echo "unknown")
-        DAYS_LEFT="unknown"
-        EXPIRY_EPOCH=$(date -d "$PRIMARY_EXPIRY" +%s 2>/dev/null || echo 0)
-        if [[ "$EXPIRY_EPOCH" -gt 0 ]]; then
-            DAYS_LEFT=$(( (EXPIRY_EPOCH - $(date +%s)) / 86400 ))
-        fi
+        DAYS_LEFT=$(python3 -c "
+import sys, datetime, re
+s = re.sub(r'\s+', ' ', sys.argv[1].strip())
+try:
+    d = datetime.datetime.strptime(s, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    print((d - datetime.datetime.now(datetime.timezone.utc)).days)
+except Exception:
+    print('unknown')
+" "$PRIMARY_EXPIRY" 2>/dev/null || echo "unknown")
         log "Cert(s) installed for ${DOMAIN} – no action needed."
         log "  Subject  : $PRIMARY_SUBJECT"
         log "  Expires  : $PRIMARY_EXPIRY ($DAYS_LEFT days remaining)"
