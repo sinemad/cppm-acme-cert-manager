@@ -113,12 +113,22 @@ if output:
     if [[ -n "${CPPM_HOST:-}" ]]; then
         CPPM_PROBE=$(python3 -c "
 import socket, sys
+_DNS_HINTS = ('[Errno -2]', '[Errno -3]', '[Errno 11001]',
+              'Name or service not known', 'nodename nor servname',
+              'getaddrinfo failed', 'Try again',
+              'Temporary failure in name resolution')
 try:
     s = socket.create_connection(('${CPPM_HOST}', 443), timeout=10)
     s.close()
     sys.stdout.write('ok\n')
+except socket.gaierror as e:
+    sys.stdout.write('dns_error: ' + str(e) + '\n')
 except Exception as e:
-    sys.stdout.write('error: ' + str(e) + '\n')
+    msg = str(e)
+    if any(h in msg for h in _DNS_HINTS):
+        sys.stdout.write('dns_error: ' + msg + '\n')
+    else:
+        sys.stdout.write('error: ' + msg + '\n')
 " 2>/dev/null || echo "error: probe failed")
 
         if [[ "$CPPM_PROBE" == "ok" ]]; then
@@ -131,6 +141,26 @@ except Exception as e:
                     --message "ClearPass ${CPPM_HOST} is reachable again after being offline." \
                     2>/dev/null || true
                 rm -f "$CPPM_UNREACHABLE_FLAG"
+            fi
+        elif [[ "$CPPM_PROBE" == dns_error:* ]]; then
+            DNS_ERR="${CPPM_PROBE#dns_error: }"
+            log "  WARNING: Cannot resolve ClearPass hostname '${CPPM_HOST}' (${DNS_ERR})"
+            status_write "WARN" "CPPM" "DNS resolution failed for '${CPPM_HOST}': ${DNS_ERR}"
+            SHOULD_NOTIFY=true
+            if [[ -f "$CPPM_UNREACHABLE_FLAG" ]]; then
+                LAST_NOTIFIED=$(cat "$CPPM_UNREACHABLE_FLAG" 2>/dev/null || echo 0)
+                NOW=$(date +%s)
+                if [[ $(( NOW - LAST_NOTIFIED )) -lt 86400 ]]; then
+                    SHOULD_NOTIFY=false
+                fi
+            fi
+            if [[ "$SHOULD_NOTIFY" == "true" ]]; then
+                python3 /opt/cppm/notify.py \
+                    --server-id "${SERVER_ID}" \
+                    --event upload_failed \
+                    --message "Cannot resolve ClearPass hostname '${CPPM_HOST}' from inside the container (${DNS_ERR}). Certificate uploads will fail until this is resolved. Fix options: (1) Use the server IP address instead of the hostname in settings, (2) Add '--dns <your-dns-server>' to your docker run command, (3) Add 'dns:' under the service in docker-compose.yml." \
+                    2>/dev/null || true
+                date +%s > "$CPPM_UNREACHABLE_FLAG"
             fi
         else
             log "  WARNING: ClearPass ${CPPM_HOST} is unreachable: ${CPPM_PROBE}"

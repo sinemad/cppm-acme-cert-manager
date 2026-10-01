@@ -154,6 +154,104 @@ Fix: in CPPM Admin UI, verify the profile attached to your API client includes:
 
 ---
 
+## Container cannot resolve ClearPass hostname (DNS failure)
+
+**Symptom:** The dashboard CPPM health dot shows red with a message like
+*"Cannot resolve 'cppm.example.com'"*, or the Slack notification says
+*"DNS resolution failed"*. The `acme_renewal.log` or `status.log` contains
+`[Errno -3] Try again` or `Name or service not known`.
+
+**Cause:** The container uses the DNS resolvers listed in the `dns:` block of
+`docker-compose.yml`. By default these are the public resolvers `1.1.1.1` and
+`8.8.8.8`, which cannot resolve internal/private hostnames such as
+`cppm.corp.example.com`.
+
+**Fix — option 1 (recommended): use the IP address**
+
+Set the ClearPass host to the server's IP address in the web UI
+(**Servers → Edit → ClearPass Host**). No Docker changes needed.
+
+**Fix — option 2: add your internal DNS server**
+
+Override the `dns:` setting in `docker-compose.override.yml` to include a
+resolver that can reach your internal zone:
+
+```yaml
+# docker-compose.override.yml
+services:
+  cppm-acme-cert-manager:
+    dns:
+      - 192.168.1.53      # your internal DNS resolver
+      - 1.1.1.1           # public fallback for Let's Encrypt / ACME CA lookups
+```
+
+> **Why both?** The internal resolver handles your ClearPass hostname; the
+> public fallback handles `acme-v02.api.letsencrypt.org` and your DNS provider
+> API (Cloudflare, Route53, etc.). If your internal resolver also forwards
+> public queries you can omit the fallback.
+
+After saving the override file:
+
+```bash
+docker compose down && docker compose up -d
+```
+
+**Fix — option 3: add a static host entry**
+
+If you cannot change DNS, map the hostname directly:
+
+```yaml
+# docker-compose.override.yml
+services:
+  cppm-acme-cert-manager:
+    extra_hosts:
+      - "cppm.example.com:192.168.10.34"
+```
+
+Verify the hostname resolves from inside the container:
+
+```bash
+docker exec cppm-acme-cert-manager python3 -c "import socket; print(socket.gethostbyname('cppm.example.com'))"
+```
+
+---
+
+## Cluster node returns 403 Forbidden
+
+**Symptom:** The dashboard shows a cluster node with error
+*"403 Forbidden — API client is not authorised on this cluster node"*.
+The `status_server.log` contains `403 Client Error: Forbidden for url: https://<node-ip>/api/server-cert`.
+
+**Cause:** In a ClearPass cluster, each node maintains its own API client
+database. The API client created on the publisher may not yet exist (or may not
+have been synced) on subscriber nodes. When the tool tries to query
+`/api/server-cert` on a subscriber using a publisher-issued OAuth token, the
+subscriber rejects it with 403.
+
+**Fix:**
+
+1. Log in to the ClearPass Admin UI at `https://<publisher-ip>/`.
+2. Go to **Administration → API Services → API Clients**.
+3. Confirm your API client exists and has the **Certificate Management**
+   operator profile assigned.
+4. Go to **Administration → Server Manager → Server Configuration** and confirm
+   all cluster nodes are listed as healthy/synchronized.
+5. Wait 2–5 minutes for cluster replication to propagate the client to
+   subscriber nodes, then refresh the dashboard.
+
+If the subscriber node still returns 403 after replication:
+
+- Check that the subscriber node is not in **Standby** mode — standby nodes
+  may not serve the `/api/server-cert` endpoint.
+- Verify the API client operator profile includes read access to
+  **Administration → Server Manager** (needed to enumerate cluster nodes).
+- As a workaround, disable Cluster Mode for this server in the web UI
+  (**Servers → Edit → Cluster Mode**). The tool will continue to renew and
+  upload certificates to the publisher; subscribers sync the certificate
+  automatically via ClearPass cluster replication.
+
+---
+
 ## Trust list upload returns 400 — cert is not a CA certificate
 
 **Cause:** CPPM requires Basic Constraints: CA=TRUE for trust list entries.
