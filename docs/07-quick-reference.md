@@ -44,6 +44,12 @@ Compose service keys, not env vars):
 Use these if your ClearPass Host is an internal hostname — see
 [Troubleshooting → Container cannot resolve ClearPass hostname](05-troubleshooting.md#container-cannot-resolve-clearpass-hostname-dns-failure).
 
+> If you override `dns`, use `dns: !override [...]` and list **both** your
+> internal resolver and a public one (e.g. `1.1.1.1`) — otherwise you either
+> lose Let's Encrypt/DNS-provider lookups or, without `!override`, the
+> defaults silently take priority over your internal resolver. See the
+> troubleshooting link above for why.
+
 ---
 
 ## Daily operations

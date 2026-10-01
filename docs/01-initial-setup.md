@@ -94,13 +94,24 @@ resolvers (`1.1.1.1`, `8.8.8.8`) can't resolve private DNS names:
 ```yaml
 services:
   cppm-acme-cert-manager:
-    dns:
-      - 192.168.1.53      # your internal DNS server
-      - 1.1.1.1           # public fallback for ACME CA / DNS provider API lookups
+    dns: !override
+      - 192.168.1.53      # your internal DNS server — required, resolves cppm.corp.example.com
+      - 1.1.1.1           # public resolver — required too, see note below
     # or, to pin a hostname without touching DNS:
     extra_hosts:
       - "cppm.corp.example.com:192.168.10.34"
 ```
+
+> **You must list both resolvers, not just your internal one.** The
+> `!override` tag makes Compose fully replace the default `dns:` list; without
+> it, Compose *appends* your entry after the defaults instead of replacing
+> them, which puts the public resolvers ahead of yours — and since a resolver
+> stops at the first response it gets (even "no such name"), your internal
+> resolver would never actually be tried. With `!override` in place, dropping
+> the public resolver from the list entirely would break Let's Encrypt / your
+> DNS provider API lookups instead, since nothing else can resolve those
+> public hostnames. Keep both, in this order, unless your internal resolver
+> already forwards public queries itself.
 
 Both options are pre-documented with examples in the override template. See
 [Troubleshooting → Container cannot resolve ClearPass hostname](05-troubleshooting.md#container-cannot-resolve-clearpass-hostname-dns-failure)

@@ -180,15 +180,23 @@ resolver that can reach your internal zone:
 # docker-compose.override.yml
 services:
   cppm-acme-cert-manager:
-    dns:
-      - 192.168.1.53      # your internal DNS resolver
-      - 1.1.1.1           # public fallback for Let's Encrypt / ACME CA lookups
+    dns: !override
+      - 192.168.1.53      # your internal DNS resolver — required
+      - 1.1.1.1           # public resolver — also required, see note below
 ```
 
-> **Why both?** The internal resolver handles your ClearPass hostname; the
-> public fallback handles `acme-v02.api.letsencrypt.org` and your DNS provider
-> API (Cloudflare, Route53, etc.). If your internal resolver also forwards
-> public queries you can omit the fallback.
+> **You must include both entries, not just the internal one.** Compose
+> normally *appends* an override's `dns:` list to the defaults rather than
+> replacing them — the `!override` tag here forces a full replacement. Without
+> `!override`, the default public resolvers (`1.1.1.1`, `8.8.8.8`) would still
+> be tried first, and since a resolver stops at the first answer it gets
+> (even "no such name"), your internal resolver would never actually get
+> queried. With `!override` in place, the two entries now split the work: the
+> internal resolver handles your ClearPass hostname, the public one handles
+> `acme-v02.api.letsencrypt.org` and your DNS provider API (Cloudflare,
+> Route53, etc.) — dropping either one breaks that half of the lookups. Omit
+> the public entry only if your internal resolver already forwards public
+> queries itself.
 
 After saving the override file:
 

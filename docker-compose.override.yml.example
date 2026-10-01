@@ -31,16 +31,28 @@ services:
     # resolution failure, even though ClearPass is reachable on the network.
     #
     # Fix: if your ClearPass Host is set to an internal hostname (not an IP),
-    # uncomment below and add a resolver that can answer for your internal
-    # zone — usually your internal AD/DNS server. Keep a public resolver as a
-    # second entry so Let's Encrypt / DNS provider lookups keep working too
-    # (omit it if your internal resolver already forwards public queries).
+    # uncomment below and list the resolver(s) the container should use.
+    #
+    # !! IMPORTANT — this list REPLACES the default, it does not add to it !!
+    # The "!override" tag below makes Compose fully replace the dns: list
+    # instead of appending to the one in docker-compose.yml. Without it,
+    # Compose CONCATENATES your entries after the defaults (1.1.1.1, 8.8.8.8
+    # would still come first) — and DNS resolvers stop at the first response
+    # they get, including "no such name", so the public resolvers would
+    # answer (and fail) before your internal resolver is ever tried. That
+    # silently breaks the exact problem this setting exists to fix.
+    #
+    # Because of this, you must list BOTH:
+    #   - your internal resolver (so the ClearPass hostname resolves), AND
+    #   - a public resolver (so Let's Encrypt / your DNS provider API still
+    #     resolve) — omit only if your internal resolver already forwards
+    #     public queries itself.
     #
     # Default: 1.1.1.1, 8.8.8.8 (set in docker-compose.yml)
     #
-    # dns:
+    # dns: !override
     #   - 192.168.1.53      # your internal DNS server (resolves cppm.corp.example.com)
-    #   - 1.1.1.1           # public fallback for ACME CA / DNS provider API lookups
+    #   - 1.1.1.1           # public resolver for ACME CA / DNS provider API lookups — required, not optional, unless 192.168.1.53 already forwards public queries
 
     # ── Static host entries (extra_hosts) ───────────────────────────────────
     # Pins a hostname to a specific IP inside the container's /etc/hosts,
