@@ -216,6 +216,70 @@ docker exec cppm-acme-cert-manager python3 -c "import socket; print(socket.getho
 
 ---
 
+## Outbound DNS (port 53) blocked by a firewall — common in DMZ deployments
+
+**Symptom:** Same as the DNS failure above (`Cannot resolve '<host>'`), but the
+dashboard/Slack message specifically says *"outbound DNS (port 53) appears
+blocked"* and lists the nameservers it tried. This is distinct from the
+previous case: there the resolver answered but didn't know the hostname; here
+the resolver was **never reached at all**.
+
+**Cause:** Containers run in a DMZ or other restricted network segment often
+have egress firewall rules that only permit specific ports (e.g. 443). If
+outbound UDP/TCP port 53 is blocked, **no DNS resolver configuration can fix
+this** — the health check detects it by attempting a raw TCP connection to
+each configured nameserver on port 53 and finding every attempt times out
+(rather than failing fast with "connection refused" or a quick answer), which
+is the signature of a firewall silently dropping the packets.
+
+> **Important:** this doesn't only affect ClearPass hostname resolution. If
+> port 53 is blocked, the ACME CA (`acme-v02.api.letsencrypt.org`) and your
+> DNS provider's API (Cloudflare, Route53, etc.) will also fail to resolve,
+> breaking certificate issuance and renewal entirely — not just the upload
+> step.
+
+**Fix — option 1 (required for full functionality): open port 53 outbound**
+
+Ask your network/firewall team to permit outbound UDP and TCP port 53 from
+the Docker host (or the container's network) to your DNS resolver. This is
+the only fix that restores DNS-01 issuance/renewal, since those steps always
+need to resolve the ACME CA and DNS provider API over DNS.
+
+**Fix — option 2 (partial workaround): bypass DNS for the ClearPass hostname only**
+
+If opening port 53 isn't possible and you only need ClearPass connectivity to
+work (DNS-01 challenges are already succeeding some other way, or you're
+troubleshooting upload specifically), pin the hostname with `extra_hosts`:
+
+```yaml
+# docker-compose.override.yml
+services:
+  cppm-acme-cert-manager:
+    extra_hosts:
+      - "cppm.example.com:192.168.10.34"
+```
+
+This does **not** fix ACME CA or DNS provider lookups — use option 1 for that.
+
+**Verify port 53 reachability manually:**
+
+```bash
+docker exec cppm-acme-cert-manager python3 -c "
+import socket
+for ip in ('1.1.1.1', '8.8.8.8'):   # replace with your configured resolvers
+    try:
+        socket.create_connection((ip, 53), timeout=2).close()
+        print(ip, 'reachable')
+    except Exception as e:
+        print(ip, 'blocked:', e)
+"
+```
+
+A `timed out` result (as opposed to an immediate `refused` or success) points
+to a firewall silently dropping the traffic.
+
+---
+
 ## Cluster node returns 403 Forbidden
 
 **Symptom:** The dashboard shows a cluster node with error

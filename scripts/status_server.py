@@ -20,6 +20,7 @@ import datetime
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -657,11 +658,69 @@ _DNS_ERROR_HINTS = (
 )
 
 
+def _probe_dns_port53(timeout: float = 2.0) -> dict:
+    """Check whether the container's configured DNS resolvers are reachable on port 53.
+
+    A resolution failure can mean either "the resolver answered but doesn't know this
+    name" or "the resolver was never reached at all" — the latter is the signature of
+    a firewall silently dropping outbound DNS, common when the container runs in a
+    DMZ/restricted network segment. A TCP connect timeout to every configured
+    nameserver (as opposed to a quick refusal or success) is the distinguishing signal.
+    """
+    nameservers = []
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    nameservers.append(parts[1])
+    except OSError:
+        pass
+    if not nameservers:
+        return {"blocked": False, "nameservers": [], "detail": ""}
+
+    results = []
+    for ip in nameservers:
+        try:
+            s = socket.create_connection((ip, 53), timeout=timeout)
+            s.close()
+            results.append((ip, "reachable"))
+        except socket.timeout:
+            results.append((ip, "timed out"))
+        except OSError as exc:
+            results.append((ip, str(exc)))
+
+    all_timed_out = all(status == "timed out" for _, status in results)
+    return {
+        "blocked": all_timed_out,
+        "nameservers": nameservers,
+        "detail": ", ".join(f"{ip} ({status})" for ip, status in results),
+    }
+
+
 def _classify_conn_error(exc, host: str) -> dict:
     """Classify a connection-level exception into a status dict with an actionable message."""
     msg = str(exc)
     n   = type(exc).__name__
     if any(tag in msg for tag in _DNS_ERROR_HINTS) or "gaierror" in n.lower():
+        port53 = _probe_dns_port53()
+        if port53["blocked"]:
+            return {
+                "status": "error",
+                "message": (
+                    f"Cannot resolve '{host}' — and outbound DNS (port 53) to "
+                    f"{', '.join(port53['nameservers'])} appears blocked (connection "
+                    "attempts timed out rather than failing fast). This is common when "
+                    "the container runs in a DMZ or otherwise restricted network segment. "
+                    "Because DNS is blocked entirely, no resolver configuration will fix "
+                    "this — the ACME CA and DNS-provider API lookups will fail too, not "
+                    "just ClearPass. Fix options: (1) ask your network/firewall team to "
+                    "permit outbound UDP/TCP port 53 from this host to your DNS resolver, "
+                    "(2) if only the ClearPass hostname needs to work and the rest of the "
+                    "pipeline already does, pin it with extra_hosts in "
+                    "docker-compose.override.yml to bypass DNS for that name only."
+                ),
+            }
         return {
             "status": "error",
             "message": (

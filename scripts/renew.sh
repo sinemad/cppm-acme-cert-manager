@@ -117,16 +117,52 @@ _DNS_HINTS = ('[Errno -2]', '[Errno -3]', '[Errno 11001]',
               'Name or service not known', 'nodename nor servname',
               'getaddrinfo failed', 'Try again',
               'Temporary failure in name resolution')
+
+def port53_blocked():
+    # Distinguishes 'resolver answered but doesn't know this name' from 'the
+    # resolver was never reached' — the latter (every nameserver times out on
+    # port 53 rather than failing fast) is the signature of a firewall
+    # silently dropping outbound DNS, common in a DMZ/restricted segment.
+    nameservers = []
+    try:
+        with open('/etc/resolv.conf') as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == 'nameserver':
+                    nameservers.append(parts[1])
+    except OSError:
+        return False, []
+    if not nameservers:
+        return False, []
+    for ip in nameservers:
+        try:
+            s = socket.create_connection((ip, 53), timeout=2)
+            s.close()
+            return False, nameservers
+        except socket.timeout:
+            continue
+        except OSError:
+            return False, nameservers
+    return True, nameservers
+
 try:
     s = socket.create_connection(('${CPPM_HOST}', 443), timeout=10)
     s.close()
     sys.stdout.write('ok\n')
 except socket.gaierror as e:
-    sys.stdout.write('dns_error: ' + str(e) + '\n')
+    blocked, ns = port53_blocked()
+    if blocked:
+        sys.stdout.write('dns_error_blocked53: ' + str(e) + ' (nameservers: ' + ', '.join(ns) + ')\n')
+    else:
+        sys.stdout.write('dns_error: ' + str(e) + '\n')
 except Exception as e:
     msg = str(e)
     if any(h in msg for h in _DNS_HINTS):
-        sys.stdout.write('dns_error: ' + msg + '\n')
+        blocked, ns = port53_blocked()
+        if blocked:
+            sys.stdout.write('dns_error_blocked53: ' + msg + ' (nameservers: ' + ', '.join(ns) + ')\n')
+        else:
+            sys.stdout.write('dns_error: ' + msg + '\n')
     else:
         sys.stdout.write('error: ' + msg + '\n')
 " 2>/dev/null || echo "error: probe failed")
@@ -141,6 +177,26 @@ except Exception as e:
                     --message "ClearPass ${CPPM_HOST} is reachable again after being offline." \
                     2>/dev/null || true
                 rm -f "$CPPM_UNREACHABLE_FLAG"
+            fi
+        elif [[ "$CPPM_PROBE" == dns_error_blocked53:* ]]; then
+            DNS_ERR="${CPPM_PROBE#dns_error_blocked53: }"
+            log "  WARNING: Cannot resolve ClearPass hostname '${CPPM_HOST}' — outbound DNS (port 53) appears blocked (${DNS_ERR})"
+            status_write "WARN" "CPPM" "DNS resolution failed for '${CPPM_HOST}' — outbound port 53 appears blocked: ${DNS_ERR}"
+            SHOULD_NOTIFY=true
+            if [[ -f "$CPPM_UNREACHABLE_FLAG" ]]; then
+                LAST_NOTIFIED=$(cat "$CPPM_UNREACHABLE_FLAG" 2>/dev/null || echo 0)
+                NOW=$(date +%s)
+                if [[ $(( NOW - LAST_NOTIFIED )) -lt 86400 ]]; then
+                    SHOULD_NOTIFY=false
+                fi
+            fi
+            if [[ "$SHOULD_NOTIFY" == "true" ]]; then
+                python3 /opt/cppm/notify.py \
+                    --server-id "${SERVER_ID}" \
+                    --event upload_failed \
+                    --message "Cannot resolve ClearPass hostname '${CPPM_HOST}' — outbound DNS (port 53) appears blocked from inside this container (${DNS_ERR}). This looks like a DMZ/firewall restriction rather than a misconfigured resolver: the ACME CA and DNS-provider API lookups will fail too, not just ClearPass. Fix options: (1) ask your network/firewall team to permit outbound UDP/TCP port 53 from this host to your DNS resolver, (2) if only the ClearPass hostname needs to resolve, pin it with 'extra_hosts' in docker-compose.override.yml to bypass DNS for that name only." \
+                    2>/dev/null || true
+                date +%s > "$CPPM_UNREACHABLE_FLAG"
             fi
         elif [[ "$CPPM_PROBE" == dns_error:* ]]; then
             DNS_ERR="${CPPM_PROBE#dns_error: }"
