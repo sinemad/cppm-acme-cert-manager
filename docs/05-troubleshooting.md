@@ -306,10 +306,23 @@ subscriber rejects it with 403.
 2. Go to **Administration → API Services → API Clients**.
 3. Confirm your API client exists and has the **Certificate Management**
    operator profile assigned.
-4. Go to **Administration → Server Manager → Server Configuration** and confirm
-   all cluster nodes are listed as healthy/synchronized.
-5. Wait 2–5 minutes for cluster replication to propagate the client to
-   subscriber nodes, then refresh the dashboard.
+4. Go to **Administration → Server Manager → Server Configuration** and check
+   the **Cluster Sync** status for the subscriber node — this is where
+   ClearPass reports whether that node is currently up to date with the
+   publisher, rather than guessing from the outside.
+5. If the node shows as synchronized there but the dashboard still shows 403,
+   refresh the dashboard — this tool's own cluster-status cache can lag up to
+   2 minutes behind ClearPass's actual state (see `_CLUSTER_TTL` in
+   `status_server.py`).
+6. If the node shows as **not yet synchronized**, give it time rather than
+   intervening: ClearPass replicates configuration changes (including new API
+   clients) on a batch interval — 5 seconds by default, configurable up to 60
+   seconds under **Administration → Server Manager → Server Configuration →
+   Cluster-Wide Parameters**. In practice, allow a few minutes end-to-end on
+   top of that interval, since propagation across a larger cluster or a
+   WAN-linked subscriber can take longer than the raw interval suggests.
+   Re-check the Cluster Sync status on that page rather than timing it
+   yourself — it will tell you definitively once the node has caught up.
 
 If the subscriber node still returns 403 after replication:
 
