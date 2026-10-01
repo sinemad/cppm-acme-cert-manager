@@ -71,6 +71,25 @@ Two certificates are issued and maintained simultaneously:
 
 ---
 
+## Documentation
+
+This README covers everything needed to get started. For deeper detail on any
+topic, see the full guides in [`docs/`](docs/) — viewable directly on GitHub,
+no clone or install required:
+
+| Guide | Covers |
+|---|---|
+| [Initial Setup](docs/01-initial-setup.md) | Step-by-step host setup, API client creation, DNS provider credentials, first-run walkthrough |
+| [How It Works](docs/02-how-it-works.md) | Architecture, issuance/renewal flow, trust list handling |
+| [Monitoring](docs/03-monitoring.md) | Web dashboard, status log format, notifications (Slack) |
+| [Maintenance](docs/04-maintenance.md) | Rebuilding, updating credentials, manual re-upload/re-issue, user management |
+| [Troubleshooting](docs/05-troubleshooting.md) | Common failures and fixes, including DNS resolution and cluster node errors |
+| [Script Reference](docs/06-script-reference.md) | Every script's purpose, inputs, and outputs |
+| [Quick Reference](docs/07-quick-reference.md) | Copy-pasteable commands for day-to-day operations |
+| [Traefik](docs/08-traefik.md) | Running behind a Traefik reverse proxy with HTTPS |
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -1050,6 +1069,10 @@ recreate the container, then reset to `"false"`).
 
 Switch back to **Let's Encrypt** in the server edit form and wait 7 days before
 re-issuing production certs.
+
+> **More information:** see the full [Troubleshooting guide](docs/05-troubleshooting.md)
+> for additional issues not covered above, including container DNS resolution
+> failures and ClearPass cluster node 403 errors.
 
 ---
 

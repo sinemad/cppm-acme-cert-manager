@@ -33,6 +33,17 @@ Container-level behaviour only. All server-specific settings live in
 > Changing `STATUS_PORT` or `CPPM_CALLBACK_PORT` requires updating both the
 > `environment` section and the `ports` section in the override file.
 
+Two more override keys live outside `environment` (they're top-level Docker
+Compose service keys, not env vars):
+
+| Key | Purpose | Default |
+|---|---|---|
+| `dns` | Resolver(s) the container uses for hostname lookups | `1.1.1.1`, `8.8.8.8` |
+| `extra_hosts` | Static hostname → IP pins (bypasses DNS for that name) | none |
+
+Use these if your ClearPass Host is an internal hostname — see
+[Troubleshooting → Container cannot resolve ClearPass hostname](05-troubleshooting.md#container-cannot-resolve-clearpass-hostname-dns-failure).
+
 ---
 
 ## Daily operations

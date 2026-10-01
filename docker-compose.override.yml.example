@@ -18,6 +18,54 @@
 services:
   cppm-acme-cert-manager:
 
+    # ── DNS resolvers ────────────────────────────────────────────────────────
+    # Controls which DNS server(s) the container uses to resolve hostnames.
+    #
+    # The default in docker-compose.yml points at public resolvers (1.1.1.1,
+    # 8.8.8.8). Those work great for Let's Encrypt / your ACME CA and for
+    # public DNS-provider APIs (Cloudflare, Route53, etc.), but they CANNOT
+    # resolve a private/internal hostname like "cppm.corp.example.com".
+    #
+    # Symptom this fixes: the dashboard's CPPM health check shows
+    # "Cannot resolve '<host>'" or Slack notifications report a DNS
+    # resolution failure, even though ClearPass is reachable on the network.
+    #
+    # Fix: if your ClearPass Host is set to an internal hostname (not an IP),
+    # uncomment below and add a resolver that can answer for your internal
+    # zone — usually your internal AD/DNS server. Keep a public resolver as a
+    # second entry so Let's Encrypt / DNS provider lookups keep working too
+    # (omit it if your internal resolver already forwards public queries).
+    #
+    # Default: 1.1.1.1, 8.8.8.8 (set in docker-compose.yml)
+    #
+    # dns:
+    #   - 192.168.1.53      # your internal DNS server (resolves cppm.corp.example.com)
+    #   - 1.1.1.1           # public fallback for ACME CA / DNS provider API lookups
+
+    # ── Static host entries (extra_hosts) ───────────────────────────────────
+    # Pins a hostname to a specific IP inside the container's /etc/hosts,
+    # bypassing DNS entirely for that name. Use this instead of (or alongside)
+    # the dns: block above when:
+    #   - you don't control / can't change the internal DNS server, or
+    #   - the ClearPass hostname is only resolvable from certain networks, or
+    #   - you want certainty that this one name never depends on DNS being up.
+    #
+    # Add one entry per hostname your ClearPass server(s) use. This must match
+    # exactly what you entered as "ClearPass Host" in the web UI (Servers →
+    # Edit). For a cluster, add an entry for every node hostname too — the
+    # cluster health check resolves each node independently.
+    #
+    # Default: none (not set in docker-compose.yml)
+    #
+    # extra_hosts:
+    #   - "cppm.corp.example.com:192.168.10.34"
+    #   - "cppm-node2.corp.example.com:192.168.10.24"
+    #
+    # Verify it took effect after recreating the container:
+    #   docker exec cppm-acme-cert-manager getent hosts cppm.corp.example.com
+    #   docker exec cppm-acme-cert-manager python3 -c \
+    #     "import socket; print(socket.gethostbyname('cppm.corp.example.com'))"
+
     environment:
 
       # ── Timezone ─────────────────────────────────────────────────────────────

@@ -78,9 +78,33 @@ Optional flags (uncomment to enable):
 > container) and the `ports` section (tells Docker which host port to forward).
 > The override template includes a step-by-step checklist for port changes.
 
-> **What docker-compose.override.yml does NOT configure:** DNS provider
-> credentials, ClearPass host/credentials, domain, ACME email, and ACME server
-> are all managed through the web UI and stored in `/opt/cppm-certs/servers.json`.
+> **What docker-compose.override.yml does NOT configure:** DNS *provider*
+> credentials (Cloudflare, Route53, etc. — used for ACME DNS-01 challenges),
+> ClearPass host/credentials, domain, ACME email, and ACME server are all
+> managed through the web UI and stored in `/opt/cppm-certs/servers.json`.
+
+### Container DNS resolution (optional)
+
+Separate from the DNS *provider* credentials above, the override file also
+controls which DNS resolver(s) the **container itself** uses to look up
+hostnames — this matters if your ClearPass Host is an internal hostname
+(e.g. `cppm.corp.example.com`) rather than an IP address, since the default
+resolvers (`1.1.1.1`, `8.8.8.8`) can't resolve private DNS names:
+
+```yaml
+services:
+  cppm-acme-cert-manager:
+    dns:
+      - 192.168.1.53      # your internal DNS server
+      - 1.1.1.1           # public fallback for ACME CA / DNS provider API lookups
+    # or, to pin a hostname without touching DNS:
+    extra_hosts:
+      - "cppm.corp.example.com:192.168.10.34"
+```
+
+Both options are pre-documented with examples in the override template. See
+[Troubleshooting → Container cannot resolve ClearPass hostname](05-troubleshooting.md#container-cannot-resolve-clearpass-hostname-dns-failure)
+if you're already seeing this failure.
 
 ---
 

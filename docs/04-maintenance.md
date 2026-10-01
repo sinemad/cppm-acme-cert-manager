@@ -40,8 +40,9 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 ## Updating docker-compose.override.yml settings
 
 `docker-compose.override.yml` controls container-level behaviour — ports,
-timezone, and operational flags. If you change `STATUS_PORT`,
-`CPPM_CALLBACK_PORT`, or `TZ`, recreate the container to pick up the changes:
+timezone, operational flags, and container DNS (`dns:` / `extra_hosts:`). If
+you change `STATUS_PORT`, `CPPM_CALLBACK_PORT`, `TZ`, `dns`, or `extra_hosts`,
+recreate the container to pick up the changes:
 
 ```bash
 docker compose up -d --force-recreate
