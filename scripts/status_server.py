@@ -1326,6 +1326,7 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_cert_passphrase": f.get("cppm_cert_passphrase", ""),
         "cppm_callback_host":   f.get("cppm_callback_host", "").strip(),
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
+        "cluster_sync_delay_seconds": f.get("cluster_sync_delay_seconds", "0").strip() or "0",
         "domain":               f.get("domain", "").strip(),
         "san_dns":              [name for name in san_dns if name],
         "acme_email":           f.get("acme_email", "").strip(),
@@ -1351,6 +1352,7 @@ def _default_server_from_env() -> dict:
         "cppm_cert_passphrase": "",
         "cppm_callback_host":   "",
         "cppm_callback_port":   "8765",
+        "cluster_sync_delay_seconds": "0",
         "domain":               "",
         "san_dns":              [],
         "acme_email":           "",
@@ -2925,6 +2927,12 @@ def _settings_form_page(server: dict = None, error: str = "",
             <span id="cluster-check-spinner" style="display:none;font-size:0.78rem;color:var(--muted)">Checking…</span>
           </div>
           <div id="cluster-check-results" style="display:none;margin-top:0.75rem"></div>
+          <div id="cluster-sync-delay-field" style="display:{('block' if s.get('cppm_cluster_mode') else 'none')};margin-top:0.75rem">
+            <label>Cluster Sync Delay (seconds) <span class="hint">(pause before uploading to each node)</span>{_help_toggle('cluster_sync_delay', 'On slower clusters, a node can reject the API call made right after authenticating because the publisher&rsquo;s database sync to that node hasn&rsquo;t caught up yet. If uploads to cluster nodes fail with 403 Forbidden despite a valid token, try increasing this.')}</label>
+            <input type="number" name="cluster_sync_delay_seconds"
+                   value="{fv('cluster_sync_delay_seconds', '0')}"
+                   min="0" style="max-width:8em">
+          </div>
         </div>
         <div class="field">
           <label>Client ID</label>
@@ -3328,6 +3336,7 @@ function applyCertProfile(value) {
 })();
 function onClusterModeChange(cb) {
   document.getElementById('cluster-check-bar').style.display = cb.checked ? 'flex' : 'none';
+  document.getElementById('cluster-sync-delay-field').style.display = cb.checked ? 'block' : 'none';
   if (!cb.checked) {
     document.getElementById('cluster-check-results').style.display = 'none';
     document.getElementById('cluster-check-results').innerHTML = '';

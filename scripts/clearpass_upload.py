@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -1349,6 +1350,19 @@ def main() -> int:
         return 1
     log.info("Authenticated. expires_in=%ss",
              _resp.json().get("expires_in", "?"))
+
+    # On slower clusters, the publisher's database sync to this subscriber node
+    # can lag behind token issuance — the very next API call using this token
+    # gets rejected (403, no resolved identity) because the node hasn't yet
+    # replicated the client/session record. Only applies to cluster-node
+    # subprocesses (CPPM_CLUSTER_NODE_FQDN set); the discovery call against the
+    # primary/publisher host is unaffected.
+    if cluster_node_fqdn:
+        sync_delay = int(os.environ.get("CPPM_CLUSTER_SYNC_DELAY_SECONDS", "0") or 0)
+        if sync_delay > 0:
+            log.info("Cluster sync delay: waiting %ds for %s before first API call",
+                      sync_delay, cluster_node_fqdn)
+            time.sleep(sync_delay)
 
     # ── Initialise pyclearpass SDK with the pre-fetched token ────────────────
     sdk_args = dict(
