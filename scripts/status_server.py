@@ -2761,7 +2761,7 @@ def _settings_list_page(servers: list, username: str,
             )
             rows += (
                 f'<tr>'
-                f'<td><strong>{label}</strong></td>'
+                f'<td style="white-space:nowrap"><strong>{label}</strong></td>'
                 f'<td style="font-family:monospace;font-size:0.78rem">{host}</td>'
                 f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
                 f'<td>{prov}</td>'
@@ -2814,10 +2814,10 @@ document.addEventListener('click', function(ev) {
     <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force ClearPass Upload</strong>
     are manual overrides — only use them when troubleshooting a failed renewal or upload.
   </p>
-  <div class="card">
-    <table class="settings-table">
+  <div class="card" style="overflow-x:auto">
+    <table class="settings-table" style="min-width:52rem">
       <thead><tr>
-        <th>Label</th><th>ClearPass Host</th><th>Domain</th><th>DNS Provider</th><th></th>
+        <th style="white-space:nowrap">Label</th><th>ClearPass Host</th><th>Domain</th><th>DNS Provider</th><th></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
