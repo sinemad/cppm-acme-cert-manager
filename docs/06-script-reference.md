@@ -239,6 +239,7 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 | `POST /settings/delete` | Yes | Delete server |
 | `POST /settings/run/<id>` | Yes | Force full cert re-issue (Issue Cert Now); redirects to `/server/<id>` |
 | `POST /settings/upload/<id>` | Yes | Re-upload existing certs to ClearPass (Upload to ClearPass); redirects to `/server/<id>` |
+| `POST /settings/run/<id>`, `POST /settings/upload/<id>` with form field `debug=1` | Yes | Same as above, but sets `LOG_LEVEL=DEBUG` for just that one subprocess run (one-shot, not persisted) |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |
@@ -491,6 +492,13 @@ are defined in `docker-compose.yml`; override only what you need to change.
 | `FORCE_RENEW` | `false` | Force certificate re-issuance on the next container start |
 | `SKIP_UPLOAD` | `false` | Issue/renew certificates without uploading to ClearPass |
 | `LOG_LEVEL` | `INFO` | Python log level for `clearpass_upload.py` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+> For a single troubleshooting run instead of a persistent container-wide
+> change, use the **Debug** checkbox next to **Issue Cert Now** / **Upload to
+> ClearPass** on the Servers page (`/settings`) — it sets `LOG_LEVEL=DEBUG`
+> for just that one triggered run (and every cluster node it uploads to)
+> without editing `docker-compose.override.yml` or restarting the container.
+> See [Debug checkbox](03-monitoring.md#server-list-actions).
 
 ### Set per server in `servers.json` — managed via web UI or CLI
 

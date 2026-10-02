@@ -1187,8 +1187,12 @@ def _check_expiry_warnings() -> None:
 
 _ISSUE_SCRIPT = Path("/opt/cppm/issue_cert.sh")
 
-def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
-    """Issue one shared profile, then upload it to every associated target."""
+def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = False) -> None:
+    """Issue one shared profile, then upload it to every associated target.
+
+    `debug` enables verbose (DEBUG) logging for this single run only — it is
+    never persisted, so it has no effect on scheduled/automatic runs.
+    """
     def _run():
         if not _ISSUE_SCRIPT.exists():
             _log.warning("cert pipeline: %s not found (not in container?)", _ISSUE_SCRIPT)
@@ -1203,7 +1207,9 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
             "FORCE_RENEW": "true" if force else "false",
             "SKIP_UPLOAD": "true",
         }
-        _log.info("cert pipeline: starting for %s (force=%s)", server_id, force)
+        if debug:
+            env["LOG_LEVEL"] = "DEBUG"
+        _log.info("cert pipeline: starting for %s (force=%s, debug=%s)", server_id, force, debug)
         try:
             rc = subprocess.run([str(_ISSUE_SCRIPT)], env=env, check=False).returncode
             _log.info("cert pipeline: finished for %s (rc=%d)", server_id, rc)
@@ -1214,6 +1220,8 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False) -> None:
                         continue
                     Path(member_env["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
                     upload_env = {**os.environ, **member_env}
+                    if debug:
+                        upload_env["LOG_LEVEL"] = "DEBUG"
                     _log.info(
                         "cert pipeline: uploading shared profile %s to %s",
                         env_dict["CERTIFICATE_ID"], member.get("cppm_host", member.get("id")),
@@ -1242,8 +1250,12 @@ def _status_write(status_log: str, level: str, category: str, message: str) -> N
         _log.warning("status_write failed: %s", exc)
 
 
-def _spawn_upload_pipeline(server_id: str) -> None:
-    """Run deploy_hook.sh for server_id in a background daemon thread."""
+def _spawn_upload_pipeline(server_id: str, debug: bool = False) -> None:
+    """Run deploy_hook.sh for server_id in a background daemon thread.
+
+    `debug` enables verbose (DEBUG) logging for this single run only — it is
+    never persisted, so it has no effect on scheduled/automatic uploads.
+    """
     def _run():
         if not _DEPLOY_SCRIPT.exists():
             _log.warning("upload pipeline: %s not found (not in container?)", _DEPLOY_SCRIPT)
@@ -1264,7 +1276,9 @@ def _spawn_upload_pipeline(server_id: str) -> None:
 
         try:
             env = {**os.environ, **env_dict}
-            _log.info("upload pipeline: starting for %s", server_id)
+            if debug:
+                env["LOG_LEVEL"] = "DEBUG"
+            _log.info("upload pipeline: starting for %s (debug=%s)", server_id, debug)
             rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
             _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
         except Exception as exc:
@@ -2695,6 +2709,9 @@ def _settings_list_page(servers: list, username: str,
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
                 f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
+                f'<label style="font-size:0.72rem;font-weight:normal;margin-right:0.3rem;white-space:nowrap"'
+                f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
+                f'<input type="checkbox" name="debug" value="1" style="vertical-align:middle"> Debug</label>'
                 f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
                 f'</form>'
             )
@@ -2705,6 +2722,9 @@ def _settings_list_page(servers: list, username: str,
                 f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
+                f'<label style="font-size:0.72rem;font-weight:normal;margin-right:0.3rem;white-space:nowrap"'
+                f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
+                f'<input type="checkbox" name="debug" value="1" style="vertical-align:middle"> Debug</label>'
                 f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
                 f'</form>'
             )
@@ -5004,10 +5024,13 @@ class Handler(BaseHTTPRequestHandler):
         srv = get_server(server_id)
         if srv is None:
             return self._redirect("/settings?ft=err&fm=Server+not+found")
-        _log.info("settings: '%s' triggered cert pipeline for '%s'", username, srv.get("label"))
-        _spawn_cert_pipeline(server_id, force=True)
+        debug = self._parse_form().get("debug") == "1"
+        _log.info("settings: '%s' triggered cert pipeline for '%s' (debug=%s)",
+                   username, srv.get("label"), debug)
+        _spawn_cert_pipeline(server_id, force=True, debug=debug)
+        suffix = "+%28verbose+logging+enabled%29" if debug else ""
         self._redirect(
-            f"/server/{server_id}?ft=ok&fm=Certificate+pipeline+started."
+            f"/server/{server_id}?ft=ok&fm=Certificate+pipeline+started{suffix}."
             f"+Results+will+appear+in+the+Activity+Log+below."
         )
 
@@ -5018,10 +5041,13 @@ class Handler(BaseHTTPRequestHandler):
         srv = get_server(server_id)
         if srv is None:
             return self._redirect("/settings?ft=err&fm=Server+not+found")
-        _log.info("settings: '%s' triggered upload pipeline for '%s'", username, srv.get("label"))
-        _spawn_upload_pipeline(server_id)
+        debug = self._parse_form().get("debug") == "1"
+        _log.info("settings: '%s' triggered upload pipeline for '%s' (debug=%s)",
+                   username, srv.get("label"), debug)
+        _spawn_upload_pipeline(server_id, debug=debug)
+        suffix = "+%28verbose+logging+enabled%29" if debug else ""
         self._redirect(
-            f"/server/{server_id}?ft=ok&fm=Upload+pipeline+started."
+            f"/server/{server_id}?ft=ok&fm=Upload+pipeline+started{suffix}."
             f"+Results+will+appear+in+the+Activity+Log+below."
         )
 

@@ -357,6 +357,14 @@ Server Configuration → `<node>` → General** and set a full FQDN for the node
 (not just a short hostname). This removes the ambiguity the fallback is
 compensating for and is the more reliable fix.
 
+**To confirm a fix worked:** after making any of the changes above, check the
+**Debug** checkbox next to **Upload to ClearPass** on the Servers page
+(`/settings`) and click it. This sets `LOG_LEVEL=DEBUG` for that one run only
+and logs the full per-node request/response detail — including the exact
+`Host` header and HTTP status for each cluster node — to the **ClearPass
+Upload** log tab (and the downloaded log bundle). See
+[Debug checkbox](03-monitoring.md#server-list-actions) for details.
+
 ---
 
 ## Trust list upload returns 400 — cert is not a CA certificate

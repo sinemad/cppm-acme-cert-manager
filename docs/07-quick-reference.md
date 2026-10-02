@@ -33,6 +33,12 @@ Container-level behaviour only. All server-specific settings live in
 > Changing `STATUS_PORT` or `CPPM_CALLBACK_PORT` requires updating both the
 > `environment` section and the `ports` section in the override file.
 
+> For one-off troubleshooting (e.g. a cluster node 403), check the **Debug**
+> checkbox next to **Issue Cert Now** / **Upload to ClearPass** on the
+> Servers page instead of setting `LOG_LEVEL` here — it enables verbose
+> logging for just that single run, no restart required. See
+> [Debug checkbox](03-monitoring.md#server-list-actions).
+
 Two more override keys live outside `environment` (they're top-level Docker
 Compose service keys, not env vars):
 

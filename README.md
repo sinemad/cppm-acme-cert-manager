@@ -942,6 +942,13 @@ on the server row. No new cert is issued and the ACME CA is not contacted.
 docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
 ```
 
+> **Troubleshooting a single run?** Check the **Debug** checkbox next to
+> **Issue Cert Now** / **Upload to ClearPass** before clicking — it turns on
+> verbose logging for just that one run (including every cluster node it
+> uploads to) without touching `LOG_LEVEL` in `docker-compose.override.yml` or
+> restarting the container. See
+> [Debug checkbox](docs/03-monitoring.md#server-list-actions).
+
 ### Switch DNS provider or ACME server
 
 Update the server entry in the web UI — no container restart needed:

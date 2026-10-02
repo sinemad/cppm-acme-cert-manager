@@ -235,6 +235,20 @@ Each server row shows four action buttons:
 
 > Only one upload pipeline can run at a time. If a second upload is triggered while one is already in progress (e.g. a scheduled renewal happened to be uploading), the second request is queued and a WARN entry appears in the Activity Log.
 
+**Debug checkbox** — both **Issue Cert Now** and **Upload to ClearPass** have
+a **Debug** checkbox next to the button. Checking it before clicking sets
+`LOG_LEVEL=DEBUG` for that one triggered run only — it is never saved or
+persisted, has no effect on scheduled/automatic renewals or uploads, and
+reverts to normal (`INFO`) logging the moment the run finishes. Use it when
+you need to see exactly what's happening on the wire — for example to see the
+full request/response body behind a ClearPass 403 after making a change you
+believe fixed it. The extra detail lands in the **ClearPass Upload** log tab
+(and in the downloaded log bundle — see
+[Downloading logs for support](#downloading-logs-for-support) above). In
+cluster mode, the flag propagates to every cluster node's upload subprocess,
+so one checked run captures debug detail for all nodes at once — see
+[Cluster node returns 403 Forbidden](05-troubleshooting.md#cluster-node-returns-403-forbidden).
+
 ### Adding a server
 
 Click **+ Add Server** and fill in all fields.
