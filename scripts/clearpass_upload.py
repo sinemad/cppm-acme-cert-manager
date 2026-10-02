@@ -1110,8 +1110,9 @@ def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[dict
     return nodes
 
 
-def _install_cluster_host_header(fqdn: str) -> None:
-    """Force a matching Host header on every outbound HTTPS request in this process.
+def _install_cluster_host_header(fqdn: str, sync_retry_budget: int = 0) -> None:
+    """Force a matching Host header on every outbound HTTPS request in this process,
+    and retry on 403 while a slow cluster catches up on config replication.
 
     In cluster mode each node is reached by IP (CPPM_HOST=<ip>), and both our
     own OAuth call and the pyclearpass SDK's internal requests.* calls would
@@ -1123,6 +1124,13 @@ def _install_cluster_host_header(fqdn: str) -> None:
     Host unless already supplied. Safe process-wide here because each
     cluster-mode subprocess talks to exactly one ClearPass node for its
     entire lifetime.
+
+    On slower clusters, the publisher's database sync to this subscriber node
+    can lag behind a config change (e.g. the API client itself, or a token
+    just issued), so ANY call in the sequence — not just the first — can get
+    a transient 403 while the node catches up. When sync_retry_budget > 0,
+    a 403 is retried every couple of seconds until it succeeds or the budget
+    is used up, rather than failing the whole run on the first lagging call.
     """
     import requests
 
@@ -1137,7 +1145,24 @@ def _install_cluster_host_header(fqdn: str) -> None:
     def patched_request(self, method, url, headers=None, **kwargs):
         headers = dict(headers) if headers else {}
         headers.setdefault("Host", fqdn)
-        return original_request(self, method, url, headers=headers, **kwargs)
+        resp = original_request(self, method, url, headers=headers, **kwargs)
+        if resp.status_code == 403 and sync_retry_budget > 0:
+            deadline = time.monotonic() + sync_retry_budget
+            attempt = 0
+            while resp.status_code == 403:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                attempt += 1
+                wait = min(2, remaining)
+                log.warning(
+                    "Cluster node %s returned 403 on %s %s (attempt %d) — retrying in "
+                    "%.0fs; node may still be replicating config from the cluster "
+                    "publisher.", fqdn, method, url, attempt, wait,
+                )
+                time.sleep(wait)
+                resp = original_request(self, method, url, headers=headers, **kwargs)
+        return resp
 
     requests.sessions.Session.request = patched_request
 
@@ -1194,9 +1219,10 @@ def main() -> int:
     callback_host = os.environ.get("CPPM_CALLBACK_HOST",   "")
     callback_port = int(os.environ.get("CPPM_CALLBACK_PORT", "8765"))
     cluster_node_fqdn = os.environ.get("CPPM_CLUSTER_NODE_FQDN", "")
+    cluster_sync_retry_budget = int(os.environ.get("CPPM_CLUSTER_SYNC_DELAY_SECONDS", "0") or 0)
 
     if cluster_node_fqdn:
-        _install_cluster_host_header(cluster_node_fqdn)
+        _install_cluster_host_header(cluster_node_fqdn, cluster_sync_retry_budget)
 
     if not client_id or not client_secret:
         log.error("CPPM_CLIENT_ID and CPPM_CLIENT_SECRET must be set.")
@@ -1350,19 +1376,6 @@ def main() -> int:
         return 1
     log.info("Authenticated. expires_in=%ss",
              _resp.json().get("expires_in", "?"))
-
-    # On slower clusters, the publisher's database sync to this subscriber node
-    # can lag behind token issuance — the very next API call using this token
-    # gets rejected (403, no resolved identity) because the node hasn't yet
-    # replicated the client/session record. Only applies to cluster-node
-    # subprocesses (CPPM_CLUSTER_NODE_FQDN set); the discovery call against the
-    # primary/publisher host is unaffected.
-    if cluster_node_fqdn:
-        sync_delay = int(os.environ.get("CPPM_CLUSTER_SYNC_DELAY_SECONDS", "0") or 0)
-        if sync_delay > 0:
-            log.info("Cluster sync delay: waiting %ds for %s before first API call",
-                      sync_delay, cluster_node_fqdn)
-            time.sleep(sync_delay)
 
     # ── Initialise pyclearpass SDK with the pre-fetched token ────────────────
     sdk_args = dict(

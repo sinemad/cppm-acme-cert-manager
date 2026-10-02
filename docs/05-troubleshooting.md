@@ -357,21 +357,24 @@ Server Configuration → `<node>` → General** and set a full FQDN for the node
 (not just a short hostname). This removes the ambiguity the fallback is
 compensating for and is the more reliable fix.
 
-**Alternate cause — token mint succeeds, but the very next call on that same
-node 403s immediately:** If `cppm_upload.log` shows a successful
-`POST /api/oauth → 200 OK` for a cluster node, immediately followed by a 403
-on the first `GET`/`PUT /api/server-cert` to that same node — this is
-different from the "client not yet synced" case above, since the token mint
-itself proves the client already exists on that node. On slower clusters,
-the node's local database can still be a beat behind in propagating the
-session/token record itself, so the node momentarily rejects a token it just
-issued. This tends to be intermittent — the same run can succeed on one
-attempt and fail moments later.
+**Alternate cause — a call succeeds, then a later call on the same node 403s,
+even using a token that was just validated:** If `cppm_upload.log` shows a
+successful `POST /api/oauth → 200 OK` for a cluster node, and ANY subsequent
+call to that same node 403s — this is different from the "client not yet
+synced" case above, since the token mint itself proves the client already
+exists on that node. On slower clusters, the node's local database can still
+be a beat behind in propagating a config change (the token itself, or
+something it depends on), so the node momentarily rejects a call it should
+otherwise accept. This tends to be intermittent — the same run can succeed on
+one call and fail moments later on the next, and it isn't necessarily limited
+to the very first call after authenticating.
 
-**Fix:** Set a **Cluster Sync Delay** for this server (**Servers → Edit →
-Cluster Mode → Cluster Sync Delay (seconds)**). This pauses after
-authenticating with each cluster node and before that node's first API call,
-giving the cluster's internal sync time to catch up. Start with a few
+**Fix:** Set a **Cluster Sync Retry Budget** for this server (**Servers →
+Edit → Cluster Mode → Cluster Sync Retry Budget (seconds)**). When set above
+0, a 403 from a cluster node is retried every couple of seconds until it
+succeeds or this many seconds have elapsed, instead of failing the run on the
+first lagging call — so it covers every call to that node for the life of
+the run, not just the one right after authenticating. Start with a few
 seconds and increase if 403s persist. This is also configurable per-server
 via `cppm-servers edit <id>` or directly as `CPPM_CLUSTER_SYNC_DELAY_SECONDS`
 — see [Script reference](06-script-reference.md).

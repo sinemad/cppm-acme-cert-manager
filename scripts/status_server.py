@@ -2928,7 +2928,7 @@ def _settings_form_page(server: dict = None, error: str = "",
           </div>
           <div id="cluster-check-results" style="display:none;margin-top:0.75rem"></div>
           <div id="cluster-sync-delay-field" style="display:{('block' if s.get('cppm_cluster_mode') else 'none')};margin-top:0.75rem">
-            <label>Cluster Sync Delay (seconds) <span class="hint">(pause before uploading to each node)</span>{_help_toggle('cluster_sync_delay', 'On slower clusters, a node can reject the API call made right after authenticating because the publisher&rsquo;s database sync to that node hasn&rsquo;t caught up yet. If uploads to cluster nodes fail with 403 Forbidden despite a valid token, try increasing this.')}</label>
+            <label>Cluster Sync Retry Budget (seconds) <span class="hint">(retry 403s while the node catches up)</span>{_help_toggle('cluster_sync_delay', 'On slower clusters, the publisher&rsquo;s database sync to a node can lag behind a config change, so any call to that node — not just the first — can get a transient 403 even with a valid token. When this is set above 0, a 403 from a cluster node is retried every couple of seconds until it succeeds or this many seconds have elapsed, instead of failing the run immediately. If uploads to cluster nodes fail with 403 Forbidden, try increasing this.')}</label>
             <input type="number" name="cluster_sync_delay_seconds"
                    value="{fv('cluster_sync_delay_seconds', '0')}"
                    min="0" style="max-width:8em">
