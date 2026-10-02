@@ -58,6 +58,7 @@ Two certificates are issued and maintained simultaneously:
 2. [DNS Provider Support](#dns-provider-support)
 3. [Directory Structure](#directory-structure)
 4. [Initial Setup](#initial-setup)
+   - [Updating to a Newer Version](#9-updating-to-a-newer-version)
 5. [How It Works](#how-it-works)
 6. [Certificate Files](#certificate-files)
 7. [Web UI](#web-ui)
