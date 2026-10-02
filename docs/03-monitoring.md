@@ -139,6 +139,35 @@ Non-authenticated users see only the Activity Log tab:
 
 Each raw-log tab loads lazily (fetched only when first clicked) and includes a **↻ Refresh** button to reload without switching tabs.
 
+### Downloading logs for support
+
+Signed-in users see a **⬇ Download Logs** button next to the log tabs. It
+downloads a single `.zip` (named `cppm-logs-<cppm_host>-<timestamp>.zip`)
+containing:
+
+| In the zip | Source |
+|---|---|
+| `<server id>/status.log` | This server's Activity Log |
+| `<server id>/acme_renewal.log` | This server's ACME Renewal log |
+| `<server id>/cppm_upload.log` | This server's ClearPass Upload log |
+| `container/status.log` | Container-level Activity Log |
+| `container/startup.log` | Container boot log |
+| `container/status_server.log` | Web UI process log |
+
+This is the fastest way to hand a support request everything it usually
+needs, without walking a non-Linux user through `docker exec` and `cat`. Any
+log that doesn't exist yet is included as a `.missing` placeholder instead of
+breaking the download.
+
+**Cluster mode:** there is no separate log per cluster node. Every node's
+upload attempt is appended to the same `cppm_upload.log` for this server,
+and cluster connectivity probe results are logged to the container-level
+`status_server.log` — see
+[Cluster node returns 403 Forbidden](05-troubleshooting.md#cluster-node-returns-403-forbidden)
+for how cluster node discovery and per-node uploads work. Both logs are
+already included in the bundle, so one download covers every node in the
+cluster.
+
 ### Certificate details modal
 
 Click **View Details** on either certificate card to see the full decoded

@@ -911,6 +911,11 @@ tail -50  /opt/cppm-certs/logs/status_server.log   # web dashboard startup/error
 docker compose logs -f
 ```
 
+> **Need to send these to someone for support?** The server detail page in
+> the web UI has a **⬇ Download Logs** button (sign-in required) that zips
+> up all of the files above into one download — no `docker exec` or file
+> paths needed. See [Downloading logs for support](docs/03-monitoring.md#downloading-logs-for-support).
+
 ### Force certificate re-issue
 
 **Web UI (preferred):** Navigate to **Servers**, click **Issue Cert Now** on

@@ -195,6 +195,10 @@ No container restart is needed after updating server credentials.
 | Admin credentials | `/opt/cppm-certs/admin.htpasswd` |
 | Session signing secret | `/opt/cppm-certs/.session-secret` |
 
+To grab all of the above for a support request in one step, use the
+**⬇ Download Logs** button on the server detail page (sign-in required) —
+see [Downloading logs for support](03-monitoring.md#downloading-logs-for-support).
+
 ---
 
 ## Scheduled tasks

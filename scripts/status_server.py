@@ -49,7 +49,7 @@ from config_utils import (
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
-    certificate_targets,
+    certificate_targets, SERVERS_FILE,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -234,6 +234,41 @@ def read_raw_log(server: dict, log_name: str, max_lines: int = 500) -> dict:
     except Exception as exc:
         return {"lines": [f"Error reading log: {exc}"], "exists": True,
                 "truncated": False, "total": 0}
+
+
+def build_log_bundle(server: dict) -> bytes:
+    """Zip this server's logs plus the container-level logs for support.
+
+    One click gets a non-Linux-savvy user everything a support request
+    usually needs, instead of walking them through `docker exec` + `cat`.
+    """
+    import io
+    import zipfile
+
+    cert_dir = server_cert_dir(server)
+    base_dir = SERVERS_FILE.parent
+    sid = str(server.get("id", "")).strip() or "server"
+
+    files = [
+        (cert_dir / "status.log",                 f"{sid}/status.log"),
+        (cert_dir / "logs" / "acme_renewal.log",   f"{sid}/acme_renewal.log"),
+        (cert_dir / "logs" / "cppm_upload.log",    f"{sid}/cppm_upload.log"),
+        (base_dir / "status.log",                 "container/status.log"),
+        (base_dir / "logs" / "startup.log",        "container/startup.log"),
+        (base_dir / "logs" / "status_server.log",  "container/status_server.log"),
+    ]
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, arcname in files:
+            try:
+                if path.exists():
+                    zf.write(path, arcname)
+                else:
+                    zf.writestr(arcname + ".missing", "This log file does not exist yet.\n")
+            except OSError as exc:
+                zf.writestr(arcname + ".error", f"Could not read this log: {exc}\n")
+    return buf.getvalue()
 
 
 def build_server_status(server: dict) -> dict:
@@ -4027,6 +4062,7 @@ _DETAIL_BODY = """
       <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">ClearPass Upload</button>
     </div>
     <span class="log-count" id="log-count"></span>
+    <a class="btn btn-ghost" id="log-download-btn" style="font-size:0.72rem;padding:0.2rem 0.6rem;display:none" href="#" download>&#8681; Download Logs</a>
   </div>
 
   <div id="log-pane-activity">
@@ -4275,6 +4311,12 @@ var _logNameMap={renewal:'acme_renewal',upload:'cppm_upload'};
     var u=document.getElementById('log-tab-upload');
     if(r)r.style.display='none';
     if(u)u.style.display='none';
+  }else{
+    var dl=document.getElementById('log-download-btn');
+    if(dl){
+      dl.href='/api/logs/'+_SERVER_ID+'/bundle';
+      dl.style.display='';
+    }
   }
 })();
 
@@ -4393,6 +4435,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_bytes(self, body: bytes, content_type: str,
+                     filename: str = "", status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -4561,11 +4614,24 @@ class Handler(BaseHTTPRequestHandler):
             parts = path[len("/api/logs/"):].strip("/").split("/")
             if len(parts) == 2:
                 log_server_id, log_name = parts
-                if log_name not in _ALLOWED_RAW_LOGS:
-                    return self._serve_json({"error": "Unknown log name"}, status=404)
                 srv = get_server(log_server_id)
                 if not srv:
                     return self._serve_json({"error": "Server not found"}, status=404)
+                if log_name == "bundle":
+                    try:
+                        import re
+                        slug = re.sub(r"[^\w.-]", "_",
+                                       str(srv.get("cppm_host") or srv.get("label") or log_server_id))
+                        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                        data = build_log_bundle(srv)
+                        return self._serve_bytes(
+                            data, "application/zip",
+                            filename=f"cppm-logs-{slug}-{stamp}.zip",
+                        )
+                    except Exception as e:
+                        return self._serve_json({"error": str(e)}, status=500)
+                if log_name not in _ALLOWED_RAW_LOGS:
+                    return self._serve_json({"error": "Unknown log name"}, status=404)
                 try:
                     return self._serve_json(read_raw_log(srv, log_name))
                 except Exception as e:

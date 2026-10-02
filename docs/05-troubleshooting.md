@@ -16,6 +16,12 @@ docker compose ps
 docker compose logs --tail=50
 ```
 
+> If you're asking someone else for help (or filing an issue), the web UI's
+> server detail page has a **⬇ Download Logs** button (sign-in required)
+> that zips up all of the logs above in one file — see
+> [Downloading logs for support](03-monitoring.md#downloading-logs-for-support).
+> No need to `docker exec` anything.
+
 ---
 
 ## Container exits immediately on start

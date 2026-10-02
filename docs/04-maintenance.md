@@ -220,7 +220,9 @@ you will see entries like the following — no action is required.
 For detailed Lego renewal output see `acme_renewal.log`; for full ClearPass
 API upload logs see `cppm_upload.log`. Both are in
 `/opt/cppm-certs/<cppm_host>/logs/` and are also accessible in the web UI
-(sign-in required) on the server detail page.
+(sign-in required) on the server detail page, which also has a
+**⬇ Download Logs** button to zip them up for a support request — see
+[Downloading logs for support](03-monitoring.md#downloading-logs-for-support).
 
 ---
 

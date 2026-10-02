@@ -242,6 +242,8 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
 | `GET /api/status/<id>` | No (configurable) | JSON status for one server |
+| `GET /api/logs/<id>/<name>` | Yes | Last 500 lines of `acme_renewal` or `cppm_upload` as JSON |
+| `GET /api/logs/<id>/bundle` | Yes | Zips this server's logs + container-level logs; served as a file download |
 
 All server configuration (ClearPass credentials, DNS provider, domain, and ACME
 settings) is stored in `/data/certs/servers.json` and managed through these routes. Admin credentials are stored in
