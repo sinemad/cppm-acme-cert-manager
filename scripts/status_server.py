@@ -2711,9 +2711,10 @@ def _settings_list_page(servers: list, username: str,
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
                 f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
                 f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
-                f'<label style="font-size:0.68rem;font-weight:normal;color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;gap:0.15rem"'
+                f'<label style="font-size:0.65rem;font-weight:normal;color:var(--muted);text-align:center;'
+                f'max-width:6.5em;line-height:1.2;display:inline-flex;align-items:center;gap:0.2rem"'
                 f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
-                f'<input type="checkbox" name="debug" value="1"> Debug</label>'
+                f'<input type="checkbox" name="debug" value="1" style="flex-shrink:0"> Debug logging (this run)</label>'
                 f'</form>'
             )
             upload_btn = (
@@ -2724,9 +2725,10 @@ def _settings_list_page(servers: list, username: str,
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
                 f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
-                f'<label style="font-size:0.68rem;font-weight:normal;color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;gap:0.15rem"'
+                f'<label style="font-size:0.65rem;font-weight:normal;color:var(--muted);text-align:center;'
+                f'max-width:6.5em;line-height:1.2;display:inline-flex;align-items:center;gap:0.2rem"'
                 f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
-                f'<input type="checkbox" name="debug" value="1"> Debug</label>'
+                f'<input type="checkbox" name="debug" value="1" style="flex-shrink:0"> Debug logging (this run)</label>'
                 f'</form>'
             )
             rows += (
