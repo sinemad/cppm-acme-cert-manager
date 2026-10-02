@@ -2703,8 +2703,9 @@ def _settings_list_page(servers: list, username: str,
                 f'</span>'
             )
             run_btn = (
-                f'<form method="POST" action="/settings/run/{sid}"'
-                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem;flex-shrink:0"'
+                f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
+                f'<form method="POST" action="/settings/run/{sid}" id="run-form-{sid}"'
+                f' style="display:inline-flex"'
                 f' onsubmit="return confirm('
                 f"'Force-issue new ACME certificates for {label}?\\n\\n"
                 f"Only use this to recover from a failed renewal. "
@@ -2712,26 +2713,51 @@ def _settings_list_page(servers: list, username: str,
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
                 f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
-                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
-                f'<label style="font-size:0.65rem;font-weight:normal;color:var(--muted);text-align:center;'
-                f'max-width:6.5em;line-height:1.2;display:inline-flex;align-items:center;gap:0.2rem"'
-                f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
-                f'<input type="checkbox" name="debug" value="1" style="flex-shrink:0"> Debug logging (this run)</label>'
+                f'<input type="hidden" name="debug" id="run-debug-{sid}" value="0">'
+                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap;border-top-right-radius:0;'
+                f'border-bottom-right-radius:0" title="Manual override — only needed if automatic renewal has failed">'
+                f'&#9654; Force Cert Issue</button>'
                 f'</form>'
+                f'<button type="button" class="btn btn-warn" style="white-space:nowrap;padding:0 0.5rem;'
+                f'border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid rgba(0,0,0,0.25)"'
+                f' onclick="toggleActionMenu(\'run-menu-{sid}\')" title="More options">&#9662;</button>'
+                f'<div id="run-menu-{sid}" class="action-menu" style="display:none;position:absolute;top:100%;'
+                f'right:0;margin-top:0.3rem;background:var(--card);border:1px solid var(--border2);'
+                f'border-radius:6px;padding:0.6rem 0.75rem;z-index:30;min-width:12rem;'
+                f'box-shadow:0 6px 18px rgba(0,0,0,0.35);text-align:left">'
+                f'<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;cursor:pointer;'
+                f'white-space:normal;color:var(--text)" title="Enable verbose (DEBUG) logging for this run only — not persisted">'
+                f'<input type="checkbox" onchange="document.getElementById(\'run-debug-{sid}\').value = this.checked ? \'1\' : \'0\'">'
+                f' Debug logging (this run)</label>'
+                f'</div>'
+                f'</div>'
             )
             upload_btn = (
-                f'<form method="POST" action="/settings/upload/{sid}"'
-                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem;flex-shrink:0"'
+                f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
+                f'<form method="POST" action="/settings/upload/{sid}" id="upload-form-{sid}"'
+                f' style="display:inline-flex"'
                 f' onsubmit="return confirm('
                 f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
-                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
-                f'<label style="font-size:0.65rem;font-weight:normal;color:var(--muted);text-align:center;'
-                f'max-width:6.5em;line-height:1.2;display:inline-flex;align-items:center;gap:0.2rem"'
-                f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
-                f'<input type="checkbox" name="debug" value="1" style="flex-shrink:0"> Debug logging (this run)</label>'
+                f'<input type="hidden" name="debug" id="upload-debug-{sid}" value="0">'
+                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap;border-top-right-radius:0;'
+                f'border-bottom-right-radius:0" title="Manual override — only needed if automatic upload has failed">'
+                f'&#8679; Force ClearPass Upload</button>'
                 f'</form>'
+                f'<button type="button" class="btn btn-warn" style="white-space:nowrap;padding:0 0.5rem;'
+                f'border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid rgba(0,0,0,0.25)"'
+                f' onclick="toggleActionMenu(\'upload-menu-{sid}\')" title="More options">&#9662;</button>'
+                f'<div id="upload-menu-{sid}" class="action-menu" style="display:none;position:absolute;top:100%;'
+                f'right:0;margin-top:0.3rem;background:var(--card);border:1px solid var(--border2);'
+                f'border-radius:6px;padding:0.6rem 0.75rem;z-index:30;min-width:12rem;'
+                f'box-shadow:0 6px 18px rgba(0,0,0,0.35);text-align:left">'
+                f'<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;cursor:pointer;'
+                f'white-space:normal;color:var(--text)" title="Enable verbose (DEBUG) logging for this run only — not persisted">'
+                f'<input type="checkbox" onchange="document.getElementById(\'upload-debug-{sid}\').value = this.checked ? \'1\' : \'0\'">'
+                f' Debug logging (this run)</label>'
+                f'</div>'
+                f'</div>'
             )
             rows += (
                 f'<tr>'
@@ -2764,6 +2790,16 @@ function hideDelConfirm(id) {
   document.getElementById('del-btn-' + id).style.display = '';
   document.getElementById('del-conf-' + id).style.display = 'none';
 }
+function toggleActionMenu(id) {
+  var menu = document.getElementById(id);
+  var wasOpen = menu.style.display === 'block';
+  document.querySelectorAll('.action-menu').forEach(function(m) { m.style.display = 'none'; });
+  menu.style.display = wasOpen ? 'none' : 'block';
+}
+document.addEventListener('click', function(ev) {
+  if (ev.target.closest('.action-group')) return;
+  document.querySelectorAll('.action-menu').forEach(function(m) { m.style.display = 'none'; });
+});
 </script>"""
 
     body = f"""
