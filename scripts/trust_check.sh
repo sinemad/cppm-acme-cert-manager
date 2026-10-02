@@ -125,8 +125,25 @@ if output:
         --radius-fullchain "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer"
         --radius-ca        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer"
     )
+
+    # Serialize against deploy_hook.sh (and any other trust_check run) so this
+    # never authenticates against the same ClearPass client_id while a real
+    # upload is in flight — a concurrent OAuth token mint for the same
+    # client_id can invalidate the token the in-flight upload is using,
+    # producing spurious 403s partway through its run.
+    UPLOAD_LOCK="/tmp/cppm_upload_${CPPM_CALLBACK_PORT:-8765}.lock"
+    exec 9>"$UPLOAD_LOCK"
+    if ! flock -n 9; then
+        warn "Trust check for ${DOMAIN} skipped – an upload is already in progress. It will run again next week."
+        status_write "WARN" "TRUST" "Trust check skipped for ${DOMAIN} – another upload was already in progress."
+        exec 9>&-
+        continue
+    fi
+
     python3 /opt/cppm/clearpass_upload.py "${TRUST_ARGS[@]}" \
         2>&1 | tee -a "$LOG" 2>/dev/null || TRUST_EXIT=$?
+
+    exec 9>&-
 
     if [[ "$TRUST_EXIT" -eq 0 ]]; then
         log "Trust check completed for ${DOMAIN}."
