@@ -278,14 +278,45 @@ def _api_items(data) -> list[dict]:
     return []
 
 
-def _node_address(node: dict) -> tuple[str, str]:
-    """Return (display_name, reachable_address) for a cluster node."""
+def _node_address(node: dict, primary_host: str = "") -> tuple[str, str]:
+    """Return (display_name, reachable_address) for a cluster node.
+
+    `display` is also sent as the `Host` header on the per-node HTTPS request
+    (ClearPass vhost-matches on it), so a bare short name here instead of the
+    FQDN ClearPass expects can get the request rejected outright. If
+    ClearPass's own cluster API didn't return an fqdn/server_dns_name for
+    this node, derive one from the short name plus the primary server's
+    domain suffix rather than sending the short name as-is.
+    """
     import ipaddress
     import socket
 
     display = next((str(node.get(k, "")).strip() for k in
-            ("fqdn", "server_dns_name", "name", "hostname", "host", "ip_address")
-                    if node.get(k)), "Unknown node")
+            ("fqdn", "server_dns_name") if node.get(k)), "")
+    if not display:
+        short = next((str(node.get(k, "")).strip() for k in
+                ("name", "hostname", "host") if node.get(k)), "")
+        if short and "." not in short and "." in primary_host:
+            display = f"{short}.{primary_host.split('.', 1)[1]}"
+            _log.warning(
+                "Cluster node %s has no FQDN set in ClearPass; derived '%s' from the "
+                "primary server's domain for the Host header. For reliable cluster API "
+                "calls, set this node's FQDN explicitly in ClearPass under "
+                "Administration → Server Manager → Server Configuration.", short, display,
+            )
+        else:
+            display = short
+            if short and "." not in short:
+                _log.warning(
+                    "Cluster node %s has no FQDN and no domain suffix to derive one from; "
+                    "requests to this node will use its short name as the Host header, "
+                    "which ClearPass may reject as a vhost mismatch. Set this node's FQDN "
+                    "in ClearPass under Administration → Server Manager → Server "
+                    "Configuration.", short,
+                )
+    if not display:
+        display = str(node.get("ip_address", "")).strip() or "Unknown node"
+
     for key in ("management_ip", "ip_address", "server_ip", "ip"):
         value = str(node.get(key, "")).strip()
         if value:
@@ -314,6 +345,16 @@ def _cluster_check_probe(host: str, client_id: str,
       error (str or None), guidance (str or None), guidance_type (str or None)
     """
     import time
+    if verify_ssl:
+        _log.warning(
+            "Cluster mode + Verify SSL are both enabled for %s: cluster nodes are "
+            "reached by IP, and TLS certificate verification checks the connection IP, "
+            "not the Host header this tool sends — if a node's certificate doesn't "
+            "cover its IP, this cluster check can fail with an SSL "
+            "hostname-verification error. Disable Verify SSL for this server until "
+            "cluster node certificates cover their IPs if you see that.",
+            host,
+        )
     try:
         import requests
         from pyclearpass.api_localserverconfiguration import ApiLocalServerConfiguration
@@ -347,7 +388,7 @@ def _cluster_check_probe(host: str, client_id: str,
 
         results = []
         for node in raw_nodes:
-            node_name, node_host = _node_address(node)
+            node_name, node_host = _node_address(node, primary_host=host)
             entry: dict = {"host": node_name, "address": node_host,
                            "services": [], "status": "ok",
                            "error": None, "guidance": None, "guidance_type": None}
@@ -497,6 +538,17 @@ def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
         client_secret = server.get("cppm_client_secret", "")
         verify        = bool(server.get("cppm_verify_ssl", False))
 
+        if verify:
+            _log.warning(
+                "Cluster mode + Verify SSL are both enabled for %s: cluster nodes are "
+                "reached by IP, and TLS certificate verification checks the connection "
+                "IP, not the Host header this tool sends — if a node's certificate "
+                "doesn't cover its IP, the cluster status check for that node can fail "
+                "with an SSL hostname-verification error. Disable Verify SSL for this "
+                "server until cluster node certificates cover their IPs if you see that.",
+                host,
+            )
+
         pub_response = requests.post(
             f"https://{host}/api/oauth",
             data={"grant_type": "client_credentials",
@@ -514,7 +566,7 @@ def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
 
         result = []
         for node in _api_items(nodes_raw):
-            node_name, node_host = _node_address(node)
+            node_name, node_host = _node_address(node, primary_host=host)
             if not node_host:
                 result.append({"host": node_name, "services": [],
                                 "error": "Node address does not resolve"})

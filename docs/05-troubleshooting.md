@@ -335,6 +335,22 @@ If the subscriber node still returns 403 after replication:
   upload certificates to the publisher; subscribers sync the certificate
   automatically via ClearPass cluster replication.
 
+**Alternate cause — node has no FQDN set in ClearPass:** Per-node requests
+are sent to the node's IP but with a `Host` header set to its FQDN, so
+ClearPass can route/vhost-match the request correctly. That FQDN comes from
+ClearPass's own cluster node list (`GET /api/cluster/server` —
+`fqdn`/`server_dns_name`). If a node only has a short name configured
+(e.g. `cppm02`, not `cppm02.example.com`), the tool falls back to deriving an
+FQDN from the primary server's domain suffix (and logs a `WARNING` to
+`status_server.log` / `cppm_upload.log` naming the node when it does), or
+falls back to the short name as-is if no domain suffix is available. Either
+fallback can still be rejected by ClearPass as a vhost mismatch.
+
+**Fix:** In the ClearPass Admin UI, go to **Administration → Server Manager →
+Server Configuration → `<node>` → General** and set a full FQDN for the node
+(not just a short hostname). This removes the ambiguity the fallback is
+compensating for and is the more reliable fix.
+
 ---
 
 ## Trust list upload returns 400 — cert is not a CA certificate

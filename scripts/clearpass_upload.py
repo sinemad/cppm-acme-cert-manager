@@ -1036,8 +1036,15 @@ Note: PATCH /api/server-cert/{id} is NOT used — CPPM returns 405 for PATCH.
     return p.parse_args()
 
 
-def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[str]:
-    """Return reachable cluster node addresses from ClearPass cluster metadata."""
+def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[dict]:
+    """Return reachable cluster nodes from ClearPass cluster metadata.
+
+    Each entry is {"ip": str, "fqdn": str, "fqdn_derived": bool}. `fqdn` is
+    used as the Host header for requests to that node's IP — ClearPass
+    vhost-matches on it, so a missing fqdn/server_dns_name in ClearPass's own
+    cluster API response (falling back to a bare short name, or derived from
+    the primary server's domain suffix) is flagged via `fqdn_derived`.
+    """
     from pyclearpass.api_localserverconfiguration import ApiLocalServerConfiguration
 
     local_api = ApiLocalServerConfiguration(
@@ -1050,7 +1057,8 @@ def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[str]
     items = _items_from_response(raw)
     import ipaddress
     import socket
-    hosts: list[str] = []
+    nodes: list[dict] = []
+    seen_ips: set[str] = set()
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -1073,26 +1081,96 @@ def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[str]
                         break
                     except OSError:
                         pass
-        if value and value not in hosts:
-            hosts.append(value)
-    if not hosts:
+        if not value or value in seen_ips:
+            continue
+
+        fqdn = next((str(item.get(k, "")).strip() for k in
+                ("fqdn", "server_dns_name") if item.get(k)), "")
+        derived = False
+        if not fqdn:
+            short = next((str(item.get(k, "")).strip() for k in
+                    ("name", "hostname", "host") if item.get(k)), "")
+            if short:
+                if "." in short:
+                    fqdn = short
+                elif "." in current_host:
+                    fqdn = f"{short}.{current_host.split('.', 1)[1]}"
+                    derived = True
+                else:
+                    fqdn = short
+
+        seen_ips.add(value)
+        nodes.append({"ip": value, "fqdn": fqdn, "fqdn_derived": derived})
+
+    if not nodes:
         raise RuntimeError(f"GET /api/cluster/server returned no node addresses: {raw}")
-    if current_host not in hosts:
-        hosts.insert(0, current_host)
-    return hosts
+    if current_host not in seen_ips:
+        nodes.insert(0, {"ip": current_host, "fqdn": "", "fqdn_derived": False})
+    return nodes
 
 
-def _run_cluster_uploads(args: argparse.Namespace, hosts: list[str]) -> int:
+def _install_cluster_host_header(fqdn: str) -> None:
+    """Force a matching Host header on every outbound HTTPS request in this process.
+
+    In cluster mode each node is reached by IP (CPPM_HOST=<ip>), and both our
+    own OAuth call and the pyclearpass SDK's internal requests.* calls would
+    otherwise send `Host: <ip>`. ClearPass vhost-matches on the Host header,
+    so that can get rejected with 403 for a node whose configured hostname
+    differs from its IP. pyclearpass gives no header-injection hook, so this
+    patches requests.sessions.Session.request (the method module-level
+    requests.post/get/etc. and our own Session both funnel through) to set
+    Host unless already supplied. Safe process-wide here because each
+    cluster-mode subprocess talks to exactly one ClearPass node for its
+    entire lifetime.
+    """
+    import requests
+
+    log.info(
+        "Cluster mode: overriding Host header to '%s' for all requests to this node "
+        "(connection still goes to its IP — this only affects the Host header ClearPass sees).",
+        fqdn,
+    )
+
+    original_request = requests.sessions.Session.request
+
+    def patched_request(self, method, url, headers=None, **kwargs):
+        headers = dict(headers) if headers else {}
+        headers.setdefault("Host", fqdn)
+        return original_request(self, method, url, headers=headers, **kwargs)
+
+    requests.sessions.Session.request = patched_request
+
+
+def _run_cluster_uploads(args: argparse.Namespace, nodes: list[dict]) -> int:
     """Run the normal upload workflow once per cluster node."""
     failures = 0
+    all_ips = [n["ip"] for n in nodes]
     child_env = {**os.environ, "CPPM_CLUSTER_MODE": "false"}
-    for host in hosts:
+    for node in nodes:
+        host, fqdn, derived = node["ip"], node["fqdn"], node["fqdn_derived"]
         log.info("Cluster mode: uploading to node %s", host)
+        if derived:
+            log.warning(
+                "Cluster node %s has no FQDN set in ClearPass; derived '%s' from the "
+                "primary server's domain for the Host header. For reliable cluster API "
+                "calls, set this node's FQDN explicitly in ClearPass under "
+                "Administration → Server Manager → Server Configuration.", host, fqdn,
+            )
+        elif not fqdn:
+            log.warning(
+                "Cluster node %s has no FQDN and no domain suffix to derive one from; "
+                "requests to this node will use its IP as the Host header, which "
+                "ClearPass may reject as a vhost mismatch. Set this node's FQDN in "
+                "ClearPass under Administration → Server Manager → Server Configuration.",
+                host,
+            )
         node_env = {
             **child_env,
             "CPPM_HOST": host,
-            "CPPM_CALLBACK_ALLOWED_HOSTS": ",".join(hosts),
+            "CPPM_CALLBACK_ALLOWED_HOSTS": ",".join(all_ips),
         }
+        if fqdn:
+            node_env["CPPM_CLUSTER_NODE_FQDN"] = fqdn
         result = subprocess.run(
             [sys.executable, __file__, *sys.argv[1:]], env=node_env, check=False
         )
@@ -1114,6 +1192,10 @@ def main() -> int:
     passphrase    = os.environ.get("CPPM_CERT_PASSPHRASE", "")
     callback_host = os.environ.get("CPPM_CALLBACK_HOST",   "")
     callback_port = int(os.environ.get("CPPM_CALLBACK_PORT", "8765"))
+    cluster_node_fqdn = os.environ.get("CPPM_CLUSTER_NODE_FQDN", "")
+
+    if cluster_node_fqdn:
+        _install_cluster_host_header(cluster_node_fqdn)
 
     if not client_id or not client_secret:
         log.error("CPPM_CLIENT_ID and CPPM_CLIENT_SECRET must be set.")
@@ -1278,10 +1360,20 @@ def main() -> int:
     api = ApiPlatformCertificates(**sdk_args)
 
     if os.environ.get("CPPM_CLUSTER_MODE", "false").lower() == "true":
+        if verify_ssl:
+            log.warning(
+                "Cluster mode + Verify SSL are both enabled: cluster nodes are reached "
+                "by IP, and TLS certificate verification checks the connection IP, not "
+                "the Host header this tool sends — if a node's certificate doesn't cover "
+                "its IP, uploads to that node can fail with an SSL hostname-verification "
+                "error. If you see that, disable Verify SSL for this server (Servers → "
+                "Edit → Verify SSL) until cluster node certificates cover their IPs."
+            )
         try:
-            hosts = _cluster_hosts(api, host)
-            log.info("Cluster mode enabled: discovered %d node(s): %s", len(hosts), hosts)
-            return _run_cluster_uploads(args, hosts)
+            nodes = _cluster_hosts(api, host)
+            log.info("Cluster mode enabled: discovered %d node(s): %s",
+                      len(nodes), ", ".join(n["ip"] for n in nodes))
+            return _run_cluster_uploads(args, nodes)
         except Exception as exc:
             log.error("Cluster discovery failed: %s", exc)
             return 1
