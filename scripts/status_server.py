@@ -2755,7 +2755,7 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="text-align:right">'
                 f'<div style="display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.4rem 0.5rem;row-gap:0.4rem">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">Edit</a>'
-                f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">&#128276; Notifications</a>'
+                f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap;padding-left:0.6rem;padding-right:0.6rem" title="Notifications">&#128276;</a>'
                 f'<span style="border-left:1px solid var(--border);display:inline-block;height:1.2em;vertical-align:middle;flex-shrink:0"></span>'
                 f'{run_btn}'
                 f'{upload_btn}'
@@ -2903,7 +2903,7 @@ def _settings_form_page(server: dict = None, error: str = "",
     if is_edit:
         del_section = f"""
     <div class="card" style="margin-bottom:1rem;border-color:var(--danger)">
-      <div class="form-section-title" style="color:var(--danger)">Danger Zone</div>
+      <div class="form-section-title" style="color:var(--danger)">Remove Server</div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
         <p style="font-size:0.78rem;color:var(--muted);margin:0;max-width:32rem">
           Permanently remove this server's configuration. This does not revoke or delete

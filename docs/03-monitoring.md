@@ -296,7 +296,7 @@ Click **Edit** on any row to open the edit form.
 
 ![Edit Server form](ui-server-edit.png)
 
-- **Delete** lives in a **Danger Zone** card at the bottom of the edit form,
+- **Delete** lives in a **Remove Server** card at the bottom of the edit form,
   below **Save Changes** — it is not on the server list row. Click **Delete
   Server**, then confirm with **Yes, Delete** (inline two-step confirmation —
   no browser popup). Deleting removes the server entry only; it does not
