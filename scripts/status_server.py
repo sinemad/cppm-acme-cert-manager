@@ -87,7 +87,7 @@ REQUIRE_AUTH_FOR_STATUS = os.environ.get("REQUIRE_AUTH_FOR_STATUS", "false").low
 _SESSION_SECRET: bytes = b""
 
 # ── Module logger ─────────────────────────────────────────────────────────────
-# Writes to stdout, which entrypoint.sh redirects to .logs/status_server.log
+# Writes to stdout, which entrypoint.sh redirects to logs/status_server.log
 # and which also appears in `docker compose logs`.
 logging.basicConfig(
     level=logging.INFO,
@@ -222,7 +222,7 @@ def read_raw_log(server: dict, log_name: str, max_lines: int = 500) -> dict:
     """Return the last max_lines lines of a per-server raw log file."""
     if log_name not in _ALLOWED_RAW_LOGS:
         return {"lines": [], "exists": False, "truncated": False, "total": 0}
-    path = server_cert_dir(server) / ".logs" / f"{log_name}.log"
+    path = server_cert_dir(server) / "logs" / f"{log_name}.log"
     if not path.exists():
         return {"lines": [], "exists": False, "truncated": False, "total": 0}
     try:

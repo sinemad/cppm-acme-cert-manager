@@ -7,9 +7,9 @@
 grep FAILED /opt/cppm-certs/status.log
 
 # 2. Check the detailed logs
-tail -50 /opt/cppm-certs/.logs/startup.log                              # startup issues
-tail -50 /opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log             # issuance / renewal
-tail -50 /opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log              # ClearPass API issues
+tail -50 /opt/cppm-certs/logs/startup.log                              # startup issues
+tail -50 /opt/cppm-certs/<cppm_host>/logs/acme_renewal.log             # issuance / renewal
+tail -50 /opt/cppm-certs/<cppm_host>/logs/cppm_upload.log              # ClearPass API issues
 
 # 3. Check Docker container state
 docker compose ps
@@ -104,7 +104,7 @@ Common causes by provider:
 
 Check the renewal log for the full Lego error:
 ```bash
-tail -100 /opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log
+tail -100 /opt/cppm-certs/<cppm_host>/logs/acme_renewal.log
 ```
 
 ---

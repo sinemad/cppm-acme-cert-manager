@@ -6,7 +6,7 @@
 set -euo pipefail
 
 CERT_DIR="/data/certs"
-LOG_DIR="/data/certs/.logs"
+LOG_DIR="/data/certs/logs"
 LOG="${LOG_DIR}/acme_renewal.log"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR" 2>/dev/null || true
@@ -79,7 +79,7 @@ if output:
     eval "$SERVER_ENV"
 
     CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
-    LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
+    LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/logs}"
     LOG="${LOG_DIR}/acme_renewal.log"
     mkdir -p "$LOG_DIR"
     status_server_init

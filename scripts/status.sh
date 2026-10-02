@@ -4,7 +4,7 @@
 #
 # Writes a human-readable status.log to /data/certs/status.log so the current
 # state is visible directly in the mounted cert directory without digging into
-# the .logs/ subdirectory.
+# the logs/ subdirectory.
 #
 # Format:
 #   2026-03-17 10:43:07 | OK      | CERT    | Certificate issued – expires 2026-06-15
@@ -19,7 +19,7 @@
 # Falls back to the global path when sourced outside the per-server eval context.
 STATUS_LOG="${STATUS_LOG:-/data/certs/status.log}"
 _CPPM_CERT_DIR="/data/certs"
-_CPPM_LOG_DIR="/data/certs/.logs"
+_CPPM_LOG_DIR="/data/certs/logs"
 
 # _ensure_cppm_dirs – Create the certificate and log directories.
 #

@@ -172,7 +172,7 @@ cppm-acme-cert-manager/
 ├── admin.htpasswd                            ← Web UI admin credentials (bcrypt, chmod 600)
 ├── .session-secret                           ← HMAC session signing key (chmod 600)
 ├── status.log                                ← Container-level startup events
-├── .logs/
+├── logs/
 │   ├── startup.log                           ← Container boot log
 │   └── status_server.log                     ← Web UI process log
 │
@@ -181,7 +181,7 @@ cppm-acme-cert-manager/
 │       ├── <domain>.ecc.cer / .ecc.key / ...
 │       ├── <domain>.rsa.cer / .rsa.key / ...
 │       ├── lego-ecc/ and lego-rsa/
-│       └── .logs/acme_renewal.log
+│       └── logs/acme_renewal.log
 │
 ├── cppm.example.com/                         ← Legacy per-server directory
 │   ├── status.log                            ← Activity log (web UI Activity tab, public)
@@ -189,7 +189,7 @@ cppm-acme-cert-manager/
 │   ├── <domain>.rsa.cer / .rsa.key / ...     ← RSA cert files
 │   ├── lego-ecc/                             ← Lego ECC internal state
 │   ├── lego-rsa/                             ← Lego RSA internal state
-│   └── .logs/
+│   └── logs/
 │       ├── acme_renewal.log                  ← Lego issuance/renewal detail (auth required)
 │       └── cppm_upload.log                   ← ClearPass API upload detail (auth required)
 │
@@ -656,7 +656,7 @@ step-by-step checklist.
 Web UI startup, HTTP requests, and errors are written to:
 
 ```
-/opt/cppm-certs/.logs/status_server.log
+/opt/cppm-certs/logs/status_server.log
 ```
 
 ### HTTPS with Traefik (optional)
@@ -900,12 +900,12 @@ cat /opt/cppm-certs/cppm.example.com/status.log
 grep FAILED /opt/cppm-certs/cppm.example.com/status.log
 
 # Detailed per-server logs (also viewable in the web UI — sign-in required)
-tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
-tail -100 /opt/cppm-certs/cppm.example.com/.logs/cppm_upload.log
+tail -100 /opt/cppm-certs/cppm.example.com/logs/acme_renewal.log
+tail -100 /opt/cppm-certs/cppm.example.com/logs/cppm_upload.log
 
 # Container-level logs
-tail -100 /opt/cppm-certs/.logs/startup.log
-tail -50  /opt/cppm-certs/.logs/status_server.log   # web dashboard startup/errors
+tail -100 /opt/cppm-certs/logs/startup.log
+tail -50  /opt/cppm-certs/logs/status_server.log   # web dashboard startup/errors
 
 # Docker container output
 docker compose logs -f
@@ -1026,7 +1026,7 @@ Lego cannot poll for propagation.
 
 Check the full Lego output:
 ```bash
-tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
+tail -100 /opt/cppm-certs/cppm.example.com/logs/acme_renewal.log
 ```
 
 ### ClearPass API authentication fails (400 invalid_client)

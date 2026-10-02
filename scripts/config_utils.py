@@ -336,7 +336,7 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "UPLOAD_RADIUS":        "true" if "radius" in certificate_targets(s) else "false",
         "UPLOAD_RADSEC":        "true" if "radsec" in certificate_targets(s) else "false",
         "SERVER_CERT_DIR":      str(server_cert_dir(s)),
-        "SERVER_LOG_DIR":       str(server_cert_dir(s) / ".logs"),
+        "SERVER_LOG_DIR":       str(server_cert_dir(s) / "logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
         "SERVER_ID":            str(s.get("id", "")),
     }

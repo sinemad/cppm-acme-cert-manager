@@ -160,7 +160,7 @@ checked and repaired automatically on two schedules:
 docker exec -it cppm-acme-cert-manager /opt/cppm/trust_check.sh
 ```
 
-Output appends to each server's `/opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log`
+Output appends to each server's `/opt/cppm-certs/<cppm_host>/logs/cppm_upload.log`
 and records a `TRUST` entry in the per-server `status.log`.
 
 ---
@@ -219,7 +219,7 @@ you will see entries like the following — no action is required.
 
 For detailed Lego renewal output see `acme_renewal.log`; for full ClearPass
 API upload logs see `cppm_upload.log`. Both are in
-`/opt/cppm-certs/<cppm_host>/.logs/` and are also accessible in the web UI
+`/opt/cppm-certs/<cppm_host>/logs/` and are also accessible in the web UI
 (sign-in required) on the server detail page.
 
 ---

@@ -305,7 +305,7 @@ image and is recreated on every `docker compose build`.
 ├── .session-secret                       ← Web UI session signing key (chmod 600)
 ├── status.log                            ← Container-level startup events only
 │
-├── .logs/                                ← Container-level logs
+├── logs/                                ← Container-level logs
 │   ├── startup.log                       ← entrypoint.sh boot log
 │   └── status_server.log                 ← Web UI process log
 │
@@ -326,13 +326,13 @@ image and is recreated on every `docker compose build`.
 │   │       └── cppm.example.com.issuer.crt
 │   ├── lego-rsa/                         ← Lego RSA internal state
 │   │   └── certificates/
-│   └── .logs/
+│   └── logs/
 │       ├── acme_renewal.log              ← Lego issuance/renewal detail (web UI ACME Renewal tab)
 │       └── cppm_upload.log               ← ClearPass API upload detail (web UI ClearPass Upload tab)
 │
 └── cppm-lab.example.com/                 ← Second server (same structure)
     ├── status.log
-    └── .logs/
+    └── logs/
         ├── acme_renewal.log
         └── cppm_upload.log
 ```

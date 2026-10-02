@@ -6,11 +6,23 @@ set -euo pipefail
 
 LEGO_BIN="/usr/local/bin/lego"
 CERT_DIR="/data/certs"
-LOG_DIR="/data/certs/.logs"
+LOG_DIR="/data/certs/logs"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 [[ -x "$LEGO_BIN" ]] || { echo "[ERROR] lego not found at $LEGO_BIN. Rebuild the image."; exit 1; }
+
+# ── Migrate hidden .logs/ → visible logs/ (one-time, per directory) ──────────
+# Users unfamiliar with Linux couldn't find a dot-prefixed directory when
+# asked to pull logs for support, so the log directory is no longer hidden.
+migrate_log_dir() {
+    local old="$1" new="$2"
+    [[ -d "$old" ]] || return 0
+    mkdir -p "$new"
+    cp -an "$old/." "$new/" 2>/dev/null || true
+    rm -rf "$old"
+}
+migrate_log_dir "${CERT_DIR}/.logs" "$LOG_DIR"
 
 mkdir -p "$LOG_DIR" "$CERT_DIR"
 LOG="${LOG_DIR}/startup.log"
@@ -162,7 +174,8 @@ if output:
     eval "$SERVER_ENV"
 
     # Switch to per-server cert and log directories (mkdir only — init after migration)
-    mkdir -p "${SERVER_CERT_DIR}/.logs"
+    migrate_log_dir "${SERVER_CERT_DIR}/.logs" "${SERVER_CERT_DIR}/logs"
+    mkdir -p "${SERVER_CERT_DIR}/logs"
 
     # ── Migrate existing flat-file layout (one-time, per server) ─────────────
     # Triggers if either cert type exists at the old root level but not yet in
@@ -187,14 +200,14 @@ if output:
         # Copy logs to per-server dir, applying new filenames
         for task in "renewal.log:acme_renewal.log" "upload.log:cppm_upload.log"; do
             old="${task%%:*}"; new="${task##*:}"
-            [[ -f "${CERT_DIR}/.logs/${old}" && ! -f "${SERVER_CERT_DIR}/.logs/${new}" ]] \
-                && cp "${CERT_DIR}/.logs/${old}" "${SERVER_CERT_DIR}/.logs/${new}" || true
+            [[ -f "${CERT_DIR}/logs/${old}" && ! -f "${SERVER_CERT_DIR}/logs/${new}" ]] \
+                && cp "${CERT_DIR}/logs/${old}" "${SERVER_CERT_DIR}/logs/${new}" || true
         done
         # Rename if a previous migration already copied under old names
         for task in "renewal.log:acme_renewal.log" "upload.log:cppm_upload.log"; do
             old="${task%%:*}"; new="${task##*:}"
-            [[ -f "${SERVER_CERT_DIR}/.logs/${old}" && ! -f "${SERVER_CERT_DIR}/.logs/${new}" ]] \
-                && mv "${SERVER_CERT_DIR}/.logs/${old}" "${SERVER_CERT_DIR}/.logs/${new}" || true
+            [[ -f "${SERVER_CERT_DIR}/logs/${old}" && ! -f "${SERVER_CERT_DIR}/logs/${new}" ]] \
+                && mv "${SERVER_CERT_DIR}/logs/${old}" "${SERVER_CERT_DIR}/logs/${new}" || true
         done
         log "  Migration complete."
     fi

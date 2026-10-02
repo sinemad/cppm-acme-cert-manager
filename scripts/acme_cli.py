@@ -88,7 +88,7 @@ def _san_domains() -> list[str]:
 
 
 def _log_file(cert_dir: str) -> str:
-    log_dir = os.environ.get("SERVER_LOG_DIR", os.path.join(cert_dir, ".logs"))
+    log_dir = os.environ.get("SERVER_LOG_DIR", os.path.join(cert_dir, "logs"))
     return os.path.join(log_dir, "acme_renewal.log")
 
 

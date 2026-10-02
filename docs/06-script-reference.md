@@ -215,7 +215,7 @@ Behaviour:
 1. Skips a server if its domain certificates have not yet been issued.
 2. Calls `clearpass_upload.py --only-trust-check` with both the ECC and RSA
    CA chain paths, so intermediates unique to either chain are always checked.
-3. Appends output to each server's `/data/certs/<cppm_host>/.logs/cppm_upload.log`
+3. Appends output to each server's `/data/certs/<cppm_host>/logs/cppm_upload.log`
    and writes a `TRUST` entry to the per-server `status.log`.
 
 ---
@@ -248,7 +248,7 @@ settings) is stored in `/data/certs/servers.json` and managed through these rout
 `/data/certs/admin.htpasswd` (bcrypt). Sessions are HMAC-SHA256 signed cookies
 using a secret in `/data/certs/.session-secret`.
 
-Logs to `/data/certs/.logs/status_server.log`.
+Logs to `/data/certs/logs/status_server.log`.
 
 ---
 

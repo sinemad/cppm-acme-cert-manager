@@ -13,7 +13,7 @@
 set -euo pipefail
 
 CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
-LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
+LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/logs}"
 LOG="${LOG_DIR}/acme_renewal.log"
 DOMAIN="${DOMAIN:-}"
 

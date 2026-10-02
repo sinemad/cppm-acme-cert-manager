@@ -139,10 +139,10 @@ ENV TZ=UTC
 # Layout created by entrypoint.sh at first start:
 #   /data/certs/<cppm_host>/<domain>.{cer,key,fullchain.cer,ca.cer}   flat cert files
 #   /data/certs/<cppm_host>/lego-{ecc,rsa}/                           Lego cert state
-#   /data/certs/.logs/                                                 container-level logs
+#   /data/certs/logs/                                                 container-level logs
 VOLUME ["/data/certs"]
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=5 \
-    CMD test -f /data/certs/.logs/startup.log || exit 1
+    CMD test -f /data/certs/logs/startup.log || exit 1
 
 ENTRYPOINT ["/opt/cppm/entrypoint.sh"]

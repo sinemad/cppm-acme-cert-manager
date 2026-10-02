@@ -186,10 +186,10 @@ No container restart is needed after updating server credentials.
 |---|---|
 | Web dashboard | `http://<docker-host>:8080/` |
 | Per-server activity log | `/opt/cppm-certs/<cppm_host>/status.log` |
-| Per-server Lego renewal detail | `/opt/cppm-certs/<cppm_host>/.logs/acme_renewal.log` |
-| Per-server ClearPass upload detail | `/opt/cppm-certs/<cppm_host>/.logs/cppm_upload.log` |
-| Container startup detail | `/opt/cppm-certs/.logs/startup.log` |
-| Web UI process log | `/opt/cppm-certs/.logs/status_server.log` |
+| Per-server Lego renewal detail | `/opt/cppm-certs/<cppm_host>/logs/acme_renewal.log` |
+| Per-server ClearPass upload detail | `/opt/cppm-certs/<cppm_host>/logs/cppm_upload.log` |
+| Container startup detail | `/opt/cppm-certs/logs/startup.log` |
+| Web UI process log | `/opt/cppm-certs/logs/status_server.log` |
 | Container-level startup events | `/opt/cppm-certs/status.log` |
 | ClearPass server config | `/opt/cppm-certs/servers.json` |
 | Admin credentials | `/opt/cppm-certs/admin.htpasswd` |

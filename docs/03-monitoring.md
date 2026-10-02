@@ -120,8 +120,8 @@ The log section at the bottom of the server detail page provides three tabs:
 | Tab | Log file | Who can view |
 |---|---|---|
 | **Activity Log** | `<server>/status.log` | Everyone (no sign-in required) |
-| **ACME Renewal** | `<server>/.logs/acme_renewal.log` | Signed-in users only |
-| **ClearPass Upload** | `<server>/.logs/cppm_upload.log` | Signed-in users only |
+| **ACME Renewal** | `<server>/logs/acme_renewal.log` | Signed-in users only |
+| **ClearPass Upload** | `<server>/logs/cppm_upload.log` | Signed-in users only |
 
 Non-authenticated users see only the Activity Log tab:
 
@@ -319,7 +319,7 @@ Passwords must be at least 8 characters.
 
 ```bash
 # Startup confirmation, HTTP request log, and any errors
-tail -50 /opt/cppm-certs/.logs/status_server.log
+tail -50 /opt/cppm-certs/logs/status_server.log
 ```
 
 ---
@@ -429,24 +429,24 @@ startup and shutdown events only (not per-server cert or upload activity).
 
 ## Detailed logs
 
-Per-server logs are in `/opt/cppm-certs/<cppm_host>/.logs/`:
+Per-server logs are in `/opt/cppm-certs/<cppm_host>/logs/`:
 
 ```bash
 # Lego issuance and renewal full output (per server)
-tail -100 /opt/cppm-certs/cppm.example.com/.logs/acme_renewal.log
+tail -100 /opt/cppm-certs/cppm.example.com/logs/acme_renewal.log
 
 # ClearPass API upload full output (per server)
-tail -100 /opt/cppm-certs/cppm.example.com/.logs/cppm_upload.log
+tail -100 /opt/cppm-certs/cppm.example.com/logs/cppm_upload.log
 ```
 
-Container-level logs are in `/opt/cppm-certs/.logs/`:
+Container-level logs are in `/opt/cppm-certs/logs/`:
 
 ```bash
 # Container startup and cert state decisions
-tail -100 /opt/cppm-certs/.logs/startup.log
+tail -100 /opt/cppm-certs/logs/startup.log
 
 # Web dashboard startup and request log
-tail -50 /opt/cppm-certs/.logs/status_server.log
+tail -50 /opt/cppm-certs/logs/status_server.log
 ```
 
 These same logs are also accessible in the web UI on the server detail page —

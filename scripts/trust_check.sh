@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CERT_DIR="/data/certs"
-LOG_DIR="/data/certs/.logs"
+LOG_DIR="/data/certs/logs"
 LOG="${LOG_DIR}/cppm_upload.log"   # startup log until per-server dir is known
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -69,7 +69,7 @@ if output:
 
     # Switch to per-server cert and log directories
     CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
-    LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/.logs}"
+    LOG_DIR="${SERVER_LOG_DIR:-${CERT_DIR}/logs}"
     LOG="${LOG_DIR}/cppm_upload.log"
     mkdir -p "$LOG_DIR"
     status_server_init
