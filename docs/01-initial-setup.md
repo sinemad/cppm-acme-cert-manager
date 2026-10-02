@@ -336,3 +336,71 @@ Or via CLI:
 docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 # Toggle Verify SSL to yes
 ```
+
+---
+
+## Updating to a newer version
+
+There's no in-app updater — getting a new release means pulling the latest
+code from GitHub with `git` and rebuilding the Docker image. You do **not**
+need to be a git expert; the steps below are the complete process, and you
+can copy-paste them as-is.
+
+**Nothing you've configured is affected by an update.** Your certificates,
+ClearPass server configuration (`servers.json`), and admin accounts all live
+in `/opt/cppm-certs/`, completely outside the repository folder, and an
+update never touches that directory. `docker-compose.override.yml` (your
+local timezone/port/DNS settings) is also untouched — it's excluded from git
+entirely, so pulling new code can never overwrite it.
+
+### 1. Go to the repository folder
+
+```bash
+cd /opt/cppm-acme-cert-manager
+```
+
+If you installed somewhere other than `/opt`, use that path instead.
+
+### 2. Pull the latest code
+
+```bash
+git pull
+```
+
+> **If this prints an error about local changes or a conflict:** it means a
+> file inside the repository folder was edited by hand at some point — this
+> is rare, since everything you're meant to configure
+> (`docker-compose.override.yml`, and everything in `/opt/cppm-certs/`) lives
+> outside what `git pull` touches. Run `git status` to see what it's flagging.
+> If nothing there looks like something you meant to keep, discard it and
+> pull again:
+> ```bash
+> git checkout -- .
+> git pull
+> ```
+
+### 3. Rebuild and restart the container
+
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+docker compose logs -f
+```
+
+Watch for `[INFO ] Startup complete`. This rebuilds the application code only
+— no certificates are reissued and no configuration changes, unless a
+specific release's notes say otherwise.
+
+### 4. Confirm the new version is running
+
+Open the web dashboard at `http://<docker-host>:8080/` and check the version
+shown in the footer (`ClearPass ACME Certificate Manager v<version> · build
+<build>`), or from the command line:
+
+```bash
+docker exec -it cppm-acme-cert-manager cat /opt/cppm/VERSION
+```
+
+That's the whole process — press Ctrl+C to stop following the logs once
+you've confirmed startup completed.

@@ -427,6 +427,24 @@ Expected first-run sequence:
 
 First-run time: 2–5 minutes (DNS propagation for the ACME challenge).
 
+### 9. Updating to a newer version
+
+No git experience needed — from the repository folder:
+
+```bash
+cd /opt/cppm-acme-cert-manager
+git pull
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+docker compose logs -f
+```
+
+Certificates, server configuration (`servers.json`), admin accounts, and
+`docker-compose.override.yml` all live outside the repository and are never
+touched by an update. See [Updating to a newer version](docs/01-initial-setup.md#updating-to-a-newer-version)
+for the full walkthrough, including how to recover from a `git pull` conflict.
+
 ---
 
 ## How It Works
