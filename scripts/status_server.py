@@ -2689,8 +2689,9 @@ def _settings_list_page(servers: list, username: str,
             acme   = _esc(s.get("acme_server", "letsencrypt"))
             del_btn = (
                 f'<button type="button" class="btn btn-danger" id="del-btn-{sid}"'
+                f' style="flex-shrink:0;white-space:nowrap"'
                 f' onclick="showDelConfirm(\'{sid}\')">Delete</button>'
-                f'<span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem">'
+                f'<span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem;flex-shrink:0;white-space:nowrap">'
                 f'<span style="font-size:0.75rem;color:var(--muted)">Delete {label}?</span>'
                 f'<form method="POST" action="/settings/delete" style="display:inline">'
                 f'<input type="hidden" name="id" value="{sid}">'
@@ -2701,7 +2702,7 @@ def _settings_list_page(servers: list, username: str,
             )
             run_btn = (
                 f'<form method="POST" action="/settings/run/{sid}"'
-                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem"'
+                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem;flex-shrink:0"'
                 f' onsubmit="return confirm('
                 f"'Force-issue new ACME certificates for {label}?\\n\\n"
                 f"Only use this to recover from a failed renewal. "
@@ -2709,7 +2710,7 @@ def _settings_list_page(servers: list, username: str,
                 f"Warning: this counts against your ACME CA rate limit "
                 f"(Let\\u2019s Encrypt allows 5 duplicate certificates per week). "
                 f"Use Force Upload instead if certs are already issued and just need to be re-uploaded.')\">"
-                f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
+                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic renewal has failed">&#9654; Force Cert Issue</button>'
                 f'<label style="font-size:0.68rem;font-weight:normal;color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;gap:0.15rem"'
                 f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
                 f'<input type="checkbox" name="debug" value="1"> Debug</label>'
@@ -2717,12 +2718,12 @@ def _settings_list_page(servers: list, username: str,
             )
             upload_btn = (
                 f'<form method="POST" action="/settings/upload/{sid}"'
-                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem"'
+                f' style="display:inline-flex;flex-direction:column;align-items:center;gap:0.2rem;flex-shrink:0"'
                 f' onsubmit="return confirm('
                 f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
-                f'<button type="submit" class="btn btn-warn" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
+                f'<button type="submit" class="btn btn-warn" style="white-space:nowrap" title="Manual override — only needed if automatic upload has failed">&#8679; Force ClearPass Upload</button>'
                 f'<label style="font-size:0.68rem;font-weight:normal;color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;gap:0.15rem"'
                 f' title="Enable verbose (DEBUG) logging for this run only — not persisted">'
                 f'<input type="checkbox" name="debug" value="1"> Debug</label>'
@@ -2735,10 +2736,10 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right">'
-                f'<div style="display:flex;justify-content:flex-end;align-items:center;gap:0.4rem">'
-                f'<a href="/settings/edit/{sid}" class="btn btn-ghost">Edit</a>'
-                f'<a href="/settings/notifications/{sid}" class="btn btn-ghost">&#128276; Notifications</a>'
-                f'<span style="border-left:1px solid var(--border);display:inline-block;height:1.2em;vertical-align:middle"></span>'
+                f'<div style="display:flex;flex-wrap:nowrap;justify-content:flex-end;align-items:center;gap:0.4rem;white-space:nowrap">'
+                f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">Edit</a>'
+                f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">&#128276; Notifications</a>'
+                f'<span style="border-left:1px solid var(--border);display:inline-block;height:1.2em;vertical-align:middle;flex-shrink:0"></span>'
                 f'{run_btn}'
                 f'{upload_btn}'
                 f'{del_btn}'
