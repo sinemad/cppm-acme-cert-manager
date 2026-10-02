@@ -220,30 +220,38 @@ Navigate to **Servers** in the top navigation bar.
 
 ### Server list actions
 
-Each server row shows four action buttons:
+Each server row shows four actions. **Force Cert Issue** and **Force
+ClearPass Upload** are split buttons: clicking the main part of the button
+runs the action immediately (after a confirmation dialog); the small **▾**
+caret next to it opens a dropdown containing a one-off **Debug logging (this
+run)** checkbox.
 
 | Button | Action |
 |---|---|
-| **Edit** | Modify server credentials, DNS provider, and ACME settings |
-| **Issue Cert Now** | Force a full certificate re-issue via ACME DNS-01 challenge |
-| **Upload to ClearPass** | Re-upload the existing on-disk certs to ClearPass without contacting the ACME CA |
-| **Delete** | Remove the server entry (inline two-step confirmation) |
+| **Edit** | Modify server credentials, DNS provider, and ACME settings — also where **Delete** now lives (see [Editing and deleting](#editing-and-deleting)) |
+| **Notifications** | Configure per-server alert thresholds and channels |
+| **Force Cert Issue** | Force a full certificate re-issue via ACME DNS-01 challenge |
+| **Force ClearPass Upload** | Re-upload the existing on-disk certs to ClearPass without contacting the ACME CA |
 
-**Issue Cert Now** shows a confirmation dialog warning that the action counts against your ACME CA rate limit (Let's Encrypt allows 5 duplicate certificates per domain per week). Use it only when you need to rotate a cert immediately. After clicking, you are redirected to the server detail page where the Activity Log updates as the pipeline progresses.
+There is no Delete button on the list row — deleting a server requires
+opening its **Edit** page first, which guards against accidentally deleting
+the wrong row while working through a list of servers.
 
-**Upload to ClearPass** runs only the upload pipeline (`deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
+**Force Cert Issue** shows a confirmation dialog warning that the action counts against your ACME CA rate limit (Let's Encrypt allows 5 duplicate certificates per domain per week). Use it only when you need to rotate a cert immediately. After clicking, you are redirected to the server detail page where the Activity Log updates as the pipeline progresses.
+
+**Force ClearPass Upload** runs only the upload pipeline (`deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
 
 > Only one upload pipeline can run at a time. If a second upload is triggered while one is already in progress (e.g. a scheduled renewal happened to be uploading), the second request is queued and a WARN entry appears in the Activity Log.
 
-**Debug checkbox** — both **Issue Cert Now** and **Upload to ClearPass** have
-a **Debug** checkbox next to the button. Checking it before clicking sets
-`LOG_LEVEL=DEBUG` for that one triggered run only — it is never saved or
-persisted, has no effect on scheduled/automatic renewals or uploads, and
-reverts to normal (`INFO`) logging the moment the run finishes. Use it when
-you need to see exactly what's happening on the wire — for example to see the
-full request/response body behind a ClearPass 403 after making a change you
-believe fixed it. The extra detail lands in the **ClearPass Upload** log tab
-(and in the downloaded log bundle — see
+**Debug logging (this run)** — open the **▾** dropdown next to **Force Cert
+Issue** or **Force ClearPass Upload** and check the box before confirming the
+action. It sets `LOG_LEVEL=DEBUG` for that one triggered run only — it is
+never saved or persisted, has no effect on scheduled/automatic renewals or
+uploads, and reverts to normal (`INFO`) logging the moment the run finishes.
+Use it when you need to see exactly what's happening on the wire — for
+example to see the full request/response body behind a ClearPass 403 after
+making a change you believe fixed it. The extra detail lands in the
+**ClearPass Upload** log tab (and in the downloaded log bundle — see
 [Downloading logs for support](#downloading-logs-for-support) above). In
 cluster mode, the flag propagates to every cluster node's upload subprocess,
 so one checked run captures debug detail for all nodes at once — see
@@ -288,7 +296,11 @@ Click **Edit** on any row to open the edit form.
 
 ![Edit Server form](ui-server-edit.png)
 
-- Click **Delete** to start an inline two-step confirmation — no browser popup.
+- **Delete** lives in a **Danger Zone** card at the bottom of the edit form,
+  below **Save Changes** — it is not on the server list row. Click **Delete
+  Server**, then confirm with **Yes, Delete** (inline two-step confirmation —
+  no browser popup). Deleting removes the server entry only; it does not
+  revoke or remove already-issued certificates on ClearPass.
 
 Each ClearPass host must be unique across all server entries. Attempts to save
 a duplicate host are rejected with an error message.

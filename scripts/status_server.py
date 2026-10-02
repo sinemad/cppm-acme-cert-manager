@@ -2689,19 +2689,6 @@ def _settings_list_page(servers: list, username: str,
             domain = _esc(s.get("domain", ""))
             prov   = _esc(s.get("dns_provider", ""))
             acme   = _esc(s.get("acme_server", "letsencrypt"))
-            del_btn = (
-                f'<button type="button" class="btn btn-danger" id="del-btn-{sid}"'
-                f' style="flex-shrink:0;white-space:nowrap"'
-                f' onclick="showDelConfirm(\'{sid}\')">Delete</button>'
-                f'<span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem;flex-shrink:0;white-space:nowrap">'
-                f'<span style="font-size:0.75rem;color:var(--muted)">Delete {label}?</span>'
-                f'<form method="POST" action="/settings/delete" style="display:inline">'
-                f'<input type="hidden" name="id" value="{sid}">'
-                f'<button type="submit" class="btn btn-danger">Yes</button></form>'
-                f'<button type="button" class="btn btn-ghost"'
-                f' onclick="hideDelConfirm(\'{sid}\')">No</button>'
-                f'</span>'
-            )
             run_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
                 f'<form method="POST" action="/settings/run/{sid}" id="run-form-{sid}"'
@@ -2766,13 +2753,12 @@ def _settings_list_page(servers: list, username: str,
                 f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
                 f'<td>{prov}</td>'
                 f'<td style="text-align:right">'
-                f'<div style="display:flex;flex-wrap:nowrap;justify-content:flex-end;align-items:center;gap:0.4rem;white-space:nowrap">'
+                f'<div style="display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.4rem 0.5rem;row-gap:0.4rem">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">Edit</a>'
                 f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">&#128276; Notifications</a>'
                 f'<span style="border-left:1px solid var(--border);display:inline-block;height:1.2em;vertical-align:middle;flex-shrink:0"></span>'
                 f'{run_btn}'
                 f'{upload_btn}'
-                f'{del_btn}'
                 f'</div>'
                 f'</td>'
                 f'</tr>'
@@ -2781,15 +2767,6 @@ def _settings_list_page(servers: list, username: str,
     # JS uses raw string to avoid {{ }} escaping
     script = """
 <script>
-function showDelConfirm(id) {
-  document.getElementById('del-btn-' + id).style.display = 'none';
-  var c = document.getElementById('del-conf-' + id);
-  c.style.display = 'inline-flex';
-}
-function hideDelConfirm(id) {
-  document.getElementById('del-btn-' + id).style.display = '';
-  document.getElementById('del-conf-' + id).style.display = 'none';
-}
 function toggleActionMenu(id) {
   var menu = document.getElementById(id);
   var wasOpen = menu.style.display === 'block';
@@ -2922,6 +2899,31 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>'''
 
     # Form body — f-string with all interpolated Python values.
+    del_section = ""
+    if is_edit:
+        del_section = f"""
+    <div class="card" style="margin-bottom:1rem;border-color:var(--danger)">
+      <div class="form-section-title" style="color:var(--danger)">Danger Zone</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <p style="font-size:0.78rem;color:var(--muted);margin:0;max-width:32rem">
+          Permanently remove this server's configuration. This does not revoke or delete
+          already-issued certificates on ClearPass.
+        </p>
+        <div>
+          <button type="button" class="btn btn-danger" id="del-btn-{sid}"
+                  onclick="showDelConfirm('{sid}')">Delete Server</button>
+          <span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem;flex-wrap:nowrap">
+            <span style="font-size:0.78rem;color:var(--muted);white-space:nowrap">Delete '{fv('label')}'?</span>
+            <form method="POST" action="/settings/delete" style="display:inline">
+              <input type="hidden" name="id" value="{sid}">
+              <button type="submit" class="btn btn-danger">Yes, Delete</button>
+            </form>
+            <button type="button" class="btn btn-ghost" onclick="hideDelConfirm('{sid}')">Cancel</button>
+          </span>
+        </div>
+      </div>
+    </div>"""
+
     # JavaScript is in a separate raw string appended below (no {{ }} issues).
     form = f"""
 <div class="app">
@@ -3274,6 +3276,7 @@ def _settings_form_page(server: dict = None, error: str = "",
       <button type="submit" class="btn btn-primary">{submit}</button>
     </div>
   </form>
+  {del_section}
 </div>"""
 
     # JavaScript — separate raw string: no {{ }} escaping needed.
@@ -3447,6 +3450,15 @@ function runClusterCheck() {
   });
 }
 function esc(s){var d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
+function showDelConfirm(id) {
+  document.getElementById('del-btn-' + id).style.display = 'none';
+  var c = document.getElementById('del-conf-' + id);
+  c.style.display = 'inline-flex';
+}
+function hideDelConfirm(id) {
+  document.getElementById('del-btn-' + id).style.display = '';
+  document.getElementById('del-conf-' + id).style.display = 'none';
+}
 </script>"""
 
     return _base(title, form + cert_profiles_script + script,

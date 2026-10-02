@@ -237,8 +237,8 @@ Serves an authenticated web interface on `STATUS_PORT` (default `8080`):
 | `POST /settings/add` | Yes | Save new server; auto-triggers cert pipeline in background |
 | `POST /settings/edit/<id>` | Yes | Save edited server |
 | `POST /settings/delete` | Yes | Delete server |
-| `POST /settings/run/<id>` | Yes | Force full cert re-issue (Issue Cert Now); redirects to `/server/<id>` |
-| `POST /settings/upload/<id>` | Yes | Re-upload existing certs to ClearPass (Upload to ClearPass); redirects to `/server/<id>` |
+| `POST /settings/run/<id>` | Yes | Force full cert re-issue (Force Cert Issue); redirects to `/server/<id>` |
+| `POST /settings/upload/<id>` | Yes | Re-upload existing certs to ClearPass (Force ClearPass Upload); redirects to `/server/<id>` |
 | `POST /settings/run/<id>`, `POST /settings/upload/<id>` with form field `debug=1` | Yes | Same as above, but sets `LOG_LEVEL=DEBUG` for just that one subprocess run (one-shot, not persisted) |
 | `GET /admin/users` | Yes | Admin user management |
 | `GET /api/status` | No (configurable) | JSON status payload |
