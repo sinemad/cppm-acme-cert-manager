@@ -153,6 +153,13 @@ PY
     )
 fi
 
+# Startup uploads set CPPM_UPLOAD_TRIGGER=restart; say so in the status line and alerts.
+TRIGGER_NOTE=""
+if [[ "${CPPM_UPLOAD_TRIGGER:-}" == "restart" ]]; then
+    TRIGGER_NOTE=" [trigger: container restart, not a renewal]"
+    log "Upload triggered by container restart (not a renewal)."
+fi
+
 if [[ $UPLOAD_EXIT -eq 0 || $UPLOAD_EXIT -eq 2 ]]; then
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
@@ -162,9 +169,9 @@ fi
 if [[ $UPLOAD_EXIT -eq 0 ]]; then
     log "Upload succeeded."
     if [[ -n "$NODE_SUMMARY" ]]; then
-        MSG="${UPLOAD_LABEL} uploaded to all cluster nodes via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}"
+        MSG="${UPLOAD_LABEL} uploaded to all cluster nodes via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}${TRIGGER_NOTE}"
     else
-        MSG="${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
+        MSG="${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}${TRIGGER_NOTE}"
     fi
     status_write "OK" "UPLOAD" "$MSG"
     python3 /opt/cppm/notify.py \
@@ -174,7 +181,7 @@ if [[ $UPLOAD_EXIT -eq 0 ]]; then
         2>&1 | tee -a "$LOG" >/dev/null \
         || err "Notification (upload_success) failed – see errors above in ${LOG}"
 elif [[ $UPLOAD_EXIT -eq 2 ]]; then
-    MSG="PARTIAL: ${UPLOAD_LABEL} NOT uploaded to ${NODE_FAILED} cluster node(s) via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}. Likely cause: cluster config sync from the publisher is lagging or failing for the nodes not updated."
+    MSG="PARTIAL: ${UPLOAD_LABEL} NOT uploaded to ${NODE_FAILED} cluster node(s) via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}. Likely cause: cluster config sync from the publisher is lagging or failing for the nodes not updated.${TRIGGER_NOTE}"
     log "Upload partially succeeded (${NODE_FAILED} node(s) not updated)."
     status_write "WARN" "UPLOAD" "$MSG"
     python3 /opt/cppm/notify.py \
@@ -187,6 +194,7 @@ else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"
     MSG="ClearPass upload failed (exit ${UPLOAD_EXIT}) for ${CPPM_HOST}"
     [[ -n "$NODE_SUMMARY" ]] && MSG="${MSG}. ${NODE_SUMMARY}"
+    MSG="${MSG}${TRIGGER_NOTE}"
     status_write "FAILED" "UPLOAD" "${MSG} – check cppm_upload.log"
     python3 /opt/cppm/notify.py \
         --server-id "${SERVER_ID:-}" \

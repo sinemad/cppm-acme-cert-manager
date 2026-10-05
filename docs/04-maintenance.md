@@ -12,7 +12,13 @@ docker compose up -d
 ```
 
 On restart the container sees the existing flat `.cer` files, logs the expiry,
-and starts crond. No re-issue, no upload — nothing happens until renewal is due.
+and starts crond. No re-issue happens. **The certificates are also uploaded to
+every ClearPass target on each restart, even when nothing has changed.** This is
+intentional: it re-delivers the certificate to any node that missed an earlier
+upload, so a restart can repair a cluster sync gap. It also means restarts while
+testing will show upload activity in `cppm_upload.log` and may trigger ClearPass
+service reloads on each target, so expect that. Renewals still run on schedule
+at 02:00 and 14:00 UTC and upload only when a certificate is actually renewed.
 
 ---
 

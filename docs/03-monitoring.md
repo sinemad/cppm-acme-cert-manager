@@ -453,10 +453,14 @@ startup and shutdown events only (not per-server cert or upload activity).
 
 ### Normal restart (both certs already installed)
 
+Restarts re-upload the existing certificates to each ClearPass target. The
+upload lines below are expected during testing and are not a renewal.
+
 ```
 2026-03-18 09:00:01 | INFO   | STARTUP | Container started
 2026-03-18 09:00:02 | OK     | CERT    | ECC+RSA valid – expires Jun 15 2026 (88 days remaining)
-2026-03-18 09:00:02 | INFO   | STARTUP | supercronic started – renewal checks at 02:00 and 14:00 UTC
+2026-03-18 09:00:03 | OK     | UPLOAD  | selected certificate targets uploaded to <cluster> via Let's Encrypt – expires Jun 15 2026
+2026-03-18 09:00:03 | INFO   | STARTUP | supercronic started – renewal checks at 02:00 and 14:00 UTC
 ```
 
 ### Daily renewal check (not yet due)
