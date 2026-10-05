@@ -119,30 +119,81 @@ fi
 log "Invoking ClearPass upload to ${CPPM_HOST}..."
 
 UPLOAD_EXIT=0
-python3 /opt/cppm/clearpass_upload.py \
+NODE_RESULTS="${LOG_DIR}/cppm_node_results.json"
+rm -f "$NODE_RESULTS" 2>/dev/null || true
+CPPM_NODE_RESULTS_FILE="$NODE_RESULTS" python3 /opt/cppm/clearpass_upload.py \
     "${UPLOAD_ARGS[@]}" \
     --domain "$DOMAIN" \
     2>&1 | tee -a "$LOG" 2>/dev/null || UPLOAD_EXIT=$?
 
-if [[ $UPLOAD_EXIT -eq 0 ]]; then
-    log "Upload succeeded."
+# Cluster mode writes per-node results. Build one line listing every node,
+# e.g. "received: 10.0.0.11 (a.example.com) | NOT updated: 10.0.0.12 (b.example.com) (exit 1)"
+NODE_SUMMARY=""
+NODE_FAILED=""
+if [[ -s "$NODE_RESULTS" ]]; then
+    NODE_SUMMARY=$(python3 - "$NODE_RESULTS" 2>/dev/null <<'PY' || true
+import json, sys
+results = json.load(open(sys.argv[1]))
+def label(r):
+    return "{} ({})".format(r["ip"], r["fqdn"] or "no FQDN")
+ok  = [label(r) for r in results if r["ok"]]
+bad = [label(r) + " " + r["reason"] for r in results if not r["ok"]]
+parts = []
+if ok:
+    parts.append("received: " + ", ".join(ok))
+if bad:
+    parts.append("NOT updated: " + ", ".join(bad))
+print(" | ".join(parts))
+PY
+    )
+    NODE_FAILED=$(python3 - "$NODE_RESULTS" 2>/dev/null <<'PY' || true
+import json, sys
+print(sum(1 for r in json.load(open(sys.argv[1])) if not r["ok"]))
+PY
+    )
+fi
+
+if [[ $UPLOAD_EXIT -eq 0 || $UPLOAD_EXIT -eq 2 ]]; then
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
     UPLOAD_LABEL="selected certificate targets"
-    status_write "OK" "UPLOAD" "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
+fi
+
+if [[ $UPLOAD_EXIT -eq 0 ]]; then
+    log "Upload succeeded."
+    if [[ -n "$NODE_SUMMARY" ]]; then
+        MSG="${UPLOAD_LABEL} uploaded to all cluster nodes via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}"
+    else
+        MSG="${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}"
+    fi
+    status_write "OK" "UPLOAD" "$MSG"
     python3 /opt/cppm/notify.py \
         --server-id "${SERVER_ID:-}" \
         --event upload_success \
-        --message "${UPLOAD_LABEL} uploaded to ${CPPM_HOST} via ${ACME_CA_LABEL} – expires ${EXPIRY}" \
-        2>/dev/null || true
+        --message "$MSG" \
+        2>&1 | tee -a "$LOG" >/dev/null \
+        || err "Notification (upload_success) failed – see errors above in ${LOG}"
+elif [[ $UPLOAD_EXIT -eq 2 ]]; then
+    MSG="PARTIAL: ${UPLOAD_LABEL} NOT uploaded to ${NODE_FAILED} cluster node(s) via ${ACME_CA_LABEL} – expires ${EXPIRY}. ${NODE_SUMMARY}. Likely cause: cluster config sync from the publisher is lagging or failing for the nodes not updated."
+    log "Upload partially succeeded (${NODE_FAILED} node(s) not updated)."
+    status_write "WARN" "UPLOAD" "$MSG"
+    python3 /opt/cppm/notify.py \
+        --server-id "${SERVER_ID:-}" \
+        --event upload_partial \
+        --message "$MSG" \
+        2>&1 | tee -a "$LOG" >/dev/null \
+        || err "Notification (upload_partial) failed – see errors above in ${LOG}"
 else
     err "Upload failed (exit ${UPLOAD_EXIT}) – check ${LOG}"
-    status_write "FAILED" "UPLOAD" "ClearPass upload failed (exit ${UPLOAD_EXIT}) – check cppm_upload.log"
+    MSG="ClearPass upload failed (exit ${UPLOAD_EXIT}) for ${CPPM_HOST}"
+    [[ -n "$NODE_SUMMARY" ]] && MSG="${MSG}. ${NODE_SUMMARY}"
+    status_write "FAILED" "UPLOAD" "${MSG} – check cppm_upload.log"
     python3 /opt/cppm/notify.py \
         --server-id "${SERVER_ID:-}" \
         --event upload_failed \
-        --message "ClearPass upload failed (exit ${UPLOAD_EXIT}) for ${CPPM_HOST} – check cppm_upload.log" \
-        2>/dev/null || true
+        --message "${MSG} – check cppm_upload.log" \
+        2>&1 | tee -a "$LOG" >/dev/null \
+        || err "Notification (upload_failed) failed – see errors above in ${LOG}"
 fi
 
 log "=== Deploy Hook Complete ==="

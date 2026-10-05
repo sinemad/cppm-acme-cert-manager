@@ -8,6 +8,7 @@ Can be imported or called as a CLI:
 Supported events:
     cert_issued     New certificates issued or renewed
     upload_success  ClearPass upload succeeded
+    upload_partial  ClearPass upload reached some cluster nodes but not all
     upload_failed   ClearPass upload failed
     cert_expiry     Certificate expiring within threshold
     acme_error      ACME or DNS provider error
@@ -49,6 +50,7 @@ _STATUS_ICON = {"ok": "✅", "warn": "⚠️", "failed": "❌"}
 _EVENT_LABEL = {
     "cert_issued":    "Certificate Issued",
     "upload_success": "Upload Succeeded",
+    "upload_partial": "Upload Partially Succeeded",
     "upload_failed":  "Upload Failed",
     "cert_expiry":    "Certificate Expiring Soon",
     "acme_error":     "ACME / DNS Error",
@@ -58,7 +60,7 @@ _EVENT_LABEL = {
 def _status_for_event(event: str) -> str:
     if event in ("upload_failed", "acme_error"):
         return "failed"
-    if event == "cert_expiry":
+    if event in ("cert_expiry", "upload_partial"):
         return "warn"
     return "ok"
 
@@ -240,7 +242,13 @@ def send_notification(server_id: str, event: str, message: str,
         if not ch.get("enabled", True):
             continue
         subscribed = ch.get("events") or []
-        if event not in subscribed:
+        # upload_partial is not a user option: any channel that receives upload
+        # results gets partial-success alerts too, since they only occur in cluster mode.
+        if event == "upload_partial":
+            receives = ("upload_partial", "upload_success", "upload_failed")
+            if not any(e in subscribed for e in receives):
+                continue
+        elif event not in subscribed:
             continue
         ch_type = ch.get("type", "")
         sender  = _SENDERS.get(ch_type)

@@ -1163,9 +1163,29 @@ def _install_cluster_host_header(fqdn: str) -> None:
     requests.sessions.Session.request = patched_request
 
 
+def _write_node_results(results: list[dict]) -> None:
+    """Write per-node outcomes to CPPM_NODE_RESULTS_FILE for deploy_hook.sh.
+
+    The hook uses this to build the status line and notification, so the
+    operator sees which nodes received the cert and which did not.
+    """
+    path = os.environ.get("CPPM_NODE_RESULTS_FILE", "")
+    if not path:
+        return
+    try:
+        with open(path, "w") as fh:
+            json.dump(results, fh)
+    except OSError as exc:
+        log.warning("Could not write node results to %s: %s", path, exc)
+
+
 def _run_cluster_uploads(args: argparse.Namespace, nodes: list[dict]) -> int:
-    """Run the normal upload workflow once per cluster node."""
-    failures = 0
+    """Run the normal upload workflow once per cluster node.
+
+    Exit codes: 0 = every node received the cert, 2 = partial success (some
+    nodes failed), 1 = no node received the cert.
+    """
+    results: list[dict] = []
     all_ips = [n["ip"] for n in nodes]
     child_env = {**os.environ, "CPPM_CLUSTER_MODE": "false"}
     for node in nodes:
@@ -1196,10 +1216,32 @@ def _run_cluster_uploads(args: argparse.Namespace, nodes: list[dict]) -> int:
         result = subprocess.run(
             [sys.executable, __file__, *sys.argv[1:]], env=node_env, check=False
         )
-        if result.returncode != 0:
-            failures += 1
+        ok = result.returncode == 0
+        results.append({
+            "ip": host,
+            "fqdn": fqdn or "",
+            "ok": ok,
+            "reason": "" if ok else f"exit {result.returncode}",
+        })
+        if not ok:
             log.error("Cluster node upload failed for %s (exit %d)", host, result.returncode)
-    return 1 if failures else 0
+
+    _write_node_results(results)
+    succeeded = sum(1 for r in results if r["ok"])
+    failed = len(results) - succeeded
+    if failed == 0:
+        log.info("Cluster upload complete: all %d node(s) received the certificate.", len(results))
+        return 0
+    if succeeded == 0:
+        log.error("Cluster upload failed: no node received the certificate.")
+        return 1
+    failed_list = ", ".join(f"{r['ip']} ({r['fqdn'] or 'no FQDN'})" for r in results if not r["ok"])
+    log.warning(
+        "Cluster upload PARTIAL: %d of %d node(s) received the certificate. Not updated: %s. "
+        "Likely cause: cluster config sync from the publisher is lagging or failing for these nodes.",
+        succeeded, len(results), failed_list,
+    )
+    return 2
 
 
 def main() -> int:
