@@ -83,6 +83,15 @@ COOKIE_NAME = "cppm_session"
 # When False (default) the dashboard and /api/status are publicly readable.
 # Set to true to require authentication even for the read-only status page.
 REQUIRE_AUTH_FOR_STATUS = os.environ.get("REQUIRE_AUTH_FOR_STATUS", "false").lower() == "true"
+# Subscriber nodes can lag publisher config replication and return 403 briefly.
+STATUS_SYNC_ATTEMPTS = 7
+STATUS_SYNC_RETRY_DELAY_SECONDS = 2
+# Check nodes queries every node in parallel and stops waiting after this long.
+CLUSTER_CHECK_DEADLINE_SECONDS = 20
+_STILL_SYNCING_MESSAGE = (
+    "Still syncing or slow to respond — no answer within "
+    f"{CLUSTER_CHECK_DEADLINE_SECONDS} seconds. Check again in a minute."
+)
 
 _SESSION_SECRET: bytes = b""
 
@@ -371,6 +380,252 @@ def _node_address(node: dict, primary_host: str = "") -> tuple[str, str]:
     return display, ""
 
 
+def _run_nodes_parallel(nodes: list, check, pending, deadline: float) -> list[dict]:
+    """Check all nodes concurrently and return results in node order.
+
+    Nodes still running at the deadline get pending(node) instead, so one slow
+    subscriber cannot hold up the report for the rest of the cluster.
+    """
+    from concurrent.futures import ThreadPoolExecutor, wait
+    if not nodes:
+        return []
+    def timed(node):
+        started = time.monotonic()
+        entry = check(node)
+        entry["elapsed_seconds"] = round(time.monotonic() - started, 1)
+        return entry
+
+    pool = ThreadPoolExecutor(max_workers=len(nodes))
+    futures = [pool.submit(timed, node) for node in nodes]
+    wait(futures, timeout=max(0.0, deadline - time.monotonic()))
+    pool.shutdown(wait=False, cancel_futures=True)
+    return [f.result() if f.done() and f.exception() is None else pending(node)
+            for node, f in zip(nodes, futures)]
+
+
+def _subscriber_cert_with_retry(node_host: str, node_name: str, client_id: str,
+                                client_secret: str, verify: bool, timeout: int,
+                                deadline: float):
+    """Authenticate directly to a subscriber node and fetch its server-cert list.
+
+    ClearPass replicates API clients to subscribers with a lag, so a 403 right
+    after a config change is retried up to STATUS_SYNC_ATTEMPTS times, stopping
+    early at the deadline. Returns the last response, or None if the node never
+    accepted the client. Also returns the number of attempts made.
+    """
+    import requests
+    response = None
+    attempts = 0
+    for attempt in range(1, STATUS_SYNC_ATTEMPTS + 1):
+        if time.monotonic() >= deadline:
+            break
+        attempts = attempt
+        sub_auth = requests.post(
+            f"https://{node_host}/api/oauth",
+            data={"grant_type": "client_credentials",
+                  "client_id": client_id,
+                  "client_secret": client_secret},
+            timeout=timeout, verify=verify,
+            headers={"Host": node_name},
+        )
+        if sub_auth.status_code == 200:
+            token = sub_auth.json().get("access_token", "")
+            response = requests.get(
+                f"https://{node_host}/api/server-cert",
+                headers={"Authorization": f"Bearer {token}", "Host": node_name},
+                verify=verify, timeout=timeout, allow_redirects=False,
+            )
+            if response.status_code != 403:
+                break
+        if attempt < STATUS_SYNC_ATTEMPTS:
+            time.sleep(STATUS_SYNC_RETRY_DELAY_SECONDS)
+    return response, attempts
+
+
+def _pending_probe_entry(node: dict, host: str) -> dict:
+    node_name, node_host = _node_address(node, primary_host=host)
+    return {"host": node_name, "address": node_host, "services": [],
+            "status": "warn", "error": _STILL_SYNCING_MESSAGE,
+            "syncing": True, "guidance": None, "guidance_type": "syncing"}
+
+
+def _pending_dashboard_entry(node: dict, host: str) -> dict:
+    node_name, node_host = _node_address(node, primary_host=host)
+    return {"host": node_name, "address": node_host, "services": [],
+            "syncing": True, "message": _STILL_SYNCING_MESSAGE}
+
+
+def _probe_cluster_node(node: dict, host: str, pub_token: str, client_id: str,
+                        client_secret: str, verify_ssl: bool, deadline: float) -> dict:
+    """Check one cluster node's certificate services for the Check nodes button."""
+    import requests
+    node_name, node_host = _node_address(node, primary_host=host)
+    entry: dict = {"host": node_name, "address": node_host,
+                   "services": [], "status": "ok",
+                   "error": None, "guidance": None, "guidance_type": None}
+
+    if not node_host:
+        entry["status"] = "error"
+        entry["error"]  = "Node address does not resolve inside the container."
+        entry["guidance"] = (
+            "The container cannot resolve this node's hostname. "
+            "Check that your docker-compose dns: setting includes an internal resolver, "
+            "or use IP addresses for all ClearPass nodes."
+        )
+        entry["guidance_type"] = "dns"
+        return entry
+
+    sync_attempts = 0
+    try:
+        # Try publisher token first
+        nr = requests.get(
+            f"https://{node_host}/api/server-cert",
+            headers={"Authorization": f"Bearer {pub_token}", "Host": node_name},
+            verify=verify_ssl, timeout=10, allow_redirects=False,
+        )
+        if 300 <= nr.status_code < 400:
+            nr = requests.get(
+                f"https://{node_host}/api/server-cert",
+                headers={"Authorization": f"Bearer {pub_token}", "Host": node_name},
+                verify=verify_ssl, timeout=10, allow_redirects=False,
+            )
+
+        if nr.status_code == 403 and node_host != host:
+            # Publisher token rejected by subscriber: authenticate to the node directly
+            sub_nr, sync_attempts = _subscriber_cert_with_retry(
+                node_host, node_name, client_id, client_secret, verify_ssl, 10, deadline)
+            if sub_nr is None or sub_nr.status_code == 403:
+                if time.monotonic() >= deadline:
+                    return _pending_probe_entry(node, host)
+                entry["status"] = "error"
+                entry["error"]  = f"403 Forbidden — API client '{client_id}' is not authorised on this cluster node."
+                entry["guidance"] = (
+                    "The API client has not been synced to this subscriber node. "
+                    "In ClearPass Admin UI → Administration → API Services → API Clients, "
+                    "verify the client exists on every node and has Certificate Management permission. "
+                    "Wait 2–5 minutes for cluster replication, then re-check."
+                )
+                entry["guidance_type"] = "permission"
+                entry["sync_attempts"] = sync_attempts
+                return entry
+            nr = sub_nr
+
+        if nr.status_code == 403:
+            entry["status"] = "error"
+            entry["error"]  = "403 Forbidden — Certificate Management permission is missing."
+            entry["guidance"] = (
+                "The API client's Operator Profile does not include Certificate Management access. "
+                "In ClearPass Admin UI → Administration → API Services → API Clients, "
+                "edit the client and ensure its Operator Profile includes Allow → All → Certificate Management."
+            )
+            entry["guidance_type"] = "permission"
+            return entry
+
+        nr.raise_for_status()
+
+        services = []
+        for item in _api_items(nr.json()):
+            name = str(item.get("service_name", ""))
+            if name in ("HTTPS(ECC)", "HTTPS(RSA)", "RADIUS", "RadSec"):
+                services.append({
+                    "service_name": name,
+                    "service_id":   item.get("service_id"),
+                    "status": "installed" if item.get("enabled", True) else "disabled",
+                })
+        entry["services"] = services
+        if not services:
+            entry["status"] = "warn"
+            entry["error"]  = "Connected but no certificate services returned."
+            entry["guidance"] = "This node may be a standby node or may not expose certificate service data."
+            entry["guidance_type"] = "no_data"
+
+    except Exception as exc:
+        classified = _classify_conn_error(exc, node_host)
+        entry["status"]   = "error"
+        entry["error"]    = classified["message"]
+        entry["guidance_type"] = "connection"
+        if "DNS" in classified["message"] or "resolve" in classified["message"].lower():
+            entry["guidance"] = (
+                "The container cannot reach this cluster node by its configured address. "
+                "Ensure the node IP is routable from the Docker container."
+            )
+            entry["guidance_type"] = "dns"
+        else:
+            entry["guidance"] = (
+                "Check network connectivity between the Docker container and this cluster node. "
+                "Ensure port 443 is open on the node's firewall."
+            )
+    entry["sync_attempts"] = sync_attempts
+    return entry
+
+
+def _check_dashboard_node(node: dict, host: str, pub_token: str, client_id: str,
+                          client_secret: str, verify: bool, deadline: float) -> dict:
+    """Fetch one cluster node's certificate services for the dashboard."""
+    import requests
+    node_name, node_host = _node_address(node, primary_host=host)
+    if not node_host:
+        return {"host": node_name, "services": [], "error": "Node address does not resolve"}
+
+    sync_attempts = 0
+    try:
+        # ClearPass may redirect IP requests to its configured FQDN; retry
+        # pinned to the management IP so the FQDN need not resolve.
+        node_response = requests.get(
+            f"https://{node_host}/api/server-cert",
+            headers={"Authorization": f"Bearer {pub_token}", "Host": node_name},
+            verify=verify, timeout=8, allow_redirects=False,
+        )
+        if 300 <= node_response.status_code < 400:
+            node_response = requests.get(
+                f"https://{node_host}/api/server-cert",
+                headers={"Authorization": f"Bearer {pub_token}", "Host": node_name},
+                verify=verify, timeout=8, allow_redirects=False,
+            )
+
+        if node_response.status_code == 403 and node_host != host:
+            # Publisher token rejected by subscriber (common while the API client
+            # is still replicating): authenticate directly to the subscriber.
+            sub, sync_attempts = _subscriber_cert_with_retry(
+                node_host, node_name, client_id, client_secret, verify, 8, deadline)
+            if sub is None or sub.status_code == 403:
+                if time.monotonic() >= deadline:
+                    return _pending_dashboard_entry(node, host)
+                return {
+                    "host": node_name, "address": node_host, "services": [],
+                    "sync_attempts": sync_attempts,
+                    "error": (
+                        f"403 Forbidden — API client '{client_id}' is not authorised on "
+                        f"this cluster node ({node_host}). "
+                        "Ensure the API client exists on the subscriber node and has "
+                        "Certificate Management permission. "
+                        "In ClearPass Policy Manager go to Administration → API Services → "
+                        "API Clients, create or verify the client on every node, then "
+                        "wait a few minutes for cluster sync."
+                    ),
+                }
+            node_response = sub
+
+        node_response.raise_for_status()
+
+        services = []
+        for item in _api_items(node_response.json()):
+            name = str(item.get("service_name", ""))
+            if name in ("HTTPS(ECC)", "HTTPS(RSA)", "RADIUS", "RadSec"):
+                services.append({
+                    "service_name": name,
+                    "service_id":   item.get("service_id"),
+                    "status": "installed" if item.get("enabled", True) else "disabled",
+                })
+        return {"host": node_name, "address": node_host, "services": services,
+                "sync_attempts": sync_attempts}
+
+    except Exception as exc:
+        return {"host": node_name, "address": node_host,
+                "services": [], "error": str(exc)}
+
+
+
 def _cluster_check_probe(host: str, client_id: str,
                          client_secret: str, verify_ssl: bool) -> list[dict]:
     """Run a cluster node connectivity check using the supplied credentials.
@@ -394,7 +649,6 @@ def _cluster_check_probe(host: str, client_id: str,
         import requests
         from pyclearpass.api_localserverconfiguration import ApiLocalServerConfiguration
 
-        t0 = time.time()
         pub_response = requests.post(
             f"https://{host}/api/oauth",
             data={"grant_type": "client_credentials",
@@ -421,121 +675,14 @@ def _cluster_check_probe(host: str, client_id: str,
                      "guidance": "Verify this ClearPass server is configured as a cluster publisher in Admin UI → Administration → Server Manager.",
                      "guidance_type": "cluster_config"}]
 
-        results = []
-        for node in raw_nodes:
-            node_name, node_host = _node_address(node, primary_host=host)
-            entry: dict = {"host": node_name, "address": node_host,
-                           "services": [], "status": "ok",
-                           "error": None, "guidance": None, "guidance_type": None}
-
-            if not node_host:
-                entry["status"] = "error"
-                entry["error"]  = "Node address does not resolve inside the container."
-                entry["guidance"] = (
-                    "The container cannot resolve this node's hostname. "
-                    "Check that your docker-compose dns: setting includes an internal resolver, "
-                    "or use IP addresses for all ClearPass nodes."
-                )
-                entry["guidance_type"] = "dns"
-                results.append(entry)
-                continue
-
-            # Try publisher token first
-            token = pub_token
-            try:
-                nr = requests.get(
-                    f"https://{node_host}/api/server-cert",
-                    headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                    verify=verify_ssl, timeout=10, allow_redirects=False,
-                )
-                if 300 <= nr.status_code < 400:
-                    nr = requests.get(
-                        f"https://{node_host}/api/server-cert",
-                        headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                        verify=verify_ssl, timeout=10, allow_redirects=False,
-                    )
-
-                if nr.status_code == 403 and node_host != host:
-                    # Try authenticating directly to this subscriber node
-                    sub_auth = requests.post(
-                        f"https://{node_host}/api/oauth",
-                        data={"grant_type": "client_credentials",
-                              "client_id": client_id,
-                              "client_secret": client_secret},
-                        timeout=10, verify=verify_ssl,
-                        headers={"Host": node_name},
-                    )
-                    if sub_auth.status_code == 200:
-                        token = sub_auth.json().get("access_token", "")
-                        nr = requests.get(
-                            f"https://{node_host}/api/server-cert",
-                            headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                            verify=verify_ssl, timeout=10, allow_redirects=False,
-                        )
-                    else:
-                        entry["status"] = "error"
-                        entry["error"]  = f"403 Forbidden — API client '{client_id}' is not authorised on this cluster node."
-                        entry["guidance"] = (
-                            "The API client has not been synced to this subscriber node. "
-                            "In ClearPass Admin UI → Administration → API Services → API Clients, "
-                            "verify the client exists on every node and has Certificate Management permission. "
-                            "Wait 2–5 minutes for cluster replication, then re-check."
-                        )
-                        entry["guidance_type"] = "permission"
-                        results.append(entry)
-                        continue
-
-                if nr.status_code == 403:
-                    entry["status"] = "error"
-                    entry["error"]  = "403 Forbidden — Certificate Management permission is missing."
-                    entry["guidance"] = (
-                        "The API client's Operator Profile does not include Certificate Management access. "
-                        "In ClearPass Admin UI → Administration → API Services → API Clients, "
-                        "edit the client and ensure its Operator Profile includes Allow → All → Certificate Management."
-                    )
-                    entry["guidance_type"] = "permission"
-                    results.append(entry)
-                    continue
-
-                nr.raise_for_status()
-
-                services = []
-                for item in _api_items(nr.json()):
-                    name = str(item.get("service_name", ""))
-                    if name in ("HTTPS(ECC)", "HTTPS(RSA)", "RADIUS", "RadSec"):
-                        services.append({
-                            "service_name": name,
-                            "service_id":   item.get("service_id"),
-                            "status": "installed" if item.get("enabled", True) else "disabled",
-                        })
-                entry["services"] = services
-                if not services:
-                    entry["status"] = "warn"
-                    entry["error"]  = "Connected but no certificate services returned."
-                    entry["guidance"] = "This node may be a standby node or may not expose certificate service data."
-                    entry["guidance_type"] = "no_data"
-
-            except Exception as exc:
-                classified = _classify_conn_error(exc, node_host)
-                entry["status"]   = "error"
-                entry["error"]    = classified["message"]
-                entry["guidance_type"] = "connection"
-                if "DNS" in classified["message"] or "resolve" in classified["message"].lower():
-                    entry["guidance"] = (
-                        "The container cannot reach this cluster node by its configured address. "
-                        "Ensure the node IP is routable from the Docker container."
-                    )
-                    entry["guidance_type"] = "dns"
-                else:
-                    entry["guidance"] = (
-                        "Check network connectivity between the Docker container and this cluster node. "
-                        "Ensure port 443 is open on the node's firewall."
-                    )
-
-            results.append(entry)
-
-        elapsed_ms = int((time.time() - t0) * 1000)
-        return results
+        deadline = time.monotonic() + CLUSTER_CHECK_DEADLINE_SECONDS
+        return _run_nodes_parallel(
+            raw_nodes,
+            lambda node: _probe_cluster_node(node, host, pub_token, client_id,
+                                             client_secret, verify_ssl, deadline),
+            lambda node: _pending_probe_entry(node, host),
+            deadline,
+        )
 
     except Exception as exc:
         classified = _classify_conn_error(exc, host)
@@ -560,6 +707,44 @@ def _fetch_cluster_node_status(server: dict) -> list[dict]:
     with _cluster_lock:
         _cluster_cache[server_id] = (time.time(), result)
     return result
+
+
+def _log_cluster_check(server: dict, nodes: list, total_seconds: float) -> None:
+    """Write per-node timing and sync retries to the server's status.log.
+
+    Lets an administrator see which subscriber is slow to replicate API clients
+    and tune the cluster, rather than only seeing the dashboard result.
+    """
+    timed = [n for n in nodes if n.get("elapsed_seconds") is not None]
+    summary = f"Cluster check of {len(nodes)} node(s) took {total_seconds:.1f}s"
+    if timed:
+        slowest = max(timed, key=lambda n: n["elapsed_seconds"])
+        summary += (f"; slowest {slowest.get('host', 'unknown')} "
+                    f"{slowest['elapsed_seconds']:.1f}s")
+    _write_server_status_log(server, "INFO", "CLUSTER", summary)
+
+    for node in nodes:
+        host = node.get("host") or "unknown"
+        elapsed = node.get("elapsed_seconds")
+        took = f" in {elapsed:.1f}s" if elapsed is not None else ""
+        if node.get("syncing"):
+            _write_server_status_log(
+                server, "WARN", "CLUSTER",
+                f"Node {host} still syncing after {CLUSTER_CHECK_DEADLINE_SECONDS}s; "
+                "API client not yet accepted. Check again shortly, and review replication "
+                "or network latency to this node if it persists.")
+        elif node.get("sync_attempts"):
+            attempts = node["sync_attempts"]
+            if node.get("error"):
+                _write_server_status_log(
+                    server, "FAILED", "CLUSTER",
+                    f"Node {host} rejected the API client after {attempts} attempts{took}. "
+                    "Check the API client and its permissions on that node.")
+            else:
+                _write_server_status_log(
+                    server, "WARN", "CLUSTER",
+                    f"Node {host} accepted the API client after {attempts} attempts{took} "
+                    "(replication lag).")
 
 
 def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
@@ -599,95 +784,16 @@ def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
             verify_ssl=verify, timeout=8,
         ).get_cluster_server()
 
-        result = []
-        for node in _api_items(nodes_raw):
-            node_name, node_host = _node_address(node, primary_host=host)
-            if not node_host:
-                result.append({"host": node_name, "services": [],
-                                "error": "Node address does not resolve"})
-                continue
-
-            # Try the publisher token first; if the subscriber node returns 403
-            # (common when the API client hasn't been synced across the cluster)
-            # fall back to authenticating directly to that node.
-            token = pub_token
-            node_response = requests.get(
-                f"https://{node_host}/api/server-cert",
-                headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                verify=verify, timeout=8, allow_redirects=False,
-            )
-            # ClearPass may redirect IP requests to its configured FQDN; retry
-            # pinned to the management IP so the FQDN need not resolve.
-            if 300 <= node_response.status_code < 400:
-                node_response = requests.get(
-                    f"https://{node_host}/api/server-cert",
-                    headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                    verify=verify, timeout=8, allow_redirects=False,
-                )
-
-            if node_response.status_code == 403 and node_host != host:
-                # Publisher token rejected by subscriber — try authenticating
-                # directly to the subscriber node's own OAuth endpoint.
-                try:
-                    sub_auth = requests.post(
-                        f"https://{node_host}/api/oauth",
-                        data={"grant_type": "client_credentials",
-                              "client_id": client_id,
-                              "client_secret": client_secret},
-                        timeout=8, verify=verify,
-                        headers={"Host": node_name},
-                    )
-                    if sub_auth.status_code == 200:
-                        token = sub_auth.json().get("access_token", "")
-                        node_response = requests.get(
-                            f"https://{node_host}/api/server-cert",
-                            headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                            verify=verify, timeout=8, allow_redirects=False,
-                        )
-                    else:
-                        result.append({
-                            "host": node_name, "address": node_host, "services": [],
-                            "error": (
-                                f"403 Forbidden — API client '{client_id}' is not authorised on "
-                                f"this cluster node ({node_host}). "
-                                "Ensure the API client exists on the subscriber node and has "
-                                "Certificate Management permission. "
-                                "In ClearPass Policy Manager go to Administration → API Services → "
-                                "API Clients, create or verify the client on every node, then "
-                                "wait a few minutes for cluster sync."
-                            ),
-                        })
-                        continue
-                except Exception:
-                    result.append({
-                        "host": node_name, "address": node_host, "services": [],
-                        "error": (
-                            f"403 Forbidden — publisher token was rejected and direct auth to "
-                            f"{node_host} failed. "
-                            "Verify the API client has Certificate Management permission on all "
-                            "cluster nodes."
-                        ),
-                    })
-                    continue
-
-            try:
-                node_response.raise_for_status()
-            except Exception as exc:
-                result.append({"host": node_name, "address": node_host,
-                                "services": [], "error": str(exc)})
-                continue
-
-            services = []
-            for item in _api_items(node_response.json()):
-                name = str(item.get("service_name", ""))
-                if name in ("HTTPS(ECC)", "HTTPS(RSA)", "RADIUS", "RadSec"):
-                    services.append({
-                        "service_name": name,
-                        "service_id":   item.get("service_id"),
-                        "status": "installed" if item.get("enabled", True) else "disabled",
-                    })
-            result.append({"host": node_name, "address": node_host, "services": services})
-
+        deadline = time.monotonic() + CLUSTER_CHECK_DEADLINE_SECONDS
+        started = time.monotonic()
+        result = _run_nodes_parallel(
+            _api_items(nodes_raw),
+            lambda node: _check_dashboard_node(node, host, pub_token, client_id,
+                                               client_secret, verify, deadline),
+            lambda node: _pending_dashboard_entry(node, host),
+            deadline,
+        )
+        _log_cluster_check(server, result, time.monotonic() - started)
         return result
 
     except Exception as exc:
@@ -1326,7 +1432,6 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_cert_passphrase": f.get("cppm_cert_passphrase", ""),
         "cppm_callback_host":   f.get("cppm_callback_host", "").strip(),
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
-        "cluster_sync_delay_seconds": f.get("cluster_sync_delay_seconds", "0").strip() or "0",
         "domain":               f.get("domain", "").strip(),
         "san_dns":              [name for name in san_dns if name],
         "acme_email":           f.get("acme_email", "").strip(),
@@ -1352,7 +1457,6 @@ def _default_server_from_env() -> dict:
         "cppm_cert_passphrase": "",
         "cppm_callback_host":   "",
         "cppm_callback_port":   "8765",
-        "cluster_sync_delay_seconds": "0",
         "domain":               "",
         "san_dns":              [],
         "acme_email":           "",
@@ -1753,7 +1857,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .cert-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
 .cert-title{font-size:0.85rem;font-weight:600}
 .badge{font-size:0.68rem;padding:0.18rem 0.55rem;border-radius:999px;font-weight:600}
-.badge-ok{background:rgba(34,197,94,.15);color:var(--ok)}.badge-warn{background:rgba(245,158,11,.15);color:var(--warn)}.badge-danger{background:rgba(239,68,68,.15);color:var(--danger)}.badge-none{background:rgba(100,116,139,.12);color:var(--subtle)}
+.badge-ok{background:rgba(34,197,94,.15);color:var(--ok)}.badge-warn{background:rgba(245,158,11,.15);color:var(--warn)}.badge-danger{background:rgba(239,68,68,.15);color:var(--danger)}.badge-none{background:rgba(100,116,139,.12);color:var(--subtle)}.badge-syncing{background:rgba(129,140,248,.15);color:var(--info)}
 .days-num{font-size:2.8rem;font-weight:800;line-height:1;letter-spacing:-.03em}
 .days-num.ok{color:var(--ok)}.days-num.warn{color:var(--warn)}.days-num.danger{color:var(--danger)}.days-num.none{color:var(--subtle)}
 .days-label{font-size:0.72rem;color:var(--muted);margin-top:0.1rem}
@@ -2959,18 +3063,13 @@ def _settings_form_page(server: dict = None, error: str = "",
             Cluster mode <span class="hint">— upload to all ClearPass nodes</span>
           </label>
           <div id="cluster-check-bar" style="display:{('flex' if s.get('cppm_cluster_mode') else 'none')};align-items:center;gap:0.6rem">
+            <input type="hidden" id="cluster-server-id" value="{sid}">
             <button type="button" class="btn btn-ghost" id="cluster-check-btn" onclick="runClusterCheck()">
               &#128270; Check nodes
             </button>
             <span id="cluster-check-spinner" style="display:none;font-size:0.78rem;color:var(--muted)">Checking…</span>
           </div>
           <div id="cluster-check-results" style="display:none;margin-top:0.75rem"></div>
-          <div id="cluster-sync-delay-field" style="display:{('block' if s.get('cppm_cluster_mode') else 'none')};margin-top:0.75rem">
-            <label>Cluster Sync Retry Budget (seconds) <span class="hint">(retry 403s while the node catches up)</span>{_help_toggle('cluster_sync_delay', 'On slower clusters, the publisher&rsquo;s database sync to a node can lag behind a config change, so any call to that node — not just the first — can get a transient 403 even with a valid token. When this is set above 0, a 403 from a cluster node is retried every couple of seconds until it succeeds or this many seconds have elapsed, instead of failing the run immediately. If uploads to cluster nodes fail with 403 Forbidden, try increasing this.')}</label>
-            <input type="number" name="cluster_sync_delay_seconds"
-                   value="{fv('cluster_sync_delay_seconds', '0')}"
-                   min="0" style="max-width:8em">
-          </div>
         </div>
         <div class="field">
           <label>Client ID</label>
@@ -3375,7 +3474,6 @@ function applyCertProfile(value) {
 })();
 function onClusterModeChange(cb) {
   document.getElementById('cluster-check-bar').style.display = cb.checked ? 'flex' : 'none';
-  document.getElementById('cluster-sync-delay-field').style.display = cb.checked ? 'block' : 'none';
   if (!cb.checked) {
     document.getElementById('cluster-check-results').style.display = 'none';
     document.getElementById('cluster-check-results').innerHTML = '';
@@ -3402,7 +3500,8 @@ function runClusterCheck() {
   var body = 'cppm_host=' + encodeURIComponent(host)
     + '&cppm_client_id=' + encodeURIComponent(cid)
     + '&cppm_client_secret=' + encodeURIComponent(sec)
-    + '&cppm_verify_ssl=' + encodeURIComponent(vssl);
+    + '&cppm_verify_ssl=' + encodeURIComponent(vssl)
+    + '&server_id=' + encodeURIComponent((document.getElementById('cluster-server-id') || {}).value || '');
   fetch('/api/server/cluster-check', {method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body})
   .then(function(r){ return r.json(); })
@@ -3545,6 +3644,13 @@ def _cluster_overview_row(s: dict) -> str:
             addr = str(node.get("address") or "").strip()
             label = (f'{name} <span class="cluster-node-ip">{_esc(addr)}</span>'
                      if addr and addr != node.get("host") else name)
+            if node.get("syncing"):
+                hint = _esc(node.get("message") or "")
+                chips.append(
+                    f'<div class="cluster-node-chip"><span class="cluster-node-name">{label}</span>'
+                    f'<span class="badge badge-syncing" title="{hint}">Still syncing</span></div>'
+                )
+                continue
             if node.get("error"):
                 chips.append(
                     f'<div class="cluster-node-chip"><span class="cluster-node-name">{label}</span>'
@@ -3988,6 +4094,10 @@ function renderClusterRow(s){
       var name=esc(node.host||'Unknown node');
       var addr=(node.address||'').trim();
       var label=(addr&&addr!==node.host)?name+' <span class="cluster-node-ip">'+esc(addr)+'</span>':name;
+      if(node.syncing){
+        return'<div class="cluster-node-chip"><span class="cluster-node-name">'+label+'</span>'
+          +'<span class="badge badge-syncing" style="cursor:default" title="'+esc(node.message||'')+'">Still syncing</span></div>';
+      }
       if(node.error){
         var shortErr=node.error.length>80?node.error.slice(0,77)+'…':node.error;
         return'<div class="cluster-node-chip"><span class="cluster-node-name">'+label+'</span>'
@@ -4262,9 +4372,15 @@ function renderClusterNodes(data){
   if(!nodes.length)return'<div class="card"><div class="card-title">Cluster Nodes</div><div class="empty">No cluster nodes discovered.</div></div>';
   return'<div class="card" style="margin-bottom:1rem"><div class="card-title">ClearPass Cluster Nodes</div>'
     +nodes.map(function(node){
+      var rowStyle='display:block;padding:.65rem 0;border-bottom:1px solid var(--border)';
+      if(node.syncing){
+        return'<div class="row" style="'+rowStyle+'"><strong>'+esc(node.host||'Unknown node')+'</strong> <span class="badge badge-syncing">Still syncing</span>'
+          +'<div class="hint">'+esc(node.message||'')+'</div></div>';
+      }
       var services=(node.services||[]).map(function(s){return'<span class="badge badge-ok" style="margin:0 .3rem .3rem 0">'+esc(s.service_name)+' · '+esc(s.status)+'</span>';}).join('');
-      return'<div class="row" style="display:block;padding:.65rem 0;border-bottom:1px solid var(--border)"><strong>'+esc(node.host||'Unknown node')+'</strong>'
-        +(node.error?'<div class="hint">'+esc(node.error)+'</div>':(services||'<div class="hint">No certificate service data</div>'))+'</div>';
+      var note=node.sync_attempts?'<div class="hint">Accepted after '+node.sync_attempts+' attempts (replication lag)</div>':'';
+      return'<div class="row" style="'+rowStyle+'"><strong>'+esc(node.host||'Unknown node')+'</strong>'
+        +(node.error?'<div class="hint">'+esc(node.error)+'</div>':(note+(services||'<div class="hint">No certificate service data</div>')))+'</div>';
     }).join('')+'</div>';
 }
 
@@ -4863,10 +4979,15 @@ class Handler(BaseHTTPRequestHandler):
             client_id  = f.get("cppm_client_id", "").strip()
             secret     = f.get("cppm_client_secret", "").strip()
             verify_ssl = f.get("cppm_verify_ssl", "") == "true"
+            server_id  = f.get("server_id", "").strip()
             if not host or not client_id or not secret:
                 return self._serve_json({"error": "cppm_host, cppm_client_id, and cppm_client_secret are required"}, status=400)
             try:
+                started = time.monotonic()
                 nodes = _cluster_check_probe(host, client_id, secret, verify_ssl)
+                server = get_server(server_id) if server_id else None
+                if server:
+                    _log_cluster_check(server, nodes, time.monotonic() - started)
                 return self._serve_json({"nodes": nodes})
             except Exception as exc:
                 return self._serve_json({"error": str(exc)}, status=500)

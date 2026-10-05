@@ -267,8 +267,6 @@ def cmd_show(server_id: str) -> int:
     print(f"  Callback Port:    {s.get('cppm_callback_port', '8765')}")
     print(f"  Verify SSL:       {s.get('cppm_verify_ssl', False)}")
     print(f"  Cluster Mode:     {s.get('cppm_cluster_mode', False)}")
-    if s.get("cppm_cluster_mode"):
-        print(f"  Cluster Sync Delay: {s.get('cluster_sync_delay_seconds', 0)}s")
     print()
     print(f"  Domain:           {s.get('domain', '')}")
     print(f"  ACME Email:       {s.get('acme_email', '')}")

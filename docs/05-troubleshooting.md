@@ -369,15 +369,24 @@ otherwise accept. This tends to be intermittent — the same run can succeed on
 one call and fail moments later on the next, and it isn't necessarily limited
 to the very first call after authenticating.
 
-**Fix:** Set a **Cluster Sync Retry Budget** for this server (**Servers →
-Edit → Cluster Mode → Cluster Sync Retry Budget (seconds)**). When set above
-0, a 403 from a cluster node is retried every couple of seconds until it
-succeeds or this many seconds have elapsed, instead of failing the run on the
-first lagging call — so it covers every call to that node for the life of
-the run, not just the one right after authenticating. Start with a few
-seconds and increase if 403s persist. This is also configurable per-server
-via `cppm-servers edit <id>` or directly as `CPPM_CLUSTER_SYNC_DELAY_SECONDS`
-— see [Script reference](06-script-reference.md).
+**Automatic handling:** the upload run retries a 403 from a cluster node up to
+3 times, 5 seconds apart, for every call to that node. The **Check nodes**
+status check checks all cluster nodes at the same time and waits up to 20
+seconds in total. A lagging subscriber is retried up to 7 times, 2 seconds
+apart. If a node is still being retried when the 20 seconds run out, it shows
+with a blue **Still syncing** badge rather than an error, so you can press
+**Check nodes** again in a minute. A node that accepts the API client after
+one or more retries is marked "Accepted after N attempts (replication lag)". A
+node that still returns 403 after all retries is shown as an error.
+
+**Cluster timing in the status log:** each dashboard refresh of a cluster
+server, and each **Check nodes** run on a saved server, writes `CLUSTER` lines
+to that server's `status.log`. These give the
+total check time and the slowest node, and record any node that was still
+syncing, needed retries, or rejected the API client. Use them to find which
+subscriber is slow to replicate before changing anything on the cluster. If a node keeps failing after these retries, the
+cause is more likely a setup problem (API client, permissions, or an incomplete
+Let's Encrypt or DNS configuration) than replication lag.
 
 **To confirm a fix worked:** after making any of the changes above, check the
 **Debug** checkbox next to **Upload to ClearPass** on the Servers page

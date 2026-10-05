@@ -1110,7 +1110,11 @@ def _cluster_hosts(api: ApiPlatformCertificates, current_host: str) -> list[dict
     return nodes
 
 
-def _install_cluster_host_header(fqdn: str, sync_retry_budget: int = 0) -> None:
+SYNC_RETRY_ATTEMPTS = 3
+SYNC_RETRY_DELAY_SECONDS = 5
+
+
+def _install_cluster_host_header(fqdn: str) -> None:
     """Force a matching Host header on every outbound HTTPS request in this process,
     and retry on 403 while a slow cluster catches up on config replication.
 
@@ -1126,11 +1130,9 @@ def _install_cluster_host_header(fqdn: str, sync_retry_budget: int = 0) -> None:
     entire lifetime.
 
     On slower clusters, the publisher's database sync to this subscriber node
-    can lag behind a config change (e.g. the API client itself, or a token
-    just issued), so ANY call in the sequence — not just the first — can get
-    a transient 403 while the node catches up. When sync_retry_budget > 0,
-    a 403 is retried every couple of seconds until it succeeds or the budget
-    is used up, rather than failing the whole run on the first lagging call.
+    can lag behind a config change, so ANY call in the sequence can get a
+    transient 403 while the node catches up. A 403 is retried up to
+    SYNC_RETRY_ATTEMPTS times, SYNC_RETRY_DELAY_SECONDS apart.
     """
     import requests
 
@@ -1146,22 +1148,16 @@ def _install_cluster_host_header(fqdn: str, sync_retry_budget: int = 0) -> None:
         headers = dict(headers) if headers else {}
         headers.setdefault("Host", fqdn)
         resp = original_request(self, method, url, headers=headers, **kwargs)
-        if resp.status_code == 403 and sync_retry_budget > 0:
-            deadline = time.monotonic() + sync_retry_budget
-            attempt = 0
-            while resp.status_code == 403:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                attempt += 1
-                wait = min(2, remaining)
-                log.warning(
-                    "Cluster node %s returned 403 on %s %s (attempt %d) — retrying in "
-                    "%.0fs; node may still be replicating config from the cluster "
-                    "publisher.", fqdn, method, url, attempt, wait,
-                )
-                time.sleep(wait)
-                resp = original_request(self, method, url, headers=headers, **kwargs)
+        for attempt in range(1, SYNC_RETRY_ATTEMPTS + 1):
+            if resp.status_code != 403:
+                break
+            log.warning(
+                "Cluster node %s returned 403 on %s %s (attempt %d of %d) — retrying in "
+                "%ds; node may still be replicating config from the cluster publisher.",
+                fqdn, method, url, attempt, SYNC_RETRY_ATTEMPTS, SYNC_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(SYNC_RETRY_DELAY_SECONDS)
+            resp = original_request(self, method, url, headers=headers, **kwargs)
         return resp
 
     requests.sessions.Session.request = patched_request
@@ -1219,10 +1215,8 @@ def main() -> int:
     callback_host = os.environ.get("CPPM_CALLBACK_HOST",   "")
     callback_port = int(os.environ.get("CPPM_CALLBACK_PORT", "8765"))
     cluster_node_fqdn = os.environ.get("CPPM_CLUSTER_NODE_FQDN", "")
-    cluster_sync_retry_budget = int(os.environ.get("CPPM_CLUSTER_SYNC_DELAY_SECONDS", "0") or 0)
-
     if cluster_node_fqdn:
-        _install_cluster_host_header(cluster_node_fqdn, cluster_sync_retry_budget)
+        _install_cluster_host_header(cluster_node_fqdn)
 
     if not client_id or not client_secret:
         log.error("CPPM_CLIENT_ID and CPPM_CLIENT_SECRET must be set.")

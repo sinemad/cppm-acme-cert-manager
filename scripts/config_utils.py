@@ -94,12 +94,6 @@ def validate_server(entry: dict) -> None:
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError("Callback port must be a number between 1 and 65535.")
-    try:
-        delay = int(entry.get("cluster_sync_delay_seconds", 0) or 0)
-        if delay < 0:
-            raise ValueError()
-    except (ValueError, TypeError):
-        raise ValueError("Cluster sync delay must be a non-negative number of seconds.")
     cert_types = certificate_targets(entry)
     valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
     if not any(t in cert_types for t in valid_types):
@@ -335,7 +329,6 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        "CPPM_CLUSTER_SYNC_DELAY_SECONDS": str(s.get("cluster_sync_delay_seconds", 0) or 0),
         "ISSUE_ECC":            "true" if "https_ecc" in certificate_targets(s) else "false",
         "ISSUE_RSA":            "true" if any(t in certificate_targets(s) for t in ("https_rsa", "radius", "radsec")) else "false",
         "UPLOAD_HTTPS_ECC":     "true" if "https_ecc" in certificate_targets(s) else "false",
