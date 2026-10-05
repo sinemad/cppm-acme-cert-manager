@@ -19,10 +19,25 @@ from typing import Optional
 
 SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 
-_REQUIRED = {
-    "label", "cppm_host", "cppm_client_id", "cppm_client_secret",
-    "domain", "acme_email", "acme_server", "dns_provider",
+# ClearPass fields are always required: they are what the tool monitors and uploads to.
+_REQUIRED = {"label", "cppm_host", "cppm_client_id", "cppm_client_secret"}
+
+# ACME / DNS fields are optional as a group. All blank = ClearPass-only
+# monitoring (warning, not an error). Partly filled or invalid = error, because
+# the certificate pipeline would fail.
+_LE_DNS_FIELDS = ("domain", "acme_email", "acme_server", "dns_provider")
+
+# DNS credential options per provider, matching entrypoint.sh validate_dns_creds.
+# Any one option with all its keys filled in is enough.
+_DNS_CREDENTIAL_OPTIONS = {
+    "cloudflare":   [("CF_Token",), ("CF_Key", "CF_Email")],
+    "porkbun":      [("PORKBUN_API_KEY", "PORKBUN_SECRET_API_KEY")],
+    "route53":      [("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")],
+    "digitalocean": [("DO_API_KEY",)],
+    "godaddy":      [("GD_Key", "GD_Secret")],
 }
+_DNS_PROVIDER_ALIASES = {"cf": "cloudflare", "aws": "route53", "r53": "route53",
+                         "do": "digitalocean", "gd": "godaddy"}
 
 _FIELD_LABELS = {
     "label":             "Label",
@@ -82,12 +97,54 @@ def san_dns_names(entry: dict) -> list[str]:
             result.append(name)
     return result[:10]
 
+def le_dns_configured(entry: dict) -> bool:
+    """True if any ACME / DNS field is filled in."""
+    return any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
+
+
+def le_dns_problems(entry: dict) -> list[str]:
+    """Return errors for a partly filled or invalid ACME / DNS setup.
+
+    Called only when le_dns_configured() is true. Checks shape and required
+    credentials, not live API access.
+    """
+    problems = []
+    for field in _LE_DNS_FIELDS:
+        if not str(entry.get(field, "")).strip():
+            problems.append(f"{_FIELD_LABELS.get(field, field)} is required when ACME / DNS is set up.")
+    if problems:
+        return problems
+
+    email = str(entry.get("acme_email", "")).strip()
+    if "@" not in email:
+        problems.append("ACME Email must be an email address.")
+    acme = str(entry.get("acme_server", "")).strip()
+    if acme not in ("letsencrypt", "zerossl") and not acme.startswith("https://"):
+        problems.append("ACME Server must be 'letsencrypt', 'zerossl', or an https:// URL.")
+
+    provider = str(entry.get("dns_provider", "")).strip().lower()
+    provider = _DNS_PROVIDER_ALIASES.get(provider, provider)
+    creds = entry.get("dns_credentials") or {}
+    if provider not in _DNS_CREDENTIAL_OPTIONS:
+        # Unknown providers are allowed; credentials can't be pre-checked.
+        return problems
+    options = _DNS_CREDENTIAL_OPTIONS[provider]
+    if not any(all(str(creds.get(k, "")).strip() for k in opt) for opt in options):
+        wanted = " or ".join(" + ".join(opt) for opt in options)
+        problems.append(f"DNS credentials for {provider} are incomplete: need {wanted}.")
+    return problems
+
+
 def validate_server(entry: dict) -> None:
     """Raises ValueError on missing or invalid fields."""
     for field in _REQUIRED:
         if not str(entry.get(field, "")).strip():
             label = _FIELD_LABELS.get(field, field)
             raise ValueError(f"{label} is required.")
+    if le_dns_configured(entry):
+        problems = le_dns_problems(entry)
+        if problems:
+            raise ValueError(" ".join(problems))
     try:
         port = int(entry.get("cppm_callback_port", 8765))
         if not 1 <= port <= 65535:

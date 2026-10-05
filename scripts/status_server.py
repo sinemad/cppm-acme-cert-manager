@@ -49,7 +49,7 @@ from config_utils import (
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
-    certificate_targets, SERVERS_FILE,
+    certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -978,15 +978,23 @@ def _check_cppm(server: dict = None) -> dict:
 
 
 def _check_dns(server: dict = None) -> dict:
-    """Check DNS provider API connectivity using the configured credentials."""
+    """Check the ACME / DNS setup, then DNS provider API connectivity.
+
+    Blank = ClearPass-only monitoring (unknown). Partly filled or invalid =
+    incomplete (error), naming the missing fields. Otherwise the provider API
+    is tested.
+    """
     if not server:
         return {"status": "unknown", "message": "Not configured"}
+    if not le_dns_configured(server):
+        return {"status": "unknown",
+                "message": "ACME / DNS not configured – ClearPass monitoring only"}
+    problems = le_dns_problems(server)
+    if problems:
+        return {"status": "error", "message": "Incomplete: " + " ".join(problems)}
     provider = server.get("dns_provider", "")
     _creds   = server.get("dns_credentials") or {}
     def g(k): return _creds.get(k, "")
-
-    if not provider:
-        return {"status": "unknown", "message": "Not configured"}
     try:
         import requests as _req
         if provider == "cloudflare":
@@ -1077,6 +1085,9 @@ def _check_callback(server: dict = None) -> dict:
     if not server:
         return {"status": "unknown", "message": "Not configured"}
     callback_host = (server.get("cppm_callback_host") or "").strip()
+    if not callback_host:
+        # Only needed for certificate uploads; a monitoring-only server has none.
+        return {"status": "unknown", "message": "Not configured (needed only for uploads)"}
     try:
         callback_port = int(server.get("cppm_callback_port") or 8765)
     except (ValueError, TypeError):
@@ -3692,7 +3703,7 @@ def _overview_rows(servers: list) -> str:
         dots = (f'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
                 f'{_dot("cppm")}<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'
                 f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
-                f'{_dot("dns")}<span style="font-size:0.68rem;color:var(--subtle)">DNS</span>'
+                f'{_dot("dns")}<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'
                 f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
                 f'{_dot("cb")}<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
                 f'</div>')
@@ -4123,7 +4134,7 @@ function renderDots(sid){
   var sep='<span style="color:var(--border2);margin:0 0.15rem">\xb7</span>';
   return'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
     +ovDot(sid,'cppm')+'<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'+sep
-    +ovDot(sid,'dns')+'<span style="font-size:0.68rem;color:var(--subtle)">DNS</span>'+sep
+    +ovDot(sid,'dns')+'<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'+sep
     +ovDot(sid,'cb')+'<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
     +'</div>';
 }

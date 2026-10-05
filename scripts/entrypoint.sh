@@ -218,15 +218,38 @@ if output:
     log "  CPPM   : ${CPPM_HOST:-NOT SET}"
     log "  CA     : ${ACME_SERVER:-letsencrypt}"
 
-    # Validate required fields
+    # Validate ClearPass fields (always required: monitoring needs them)
     FIELD_MISSING=0
-    for var in DOMAIN ACME_EMAIL DNS_PROVIDER CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET CPPM_CALLBACK_HOST; do
+    for var in CPPM_HOST CPPM_CLIENT_ID CPPM_CLIENT_SECRET; do
+        [[ -z "${!var:-}" ]] && { err "Server ${SERVER_ID}: missing required field: ${var}"; FIELD_MISSING=$((FIELD_MISSING+1)); }
+    done
+    if [[ $FIELD_MISSING -gt 0 ]]; then
+        err "Skipping server ${SERVER_ID} (${FIELD_MISSING} configuration issue(s) — fix via web UI)"
+        continue
+    fi
+
+    # ACME / DNS are optional as a group. All blank = ClearPass-only
+    # monitoring: warn and skip certificate work for this server. Partly filled
+    # = error, because the certificate pipeline would fail.
+    LE_DNS_SET=false
+    for var in DOMAIN ACME_EMAIL DNS_PROVIDER; do
+        [[ -n "${!var:-}" ]] && LE_DNS_SET=true
+    done
+    if [[ "$LE_DNS_SET" != "true" ]]; then
+        warn "Server ${SERVER_ID}: ACME and DNS are not configured – ClearPass monitoring only. No certificates will be issued or uploaded for this server until they are set up."
+        status_write "WARN" "CONFIG" "ACME / DNS not configured – ClearPass monitoring only (no issuance or upload)"
+        continue
+    fi
+
+    FIELD_MISSING=0
+    for var in DOMAIN ACME_EMAIL DNS_PROVIDER CPPM_CALLBACK_HOST; do
         [[ -z "${!var:-}" ]] && { err "Server ${SERVER_ID}: missing required field: ${var}"; FIELD_MISSING=$((FIELD_MISSING+1)); }
     done
     validate_dns_creds || FIELD_MISSING=$((FIELD_MISSING+1))
 
     if [[ $FIELD_MISSING -gt 0 ]]; then
-        err "Skipping server ${SERVER_ID} (${FIELD_MISSING} configuration issue(s) — fix via web UI)"
+        err "Skipping certificate work for server ${SERVER_ID} (${FIELD_MISSING} configuration issue(s) — fix via web UI)"
+        status_write "FAILED" "CONFIG" "ACME / DNS setup incomplete (${FIELD_MISSING} issue(s)) – fix via web UI"
         continue
     fi
 
