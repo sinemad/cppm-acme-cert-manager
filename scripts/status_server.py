@@ -93,6 +93,56 @@ _STILL_SYNCING_MESSAGE = (
     f"{CLUSTER_CHECK_DEADLINE_SECONDS} seconds. Check again in a minute."
 )
 
+# Bearer tokens for status/cluster checks are cached here, keyed by
+# (host-or-node-address, client_id), and reused across the dashboard
+# auto-refresh, the manual "Check nodes" button, and every node in a cluster
+# check. These tokens exist only to make a read-only status call — unlike
+# _check_cppm's connectivity test, nothing here depends on actually minting a
+# fresh one — so re-authenticating every poll just inflates ClearPass's
+# token table for no benefit. A 401 invalidates the cache entry immediately
+# so an actually-revoked token is replaced right away rather than waited out.
+# Tune via CPPM_TOKEN_CACHE_SECONDS; keep it comfortably under this
+# ClearPass's configured Access Token Lifetime (Administration → API
+# Services → API Clients).
+_token_lock:  threading.Lock = threading.Lock()
+_token_cache: dict           = {}   # {(host, client_id): (token, expiry_monotonic)}
+TOKEN_CACHE_SECONDS = int(os.environ.get("CPPM_TOKEN_CACHE_SECONDS", "300"))
+
+
+def _get_cached_token(host: str, node_name: str, client_id: str, client_secret: str,
+                      verify: bool, timeout: int = 10):
+    """Return a cached bearer token for (host, client_id), minting one if needed.
+
+    Returns None if ClearPass rejected the credentials (non-200 from
+    /api/oauth). Connection/timeout errors are not caught here and propagate
+    to the caller, so they aren't mistaken for an auth rejection.
+    """
+    key = (host, client_id)
+    now = time.monotonic()
+    with _token_lock:
+        cached = _token_cache.get(key)
+        if cached and cached[1] > now:
+            return cached[0]
+    import requests
+    resp = requests.post(
+        f"https://{host}/api/oauth",
+        data={"grant_type": "client_credentials",
+              "client_id": client_id, "client_secret": client_secret},
+        timeout=timeout, verify=verify,
+        headers={"Host": node_name} if node_name else {},
+    )
+    if resp.status_code != 200:
+        return None
+    token = resp.json().get("access_token", "")
+    with _token_lock:
+        _token_cache[key] = (token, now + TOKEN_CACHE_SECONDS)
+    return token
+
+
+def _invalidate_cached_token(host: str, client_id: str) -> None:
+    with _token_lock:
+        _token_cache.pop((host, client_id), None)
+
 _SESSION_SECRET: bytes = b""
 
 # ── Module logger ─────────────────────────────────────────────────────────────
@@ -410,8 +460,17 @@ def _subscriber_cert_with_retry(node_host: str, node_name: str, client_id: str,
 
     ClearPass replicates API clients to subscribers with a lag, so a 403 right
     after a config change is retried up to STATUS_SYNC_ATTEMPTS times, stopping
-    early at the deadline. Returns the last response, or None if the node never
-    accepted the client. Also returns the number of attempts made.
+    early at the deadline. The token comes from the shared cache
+    (_get_cached_token) and is reused across GET retries, across calls for
+    this same node, and across the dashboard/manual-check code paths: a
+    fresh token carries no different authorization than the one before it,
+    so re-authenticating every attempt only adds a wasted round trip (and a
+    stream of "new access token" entries in ClearPass's own API trace)
+    without making success any more likely. Re-authentication only happens
+    if the token itself is rejected (401), which means it expired or the
+    client was removed, not that replication is still catching up.
+    Returns the last response, or None if the node never accepted the client.
+    Also returns the number of attempts made.
     """
     import requests
     response = None
@@ -420,23 +479,25 @@ def _subscriber_cert_with_retry(node_host: str, node_name: str, client_id: str,
         if time.monotonic() >= deadline:
             break
         attempts = attempt
-        sub_auth = requests.post(
-            f"https://{node_host}/api/oauth",
-            data={"grant_type": "client_credentials",
-                  "client_id": client_id,
-                  "client_secret": client_secret},
-            timeout=timeout, verify=verify,
-            headers={"Host": node_name},
+        try:
+            token = _get_cached_token(node_host, node_name, client_id, client_secret,
+                                      verify, timeout)
+        except Exception:
+            token = None
+        if token is None:
+            if attempt < STATUS_SYNC_ATTEMPTS:
+                time.sleep(STATUS_SYNC_RETRY_DELAY_SECONDS)
+            continue
+        response = requests.get(
+            f"https://{node_host}/api/server-cert",
+            headers={"Authorization": f"Bearer {token}", "Host": node_name},
+            verify=verify, timeout=timeout, allow_redirects=False,
         )
-        if sub_auth.status_code == 200:
-            token = sub_auth.json().get("access_token", "")
-            response = requests.get(
-                f"https://{node_host}/api/server-cert",
-                headers={"Authorization": f"Bearer {token}", "Host": node_name},
-                verify=verify, timeout=timeout, allow_redirects=False,
-            )
-            if response.status_code != 403:
-                break
+        if response.status_code == 401:
+            # Token expired or client was removed – get a new one next attempt.
+            _invalidate_cached_token(node_host, client_id)
+        elif response.status_code != 403:
+            break
         if attempt < STATUS_SYNC_ATTEMPTS:
             time.sleep(STATUS_SYNC_RETRY_DELAY_SECONDS)
     return response, attempts
@@ -646,23 +707,14 @@ def _cluster_check_probe(host: str, client_id: str,
             host,
         )
     try:
-        import requests
         from pyclearpass.api_localserverconfiguration import ApiLocalServerConfiguration
 
-        pub_response = requests.post(
-            f"https://{host}/api/oauth",
-            data={"grant_type": "client_credentials",
-                  "client_id": client_id,
-                  "client_secret": client_secret},
-            timeout=10, verify=verify_ssl,
-        )
-        if pub_response.status_code == 401:
+        pub_token = _get_cached_token(host, "", client_id, client_secret, verify_ssl)
+        if pub_token is None:
             return [{"host": host, "status": "error",
                      "error": "Authentication failed — check Client ID and Client Secret.",
                      "guidance": "Go to ClearPass Admin UI → Administration → API Services → API Clients and verify the client credentials.",
                      "guidance_type": "auth"}]
-        pub_response.raise_for_status()
-        pub_token = pub_response.json().get("access_token", "")
 
         nodes_raw = ApiLocalServerConfiguration(
             server=f"https://{host}/api", api_token=pub_token,
@@ -750,7 +802,6 @@ def _log_cluster_check(server: dict, nodes: list, total_seconds: float) -> None:
 def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
     """Inner implementation — called only when cache is cold."""
     try:
-        import requests
         from pyclearpass.api_localserverconfiguration import ApiLocalServerConfiguration
 
         host          = server.get("cppm_host", "")
@@ -769,15 +820,12 @@ def _do_fetch_cluster_node_status(server: dict) -> list[dict]:
                 host,
             )
 
-        pub_response = requests.post(
-            f"https://{host}/api/oauth",
-            data={"grant_type": "client_credentials",
-                  "client_id": client_id,
-                  "client_secret": client_secret},
-            timeout=8, verify=verify,
-        )
-        pub_response.raise_for_status()
-        pub_token = pub_response.json().get("access_token", "")
+        pub_token = _get_cached_token(host, "", client_id, client_secret, verify, timeout=8)
+        if pub_token is None:
+            raise RuntimeError(
+                f"Authentication failed for {host} — ClearPass rejected the API "
+                "client credentials (non-200 from /api/oauth)."
+            )
 
         nodes_raw = ApiLocalServerConfiguration(
             server=f"https://{host}/api", api_token=pub_token,
@@ -818,8 +866,9 @@ _health_cache:       dict           = {}
 _HEALTH_TTL                         = 120  # seconds
 _health_prev_states: dict           = {}   # {server_id: {check_type: status_str}}
 
-# Cluster node status is cached separately — the check makes one OAuth call
-# plus one API call per node, so it must not run on every status poll.
+# Cluster node status is cached separately — the check makes one API call
+# per node (plus a token mint on a cold token cache), so it must not run on
+# every status poll.
 _cluster_lock:  threading.Lock = threading.Lock()
 _cluster_cache: dict           = {}   # {server_id: (timestamp, result)}
 _CLUSTER_TTL                   = 120  # seconds
