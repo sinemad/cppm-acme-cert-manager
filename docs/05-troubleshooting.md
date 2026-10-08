@@ -396,6 +396,47 @@ and logs the full per-node request/response detail — including the exact
 Upload** log tab (and the downloaded log bundle). See
 [Debug checkbox](03-monitoring.md#server-list-actions) for details.
 
+### Bearer token volume in ClearPass (large tipsdb token counts)
+
+Bearer tokens for status/cluster checks (the dashboard auto-refresh, the
+**Check nodes** button, and the per-node 403 retry described above) are
+cached in memory and shared across all of them, keyed by ClearPass host and
+client ID, instead of each one authenticating independently. A 403 from a
+subscriber node retries with the same cached token rather than minting a new
+one — a fresh token carries no different authorization than the one before
+it, since what's actually settling in the background is cluster replication
+of the client's permissions, not anything tied to when the token was issued.
+A 401 (the token itself rejected — expired, or the client was removed)
+still forces a new one immediately.
+
+**Tuning:** how long a token is kept before being re-minted is controlled by
+`CPPM_ACCESS_TOKEN_CACHE_SECONDS` (default `300`, i.e. 5 minutes). Set it in
+`docker-compose.override.yml`:
+
+```yaml
+environment:
+  CPPM_ACCESS_TOKEN_CACHE_SECONDS: "300"
+```
+
+Adjust it based on ClearPass's own configured **Access Token Lifetime**
+(**Administration → API Services → API Clients → `<your client>`**, default
+8 hours on most ClearPass installs):
+
+- **Raise it** if you still see more minted tokens than you'd like and your
+  Access Token Lifetime is well above the default 5 minutes. Keep the value
+  comfortably under that lifetime (for example, an hour or two on an
+  8-hour-lifetime client) rather than close to it, so there's margin for
+  clock drift and so a shortened lifetime set later on ClearPass is noticed
+  sooner rather than later.
+- **Lower it** only if you've shortened the Access Token Lifetime on
+  ClearPass itself below the default, so cached tokens don't outlive what
+  ClearPass will actually honor.
+- You do **not** need to lower it after rotating a client's secret in this
+  tool's web UI — an already-issued bearer token stays valid on ClearPass's
+  side until it expires or the API client is disabled, independent of the
+  secret used to obtain it. A disabled or deleted client is caught by the
+  401 handling above and re-authenticates immediately.
+
 ---
 
 ## Trust list upload returns 400 — cert is not a CA certificate

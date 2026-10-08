@@ -101,12 +101,12 @@ _STILL_SYNCING_MESSAGE = (
 # fresh one — so re-authenticating every poll just inflates ClearPass's
 # token table for no benefit. A 401 invalidates the cache entry immediately
 # so an actually-revoked token is replaced right away rather than waited out.
-# Tune via CPPM_TOKEN_CACHE_SECONDS; keep it comfortably under this
+# Tune via CPPM_ACCESS_TOKEN_CACHE_SECONDS; keep it comfortably under this
 # ClearPass's configured Access Token Lifetime (Administration → API
 # Services → API Clients).
 _token_lock:  threading.Lock = threading.Lock()
 _token_cache: dict           = {}   # {(host, client_id): (token, expiry_monotonic)}
-TOKEN_CACHE_SECONDS = int(os.environ.get("CPPM_TOKEN_CACHE_SECONDS", "300"))
+TOKEN_CACHE_SECONDS = int(os.environ.get("CPPM_ACCESS_TOKEN_CACHE_SECONDS", "300"))
 
 
 def _get_cached_token(host: str, node_name: str, client_id: str, client_secret: str,

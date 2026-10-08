@@ -164,6 +164,18 @@ services:
       # Default: INFO
       # LOG_LEVEL: DEBUG
 
+      # ── Bearer token cache (cluster/status checks) ────────────────────────────
+      # How long (seconds) a ClearPass OAuth2 bearer token is cached and reused
+      # across the status dashboard, the "Check nodes" button, and per-node
+      # cluster retries, before a new one is minted.
+      # Raise it (keeping it comfortably under your ClearPass API client's
+      # configured Access Token Lifetime — Administration → API Services ->
+      # API Clients) to further cut down on tokens accumulating in ClearPass.
+      # Lower it only if you've shortened that Access Token Lifetime below the
+      # default here. See docs/05-troubleshooting.md for details.
+      # Default: 300
+      # CPPM_ACCESS_TOKEN_CACHE_SECONDS: "300"
+
     # ── Port mappings ─────────────────────────────────────────────────────────
     #
     # Format: "<host_port>:<container_port>"
