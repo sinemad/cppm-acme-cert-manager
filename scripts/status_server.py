@@ -1171,10 +1171,21 @@ def _check_callback(server: dict = None) -> dict:
     except OSError as e:
         probe.close()
         if e.errno in (_errno.EADDRINUSE,):
-            _log.warning("callback-check [%s]: port %d in use (errno EADDRINUSE) — "
-                         "upload in progress or port conflict", label, callback_port)
+            # _UPLOAD_LOCK is held for the exact duration the upload pipeline
+            # binds this same port, so whether it's free right now tells us
+            # which EADDRINUSE we're looking at: if we can acquire it, the
+            # upload pipeline isn't running and something else (another
+            # container, a leftover process) is squatting the port; if we
+            # can't, this is the upload pipeline itself.
+            if _UPLOAD_LOCK.acquire(blocking=False):
+                _UPLOAD_LOCK.release()
+                _log.error("callback-check [%s]: port %d in use (errno EADDRINUSE) by a "
+                           "process other than this tool's upload pipeline", label, callback_port)
+                return {"status": "error",
+                        "message": f"Port {callback_port} already in use by another process"}
+            _log.debug("callback-check [%s]: port %d in use — upload in progress", label, callback_port)
             return {"status": "warn",
-                    "message": f"Port {callback_port} in use — upload in progress or port conflict"}
+                    "message": f"Upload in progress — callback port {callback_port} is in use"}
         _log.error("callback-check [%s]: cannot bind port %d — %s (errno %s)",
                    label, callback_port, e, e.errno)
         return {"status": "error",
