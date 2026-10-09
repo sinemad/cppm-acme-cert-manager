@@ -152,6 +152,15 @@ def _invalidate_cached_token(host: str, client_id: str) -> None:
     with _token_lock:
         _token_cache.pop((host, client_id), None)
 
+
+# Cloudflare has two separate token-verify endpoints — one for user (personal)
+# tokens, one for account-owned tokens — and a token only ever matches one of
+# them. Once a DNS health check has worked out which, keyed by the token
+# itself, later checks go straight to that endpoint instead of re-trying (and
+# re-failing) the wrong one on every _HEALTH_TTL refresh.
+_cf_token_scope_lock: threading.Lock = threading.Lock()
+_cf_token_scope: dict               = {}   # {token: "profile" | "account"}
+
 _SESSION_SECRET: bytes = b""
 
 # ── Module logger ─────────────────────────────────────────────────────────────
@@ -1058,16 +1067,64 @@ def _check_dns(server: dict = None) -> dict:
         if provider == "cloudflare":
             token = g("CF_Token")
             if token:
-                r = _req.get(
-                    "https://api.cloudflare.com/client/v4/user/tokens/verify",
-                    headers={"Authorization": f"Bearer {token}"}, timeout=10,
-                )
-                d = r.json()
-                if r.status_code == 200 and d.get("success"):
-                    return {"status": "ok", "message": "Token valid"}
-                errs = d.get("errors", [])
-                msg  = errs[0].get("message", f"HTTP {r.status_code}") if errs else f"HTTP {r.status_code}"
-                return {"status": "warn", "message": msg}
+                account_id = g("CF_Account_ID")
+
+                def _verify(url):
+                    rr = _req.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+                    dd = rr.json()
+                    ok = rr.status_code == 200 and dd.get("success")
+                    errs = dd.get("errors", [])
+                    mm = errs[0].get("message", f"HTTP {rr.status_code}") if errs else f"HTTP {rr.status_code}"
+                    return ok, mm
+
+                _PROFILE_URL = "https://api.cloudflare.com/client/v4/user/tokens/verify"
+                _ACCOUNT_URL = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/tokens/verify"
+
+                with _cf_token_scope_lock:
+                    known_scope = _cf_token_scope.get(token)
+
+                # A token only ever matches one of the two verify endpoints.
+                # Try the one a prior check already confirmed first. With no
+                # prior result, default to account-scoped when an Account ID
+                # is on file -- that's the recommended setup for new users --
+                # and profile-scoped otherwise.
+                default_scope = "account" if account_id else "profile"
+                first_scope = known_scope or default_scope
+                order = [first_scope] + [s for s in ("account", "profile") if s != first_scope]
+
+                msgs = {}
+                for scope in order:
+                    if scope == "account" and not account_id:
+                        continue
+                    ok, msg = _verify(_ACCOUNT_URL if scope == "account" else _PROFILE_URL)
+                    msgs[scope] = msg
+                    if ok:
+                        with _cf_token_scope_lock:
+                            _cf_token_scope[token] = scope
+                        return {"status": "ok", "message": f"Token valid ({scope}-scoped)"}
+                    if scope == known_scope:
+                        # The cached scope stopped working (token rotated or
+                        # revoked) -- drop it so the next check re-detects
+                        # from the default order instead of retrying this one
+                        # first forever.
+                        with _cf_token_scope_lock:
+                            _cf_token_scope.pop(token, None)
+
+                if "account" in msgs and "profile" in msgs:
+                    return {"status": "warn",
+                            "message": f"Rejected by both profile-scoped ({msgs['profile']}) and "
+                                       f"account-scoped ({msgs['account']}) checks"}
+                # Only the profile-scoped endpoint recognizes user (personal)
+                # tokens, so a failure there doesn't by itself mean the token
+                # is bad -- an account-owned token (created under Manage
+                # Account -> API Tokens) comes back exactly the same way, and
+                # with no Account ID on file there's nothing to check it
+                # against.
+                return {"status": "warn",
+                        "message": f"Not recognized by profile-scoped check ({msgs['profile']}) — "
+                                   "this also happens with a valid account-owned token; "
+                                   "set Account ID above to verify it directly, or ignore "
+                                   "this warning if DNS-01 challenges are succeeding"}
             key   = g("CF_Key")
             email = g("CF_Email")
             if not key:
@@ -2344,7 +2401,7 @@ def _traefik_page(
         </div>
         <div class="form-2col">
           <div class="field">
-            <label>Account ID <span class="hint">(optional with token)</span></label>
+            <label>Account ID <span class="hint">(optional — only needed to verify an account-owned token)</span></label>
             <input type="text" name="CF_Account_ID" value="{cv('CF_Account_ID')}" autocomplete="off">
           </div>
           <div class="field" style="opacity:0.65">
@@ -3304,7 +3361,7 @@ def _settings_form_page(server: dict = None, error: str = "",
         </div>
         <div class="form-2col">
           <div class="field">
-            <label>Account ID <span class="hint">(optional with token)</span></label>
+            <label>Account ID <span class="hint">(optional — only needed to verify an account-owned token)</span></label>
             <input type="text" name="CF_Account_ID" class="cert-shared" value="{cv('CF_Account_ID')}"
                    autocomplete="off">
           </div>

@@ -115,6 +115,79 @@ tail -100 /opt/cppm-certs/<cppm_host>/logs/acme_renewal.log
 
 ---
 
+## Cloudflare DNS health check shows "Invalid API Token" / an ambiguous warning
+
+**Cause:** Cloudflare has two kinds of API token, verified through two
+different, mutually exclusive endpoints:
+
+- **Account-owned token** — created under **Manage account → Account API
+  tokens**, belongs to the account rather than any one person. **Recommended**,
+  since it keeps working if the creator's own access changes or is removed.
+- **User (profile) token** — created under **My Profile → API Tokens**,
+  tied to the Cloudflare user who created it.
+
+Both authenticate DNS-01 zone edits identically — Lego's actual certificate
+issuance is unaffected by which type you use. This only affects this tool's
+own token-validity check on the Servers page.
+
+**Check order:** if the server entry's **Account ID** field is filled in,
+this tool verifies the token against the account-scoped endpoint first (the
+recommended setup), falling back to the user-scoped endpoint if that fails.
+If **Account ID** is blank, only the user-scoped endpoint is tried — there's
+no account ID to build the account-scoped URL with. Whichever endpoint
+actually confirms the token is remembered (per-token, in memory, no file/db
+write, reset on container restart) so later checks go straight to it instead
+of re-testing both every time.
+
+- **Token is account-owned, Account ID is set:** the account-scoped check
+  succeeds — shows "Token valid (account-scoped)".
+- **Token is account-owned, Account ID is blank:** there's nothing to verify
+  it against, so you'll see a warning noting the token may still be valid as
+  an account-owned token. **Fix:** find your **Account ID** (API Tokens page
+  for that account, or the zone Overview page) and add it to the server
+  entry's **Account ID** field — see
+  [Obtaining Cloudflare credentials](01-initial-setup.md#obtaining-cloudflare-credentials).
+  An empty Account ID is also the normal, expected state for a **Global API
+  Key** setup (no token at all) — it only matters for the token check above.
+- **Rejected by both checks:** the token itself is actually invalid, revoked,
+  or missing the `Zone:DNS:Edit` permission — not a token-type mismatch.
+
+If DNS-01 challenges are succeeding in `acme_renewal.log` despite a warning
+here, the token is working; the warning only means this tool couldn't
+positively confirm it.
+
+### Testing a token manually
+
+`$CF_Token` is **not** a persistent environment variable in the container —
+it only exists in the environment of the subprocess that invokes `lego` at
+issuance time. A plain `docker exec -it ... sh -c '... $CF_Token ...'` will
+see it as empty and send a malformed, empty `Authorization: Bearer` header
+(Cloudflare error `6003`/`6111`, "Invalid format for Authorization header")
+— that error means the test didn't run, not that the token is bad.
+
+Use `cppm-servers env` to get the real credential values as shell exports
+first, then test against the correct endpoint for the token type:
+
+```bash
+# Export this server's real DNS credentials into the current shell
+docker exec -it cppm-acme-cert-manager cppm-servers env <id>
+# copy/paste the "export CF_Token=..." line(s) it prints, then:
+
+# User (profile) token:
+curl -s -H "Authorization: Bearer $CF_Token" \
+  "https://api.cloudflare.com/client/v4/user/tokens/verify" | python3 -m json.tool
+
+# Account-owned token (needs the Account ID too):
+curl -s -H "Authorization: Bearer $CF_Token" \
+  "https://api.cloudflare.com/client/v4/accounts/$CF_Account_ID/tokens/verify" | python3 -m json.tool
+```
+
+A `"success": true` response confirms which endpoint — and therefore which
+token type — the value is valid for, independent of what this tool's own
+health check reports.
+
+---
+
 ## Authentication failed
 
 **Symptom:** `upload.log` contains `HTTP 400 invalid_client`.

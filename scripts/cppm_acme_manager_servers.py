@@ -67,7 +67,7 @@ _DNS_CRED_FIELDS = {
     "cloudflare": [
         ("CF_Token",      "API Token",      True,  "Zone DNS scoped token — recommended"),
         ("CF_Zone_ID",    "Zone ID",        False, "Found on the zone overview page"),
-        ("CF_Account_ID", "Account ID",     False, "Optional when using a scoped token"),
+        ("CF_Account_ID", "Account ID",     False, "Optional — only needed to verify an account-owned token"),
         ("CF_Key",        "Global API Key", True,  "Alternative to scoped token"),
         ("CF_Email",      "Account Email",  False, "Required only when using global key"),
     ],

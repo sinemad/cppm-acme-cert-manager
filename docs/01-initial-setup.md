@@ -230,13 +230,40 @@ The configuration is stored in `/opt/cppm-certs/servers.json` (chmod 600).
 
 #### Obtaining Cloudflare credentials
 
-1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens)
+Cloudflare has two kinds of API token, created in two different places:
+
+- **Account-owned token** (recommended) — left sidebar **Manage account →
+  Account API tokens** (`dash.cloudflare.com/<account_id>/api-tokens`). It
+  belongs to the account itself, not to any one person, so it keeps working
+  unchanged if the person who created it leaves or has their own account
+  access changed or revoked — the standard reason to prefer it for a service
+  like this one.
+- **User (profile) token** — top-right account menu **My Profile → API
+  Tokens** (`dash.cloudflare.com/profile/api-tokens`). It's tied to the
+  Cloudflare user who created it; if that person's account is disabled or
+  removed, tokens they created can stop working too.
+
+Both work identically for the actual DNS-01 record creation this tool
+performs — same Bearer auth, same `Zone:DNS:Edit` permission. The only place
+the distinction matters here is this tool's own token-validity check (see
+below).
+
+To create either one:
+
+1. Log in to the Cloudflare Dashboard and go to the appropriate page above.
 2. **Create Token → Custom token**
 3. Configure:
    - **Token name:** `acme-cppm-dns`
    - **Permissions:** `Zone > DNS > Edit`
    - **Zone Resources:** `Include > Specific zone > example.com`
-4. Copy the token; find your **Account ID** and **Zone ID** on the zone Overview page.
+4. Copy the token, and find the **Zone ID** on the zone's Overview page.
+5. **If you created an account-owned token:** also copy the **Account ID**
+   (visible on the API Tokens page for that account, or the zone Overview
+   page) and enter it in this tool's **Account ID** field alongside the
+   token. Without it, this tool can still use the token for DNS-01 challenges,
+   but its own health check can't confirm the token is valid and will show an
+   ambiguous warning instead of "Token valid" — see
+   [Troubleshooting](05-troubleshooting.md) for details.
 
 #### Obtaining Porkbun credentials
 
