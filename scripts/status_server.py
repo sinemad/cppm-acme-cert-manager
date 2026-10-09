@@ -101,12 +101,14 @@ _STILL_SYNCING_MESSAGE = (
 # fresh one — so re-authenticating every poll just inflates ClearPass's
 # token table for no benefit. A 401 invalidates the cache entry immediately
 # so an actually-revoked token is replaced right away rather than waited out.
-# Tune via CPPM_ACCESS_TOKEN_CACHE_SECONDS; keep it comfortably under this
-# ClearPass's configured Access Token Lifetime (Administration → API
-# Services → API Clients).
+# Each token's own /api/oauth "expires_in" caps how long it's kept (minus a
+# safety margin, so it's dropped slightly before ClearPass would reject it
+# anyway); CPPM_ACCESS_TOKEN_CACHE_MAX_SECONDS is a ceiling under that, not a
+# guess at the lifetime.
 _token_lock:  threading.Lock = threading.Lock()
 _token_cache: dict           = {}   # {(host, client_id): (token, expiry_monotonic)}
-TOKEN_CACHE_SECONDS = int(os.environ.get("CPPM_ACCESS_TOKEN_CACHE_SECONDS", "300"))
+TOKEN_CACHE_SECONDS = int(os.environ.get("CPPM_ACCESS_TOKEN_CACHE_MAX_SECONDS", "300"))
+_TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 30
 
 
 def _get_cached_token(host: str, node_name: str, client_id: str, client_secret: str,
@@ -133,9 +135,16 @@ def _get_cached_token(host: str, node_name: str, client_id: str, client_secret: 
     )
     if resp.status_code != 200:
         return None
-    token = resp.json().get("access_token", "")
+    body = resp.json()
+    token = body.get("access_token", "")
+    expires_in = body.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        ttl = min(TOKEN_CACHE_SECONDS,
+                  max(1, expires_in - _TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS))
+    else:
+        ttl = TOKEN_CACHE_SECONDS
     with _token_lock:
-        _token_cache[key] = (token, now + TOKEN_CACHE_SECONDS)
+        _token_cache[key] = (token, now + ttl)
     return token
 
 

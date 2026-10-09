@@ -174,7 +174,7 @@ services:
       # Lower it only if you've shortened that Access Token Lifetime below the
       # default here. See docs/05-troubleshooting.md for details.
       # Default: 300
-      # CPPM_ACCESS_TOKEN_CACHE_SECONDS: "300"
+      # CPPM_ACCESS_TOKEN_CACHE_MAX_SECONDS: "300"
 
     # ── Port mappings ─────────────────────────────────────────────────────────
     #

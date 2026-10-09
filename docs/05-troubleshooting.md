@@ -409,33 +409,33 @@ of the client's permissions, not anything tied to when the token was issued.
 A 401 (the token itself rejected — expired, or the client was removed)
 still forces a new one immediately.
 
-**Tuning:** how long a token is kept before being re-minted is controlled by
-`CPPM_ACCESS_TOKEN_CACHE_SECONDS` (default `300`, i.e. 5 minutes). Set it in
+**Tuning:** each token's own `/api/oauth` response includes `expires_in` —
+ClearPass's actual Access Token Lifetime for that client — and the cache
+uses that directly (minus a 30-second safety margin) as the token's TTL.
+`CPPM_ACCESS_TOKEN_CACHE_MAX_SECONDS` (default `300`, i.e. 5 minutes) is a
+**ceiling** on top of that, not a guess at the lifetime: the cache keeps a
+token for whichever is shorter, `expires_in` or this value. Set it in
 `docker-compose.override.yml`:
 
 ```yaml
 environment:
-  CPPM_ACCESS_TOKEN_CACHE_SECONDS: "300"
+  CPPM_ACCESS_TOKEN_CACHE_MAX_SECONDS: "300"
 ```
 
-Adjust it based on ClearPass's own configured **Access Token Lifetime**
-(**Administration → API Services → API Clients → `<your client>`**, default
-8 hours on most ClearPass installs):
+Because ClearPass's own reported lifetime is already respected, you mainly
+need to touch this value in one direction:
 
 - **Raise it** if you still see more minted tokens than you'd like and your
-  Access Token Lifetime is well above the default 5 minutes. Keep the value
-  comfortably under that lifetime (for example, an hour or two on an
-  8-hour-lifetime client) rather than close to it, so there's margin for
-  clock drift and so a shortened lifetime set later on ClearPass is noticed
-  sooner rather than later.
-- **Lower it** only if you've shortened the Access Token Lifetime on
-  ClearPass itself below the default, so cached tokens don't outlive what
-  ClearPass will actually honor.
-- You do **not** need to lower it after rotating a client's secret in this
-  tool's web UI — an already-issued bearer token stays valid on ClearPass's
-  side until it expires or the API client is disabled, independent of the
-  secret used to obtain it. A disabled or deleted client is caught by the
-  401 handling above and re-authenticates immediately.
+  client's Access Token Lifetime (**Administration → API Services → API
+  Clients → `<your client>`**, default 8 hours on most ClearPass installs)
+  is well above the default 5 minutes — the ceiling, not `expires_in`, is
+  what's cutting the cache short in that case.
+- You do **not** need to lower it after shortening the Access Token Lifetime
+  on ClearPass, or after rotating a client's secret in this tool's web UI —
+  a shorter `expires_in` is picked up automatically on the next mint, and an
+  already-issued bearer token stays valid on ClearPass's side regardless of
+  the secret used to obtain it. A disabled or deleted client is caught by
+  the 401 handling above and re-authenticates immediately.
 
 ---
 
