@@ -95,6 +95,46 @@ class LegoProvider(AcmeProvider):
             raise AcmeError("Both EAB_KID and EAB_HMAC_KEY are required for External Account Binding")
         return ["--eab", "--kid", eab_kid, "--hmac", eab_hmac_key]
 
+    def _log_cloudflare_token_scope(self, dns_env: dict[str, str]) -> None:
+        """Best-effort, informational: log whether the configured Cloudflare
+        CF_Token verifies as account-owned or profile (user) scoped.
+
+        Purely for troubleshooting -- both token types authenticate the DNS-01
+        record creation below identically, so this has no effect on what gets
+        passed to lego. Runs its own quick verify check each call rather than
+        sharing status_server.py's cache, since this is a separate, short-lived
+        process invoked per renewal, not the long-running web process.
+        """
+        token = dns_env.get("CF_Token", "")
+        if not token:
+            return
+        account_id = dns_env.get("CF_Account_ID", "")
+
+        def _verify(url: str) -> bool:
+            try:
+                import requests
+                r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+                return r.status_code == 200 and r.json().get("success", False)
+            except Exception:
+                return False
+
+        # Account-scoped first when an Account ID is on file -- the recommended
+        # setup -- falling back to profile-scoped, mirroring status_server.py's
+        # health check.
+        for scope in (["account", "profile"] if account_id else ["profile"]):
+            url = (f"https://api.cloudflare.com/client/v4/accounts/{account_id}/tokens/verify"
+                   if scope == "account" else
+                   "https://api.cloudflare.com/client/v4/user/tokens/verify")
+            if _verify(url):
+                log.info("cloudflare: configured API token is %s-scoped", scope)
+                return
+        log.warning(
+            "cloudflare: could not confirm token scope (%s) -- token may still be "
+            "valid; this only affects troubleshooting visibility, not issuance",
+            "rejected by both profile and account checks" if account_id
+            else "rejected by profile check, no Account ID set to also try account-scoped",
+        )
+
     def _run(
         self,
         args: list[str],
@@ -148,6 +188,8 @@ class LegoProvider(AcmeProvider):
             domain, server_url, plugin, "+".join(k.upper() for k in key_types), force,
         )
         log.debug("issue_cert: mapped dns env keys: %s", sorted(lego_env.keys()))
+        if plugin == "cloudflare":
+            self._log_cloudflare_token_scope(dns_env)
 
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
@@ -219,6 +261,8 @@ class LegoProvider(AcmeProvider):
             "renew_cert: domain=%s ca=%s plugin=%s types=%s",
             domain, server_url, plugin, "+".join(k.upper() for k in key_types),
         )
+        if plugin == "cloudflare":
+            self._log_cloudflare_token_scope(dns_env)
 
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:

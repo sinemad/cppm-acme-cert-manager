@@ -156,6 +156,18 @@ If DNS-01 challenges are succeeding in `acme_renewal.log` despite a warning
 here, the token is working; the warning only means this tool couldn't
 positively confirm it.
 
+**`acme_renewal.log` also logs the detected scope on every issuance/renewal**
+— look for a line like:
+
+```
+cloudflare: configured API token is account-scoped
+```
+
+(or `profile-scoped`, or a warning if neither check could confirm it). This
+is a fresh check each run, independent of the Servers-page health check above
+— useful for confirming what a specific renewal actually saw, especially
+when comparing logs from a different deployment or user.
+
 ### Testing a token manually
 
 `$CF_Token` is **not** a persistent environment variable in the container —
