@@ -10,6 +10,8 @@ Environment variables (exported by entrypoint.sh via get_server_shell_env):
     ACME_SERVER         ACME CA name or URL (default: letsencrypt)
     ISSUE_ECC           Issue ECC cert (default: true)
     ISSUE_RSA           Issue RSA cert (default: true)
+    ACME_DNS_RESOLVERS  Comma-separated host:port resolvers for Lego's DNS-01
+                        checks (split-horizon DNS); empty = container resolvers
     <DNS credential vars>  Provider-specific credential keys
 
 Exit codes:
@@ -40,6 +42,9 @@ log = logging.getLogger(__name__)
 _DNS_CRED_KEYS = {
     "ACME_EMAIL",
     "EAB_KID", "EAB_HMAC_KEY",
+    # Split-horizon DNS: resolvers for Lego's DNS-01 checks (not a credential,
+    # but passed the same way so the provider sees it alongside the rest).
+    "ACME_DNS_RESOLVERS",
     # Cloudflare
     "CF_Token", "CF_Key", "CF_Email", "CF_Zone_ID", "CF_Account_ID",
     # Porkbun

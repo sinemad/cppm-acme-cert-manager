@@ -48,6 +48,12 @@ services:
     #     resolve) — omit only if your internal resolver already forwards
     #     public queries itself.
     #
+    # Split-horizon: if the internal resolver ALSO hosts your public domain
+    # (e.g. Active Directory), keep this setting as it is and instead tick
+    # "split-horizon DNS" under Advanced in the server's DNS Provider settings.
+    # That points only Lego's challenge checks at public DNS. See
+    # docs/05-troubleshooting.md → "Split-horizon DNS".
+    #
     # Default: 1.1.1.1, 8.8.8.8 (set in docker-compose.yml)
     #
     # dns: !override

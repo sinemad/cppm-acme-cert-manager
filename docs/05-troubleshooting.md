@@ -113,6 +113,57 @@ Check the renewal log for the full Lego error:
 tail -100 /opt/cppm-certs/<cppm_host>/logs/acme_renewal.log
 ```
 
+If the TXT record *was* created but Lego times out waiting for it, see
+[Split-horizon DNS](#split-horizon-dns--challenge-times-out-with-internal-dns).
+
+---
+
+## Split-horizon DNS — challenge times out with internal DNS
+
+**Symptom:** The DNS health check shows a warning like *"Container DNS returns
+an internal version of example.com … but public DNS shows …"*, or issuance
+fails with Lego timing out waiting for the TXT record to propagate, even though
+the record is visible in your DNS provider.
+
+**Cause:** Your internal DNS server (often Active Directory) hosts its own copy
+of the public domain. If the container uses that server (Docker `dns:`, see
+[Container cannot resolve ClearPass hostname](#container-cannot-resolve-clearpass-hostname-dns-failure)),
+Lego finds the *internal* zone and waits for a TXT record that only exists in
+the *public* zone.
+
+**Fix:** Edit the server, open **Advanced** at the bottom of the DNS Provider
+card, and tick **"This domain also exists on my internal DNS (split-horizon)"**.
+From the CLI, answer yes to *Split-horizon DNS* in `cppm-servers edit`.
+
+Lego then uses public resolvers (default `1.1.1.1`, `8.8.8.8`) only for the
+challenge checks (`--dns.resolvers`). Everything else in the container,
+including reaching ClearPass, still uses Docker `dns:`, so keep that setting as
+it is. The two settings do different jobs:
+
+| Setting | Used for |
+|---|---|
+| Docker `dns:` (docker-compose.override.yml) | Resolving the ClearPass host, ACME CA, DNS provider API |
+| **Split-horizon DNS** (per server, Advanced) | Lego's DNS-01 zone lookup and propagation check only |
+
+If outbound DNS to `1.1.1.1` / `8.8.8.8` is blocked, enter resolvers that *are*
+reachable and answer with the public view in **Custom public resolvers**
+(comma-separated, `host` or `host:port`). The health check warns if none of the
+configured resolvers answer.
+
+The renewal log shows which resolvers Lego used:
+```
+dns: split-horizon enabled -- Lego DNS-01 checks use 1.1.1.1:53, 8.8.8.8:53
+```
+
+To compare the two views yourself:
+```bash
+docker exec -it cppm-acme-cert-manager sh -c '
+    dig +short SOA example.com            # container (internal) view
+    dig +short SOA example.com @1.1.1.1   # public view
+'
+```
+Different primary nameservers in the two answers mean split-horizon.
+
 ---
 
 ## Cloudflare DNS health check shows "Invalid API Token" / an ambiguous warning

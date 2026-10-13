@@ -1038,6 +1038,11 @@ docker exec -it cppm-acme-cert-manager sh -c '
 
 **Porkbun:** ensure API access is enabled on the domain in the Porkbun dashboard.
 
+**Split-horizon DNS:** if your internal DNS also hosts the public domain and
+Lego times out waiting for the TXT record, enable **Advanced → split-horizon
+DNS** on the server. See
+[Troubleshooting → Split-horizon DNS](docs/05-troubleshooting.md#split-horizon-dns--challenge-times-out-with-internal-dns).
+
 **Route53:** verify the IAM policy includes `route53:GetChange` — without it
 Lego cannot poll for propagation.
 

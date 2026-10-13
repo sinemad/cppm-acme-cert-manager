@@ -513,6 +513,7 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 | `ACME_EMAIL` | ACME account contact email |
 | `ACME_SERVER` | ACME CA — `letsencrypt`, `letsencrypt_test`, `zerossl`, `buypass`, `buypass_test`, or any ACME directory URL for a custom/private CA |
 | `DNS_PROVIDER` | Lego DNS plugin selector (e.g. `cloudflare`, `porkbun`, `route53`) |
+| `ACME_DNS_RESOLVERS` | Comma-separated `host:port` list passed to Lego as `--dns.resolvers`. Set only when split-horizon DNS is enabled; empty means Lego uses the container's resolvers |
 | `CPPM_HOST` | ClearPass hostname or IP |
 | `CPPM_CLIENT_ID` | ClearPass API client ID |
 | `CPPM_CLIENT_SECRET` | ClearPass API client secret |

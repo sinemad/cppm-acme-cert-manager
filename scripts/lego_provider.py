@@ -51,8 +51,9 @@ _DNS_ENV_REMAP: dict[str, str] = {
     # RFC 2136 — stored and passed through as-is (Lego names match).
 }
 
-# Env vars that acme.sh uses but Lego cloudflare plugin does not need.
-_DNS_ENV_DROP: frozenset[str] = frozenset({"CF_Zone_ID", "CF_Account_ID"})
+# Env vars that acme.sh uses but Lego cloudflare plugin does not need, plus our
+# own settings that become Lego flags rather than env vars.
+_DNS_ENV_DROP: frozenset[str] = frozenset({"CF_Zone_ID", "CF_Account_ID", "ACME_DNS_RESOLVERS"})
 
 _KEY_TYPE_MAP: dict[str, str] = {"ecc": "ec256", "rsa": "rsa2048"}
 
@@ -96,6 +97,28 @@ class LegoProvider(AcmeProvider):
         if not eab_kid or not eab_hmac_key:
             raise AcmeError("Both EAB_KID and EAB_HMAC_KEY are required for External Account Binding")
         return ["--eab", "--kid", eab_kid, "--hmac", eab_hmac_key]
+
+    def _resolver_args(self, dns_env: dict[str, str]) -> list[str]:
+        """Return ``--dns.resolvers`` flags for split-horizon DNS, or [] to let
+        Lego use the container's resolvers."""
+        resolvers = [r for r in dns_env.get("ACME_DNS_RESOLVERS", "").split(",") if r]
+        return sum((["--dns.resolvers", r] for r in resolvers), [])
+
+    def _log_dns_resolvers(self, domain: str, resolver_args: list[str]) -> None:
+        """Log which resolvers Lego will use, and warn if the container's DNS
+        looks split-horizon while the setting is off. Informational only."""
+        resolvers = resolver_args[1::2]
+        if resolvers:
+            log.info("dns: split-horizon enabled -- Lego DNS-01 checks use %s", ", ".join(resolvers))
+        else:
+            log.info("dns: Lego DNS-01 checks use the container's resolvers")
+        try:
+            from dns_utils import split_horizon_check  # noqa: PLC0415
+            problem = split_horizon_check(domain, bool(resolvers), resolvers)
+        except Exception:
+            return
+        if problem:
+            log.warning("dns: %s", problem["message"])
 
     def _log_cloudflare_token_scope(self, dns_env: dict[str, str]) -> None:
         """Best-effort, informational: log whether the configured Cloudflare
@@ -192,6 +215,8 @@ class LegoProvider(AcmeProvider):
         log.debug("issue_cert: mapped dns env keys: %s", sorted(lego_env.keys()))
         if plugin == "cloudflare":
             self._log_cloudflare_token_scope(dns_env)
+        resolver_args = self._resolver_args(dns_env)
+        self._log_dns_resolvers(domain, resolver_args)
 
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
@@ -218,6 +243,7 @@ class LegoProvider(AcmeProvider):
                 "--domains",  domain,
                 *sum((["--domains", san] for san in san_domains), []),
                 "--dns",      plugin,
+                *resolver_args,
                 "--path",     lego_path,
                 "--server",   server_url,
                 "--key-type", _KEY_TYPE_MAP[kt],
@@ -265,6 +291,8 @@ class LegoProvider(AcmeProvider):
         )
         if plugin == "cloudflare":
             self._log_cloudflare_token_scope(dns_env)
+        resolver_args = self._resolver_args(dns_env)
+        self._log_dns_resolvers(domain, resolver_args)
 
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
@@ -281,6 +309,7 @@ class LegoProvider(AcmeProvider):
                 "--email",    email,
                 "--domains",  domain,
                 "--dns",      plugin,
+                *resolver_args,
                 "--path",     lego_path,
                 "--server",   server_url,
                 "--key-type", _KEY_TYPE_MAP[kt],

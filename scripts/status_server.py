@@ -20,6 +20,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -51,6 +52,7 @@ from config_utils import (
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
+    acme_dns_resolvers,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -1046,6 +1048,30 @@ def _check_cppm(server: dict = None) -> dict:
 
 
 def _check_dns(server: dict = None) -> dict:
+    """DNS provider check, plus a split-horizon warning when the provider is OK.
+
+    The split-horizon check is read-only (SOA lookups via dig) and only
+    downgrades an "ok" result to "warn" — it never masks a provider error.
+    """
+    result = _check_dns_provider(server)
+    if result.get("status") != "ok":
+        return result
+    try:
+        from dns_utils import split_horizon_check
+        problem = split_horizon_check(
+            server.get("domain", ""),
+            bool(server.get("split_horizon_dns")),
+            acme_dns_resolvers(server),
+        )
+    except Exception:
+        return result
+    if problem:
+        return {"status": problem["status"],
+                "message": f"{result.get('message', 'OK')} – {problem['message']}"}
+    return result
+
+
+def _check_dns_provider(server: dict = None) -> dict:
     """Check the ACME / DNS setup, then DNS provider API connectivity.
 
     Blank = ClearPass-only monitoring (unknown). Partly filled or invalid =
@@ -1578,6 +1604,8 @@ def _parse_server_form(f: dict) -> dict:
         "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
         "cert_types": [t for t in ("https_ecc", "https_rsa", "radius", "radsec")
                  if f.get(f"issue_{t}") == "true"] or ["https_ecc", "https_rsa", "radius", "radsec"],
+        "split_horizon_dns":    f.get("split_horizon_dns", "") == "true",
+        "split_horizon_resolvers": [r for r in re.split(r"[,\s]+", f.get("split_horizon_resolvers", "")) if r],
     }
 
 
@@ -1602,6 +1630,8 @@ def _default_server_from_env() -> dict:
         "dns_provider":         "cloudflare",
         "dns_credentials":      {},
         "cert_types":           ["https_ecc", "https_rsa", "radius", "radsec"],
+        "split_horizon_dns":    False,
+        "split_horizon_resolvers": [],
     }
 
 
@@ -3076,6 +3106,9 @@ def _settings_form_page(server: dict = None, error: str = "",
     chk_https_rsa = " checked" if "https_rsa" in cert_types else ""
     chk_radius = " checked" if "radius" in cert_types or "rsa" in cert_types else ""
     chk_radsec = " checked" if "radsec" in cert_types or "rsa" in cert_types else ""
+    split_on = bool(s.get("split_horizon_dns"))
+    chk_split = " checked" if split_on else ""
+    split_resolvers = _esc(", ".join(s.get("split_horizon_resolvers") or []))
     san_dns = s.get("san_dns") or []
     san_fields = "".join(
       f'''<div class="field"><label>SAN DNS {i}</label>
@@ -3114,6 +3147,8 @@ def _settings_form_page(server: dict = None, error: str = "",
                     "dns_provider":     p.get("dns_provider", ""),
                     "dns_credentials":  p.get("dns_credentials") or {},
                     "cert_types":       p.get("cert_types") or [],
+                    "split_horizon_dns": bool(p.get("split_horizon_dns")),
+                    "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
                 }
                 for p in profiles
             }).replace("</", "<\\/")
@@ -3506,6 +3541,22 @@ def _settings_form_page(server: dict = None, error: str = "",
                  value="{cv('RFC2136_DNS_TIMEOUT', '10')}" autocomplete="off">
         </div>
       </div>
+
+      <details style="margin-top:1rem"{" open" if split_on else ""}>
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
+        <div class="field" style="margin:0.75rem 0 0">
+          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+            <input type="checkbox" name="split_horizon_dns" id="split_horizon_dns" class="cert-shared" value="true"{chk_split}
+                   style="width:auto;margin:0" onchange="toggleSplitHorizon(this.checked)">
+            This domain also exists on my internal DNS (split-horizon){_help_toggle('split_horizon', 'Check this if your internal DNS server has its own copy of this domain &mdash; common with Active Directory. Certificate validation will then check <strong>public</strong> DNS instead of your internal DNS.<br><br>This does not replace the Docker <code>dns:</code> setting: the container still uses that to reach ClearPass. This only changes where the certificate challenge is checked. Leave it unchecked if you are not sure &mdash; the dashboard warns you if it is needed.')}
+          </label>
+        </div>
+        <div class="field" id="split-horizon-resolvers" style="margin:0.75rem 0 0{"" if split_on else ";display:none"}">
+          <label>Custom public resolvers <span class="hint">(optional &mdash; default 1.1.1.1, 8.8.8.8; only needed if those are blocked)</span></label>
+          <input type="text" name="split_horizon_resolvers" class="cert-shared" value="{split_resolvers}"
+                 placeholder="1.1.1.1, 8.8.8.8" autocomplete="off">
+        </div>
+      </details>
     </div>
 
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
@@ -3537,6 +3588,9 @@ function switchAcme(val) {
   urlInput.required = isCustom;
   eabSec.style.display = val === 'zerossl' ? '' : 'none';
 }
+function toggleSplitHorizon(on) {
+  document.getElementById('split-horizon-resolvers').style.display = on ? '' : 'none';
+}
 function setSharedFieldsDisabled(disabled) {
   document.querySelectorAll('.cert-shared').forEach(function(el) { el.disabled = disabled; });
 }
@@ -3560,6 +3614,9 @@ function applyCertProfile(value) {
       var el = document.querySelector('[name="' + name + '"]');
       if (el) el.checked = true;
     });
+    document.getElementById('split_horizon_dns').checked = false;
+    document.querySelector('[name="split_horizon_resolvers"]').value = '';
+    toggleSplitHorizon(false);
     setSharedFieldsDisabled(false);
     switchDns(document.getElementById('dns_provider').value);
     switchAcme(document.getElementById('acme_server').value);
@@ -3598,6 +3655,9 @@ function applyCertProfile(value) {
     var el = document.querySelector('[name="issue_' + t + '"]');
     if (el) el.checked = types.indexOf(t) !== -1;
   });
+  document.getElementById('split_horizon_dns').checked = !!p.split_horizon_dns;
+  document.querySelector('[name="split_horizon_resolvers"]').value = (p.split_horizon_resolvers || []).join(', ');
+  toggleSplitHorizon(!!p.split_horizon_dns);
   switchDns(dnsProv);
   switchAcme(acmeSel);
   setSharedFieldsDisabled(true);

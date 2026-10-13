@@ -21,6 +21,7 @@ Notes:
 """
 
 import getpass
+import re
 import sys
 
 sys.path.insert(0, "/opt/cppm")
@@ -28,6 +29,7 @@ sys.path.insert(0, "/opt/cppm")
 try:
     from config_utils import (
         SERVERS_FILE,
+        acme_dns_resolvers,
         add_server,
         delete_server,
         get_server,
@@ -202,6 +204,19 @@ def _collect_server(existing: dict = None) -> dict:
             creds[key] = _prompt(label, creds.get(key, ""), hint=hint, secret=is_secret)
 
     s["dns_credentials"] = creds
+
+    print("\n── Advanced ─────────────────────────────────────────────────────────────")
+    print("  Split-horizon: answer yes only if your internal DNS server has its own copy")
+    print("  of this domain (common with Active Directory). Certificate validation then")
+    print("  checks public DNS instead. Not sure? Answer no — the dashboard warns if needed.")
+    s["split_horizon_dns"] = _prompt_bool("Split-horizon DNS", s.get("split_horizon_dns", False))
+    if s["split_horizon_dns"]:
+        current = ", ".join(s.get("split_horizon_resolvers") or [])
+        raw = _prompt("Custom public resolvers", current,
+                      hint="optional, comma-separated — default 1.1.1.1, 8.8.8.8")
+        s["split_horizon_resolvers"] = [r for r in re.split(r"[,\s]+", raw) if r]
+    else:
+        s["split_horizon_resolvers"] = []
     return s
 
 
@@ -279,6 +294,10 @@ def cmd_show(server_id: str) -> int:
         else:
             val = creds.get(key, "(empty)")
         print(f"  {label + ':':20}{val}")
+    print()
+    print(f"  Split-horizon DNS: {s.get('split_horizon_dns', False)}")
+    if s.get("split_horizon_dns"):
+        print(f"  Challenge DNS:    {', '.join(acme_dns_resolvers(s))}")
     return 0
 
 

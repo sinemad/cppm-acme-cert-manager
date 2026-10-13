@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from dns_utils import DEFAULT_PUBLIC_RESOLVERS, parse_resolvers
+
 SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 
 # ClearPass fields are always required: they are what the tool monitors and uploads to.
@@ -97,6 +99,19 @@ def san_dns_names(entry: dict) -> list[str]:
             result.append(name)
     return result[:10]
 
+def acme_dns_resolvers(entry: dict) -> list[str]:
+    """Return the resolvers Lego should use for DNS-01 checks, as host:port.
+
+    Empty unless split-horizon DNS is enabled, in which case it's the custom
+    list or, if none is given, the default public resolvers. An empty result
+    means Lego uses the container's own resolvers (Docker ``dns:``).
+    Raises ValueError if a custom resolver is invalid.
+    """
+    if not entry.get("split_horizon_dns"):
+        return []
+    return parse_resolvers(entry.get("split_horizon_resolvers") or []) or list(DEFAULT_PUBLIC_RESOLVERS)
+
+
 def le_dns_configured(entry: dict) -> bool:
     """True if any ACME / DNS field is filled in."""
     return any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
@@ -151,6 +166,10 @@ def validate_server(entry: dict) -> None:
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError("Callback port must be a number between 1 and 65535.")
+    try:
+        acme_dns_resolvers(entry)
+    except ValueError as exc:
+        raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
     cert_types = certificate_targets(entry)
     valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
     if not any(t in cert_types for t in valid_types):
@@ -187,6 +206,7 @@ def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
         for field in (
             "domain", "san_dns", "acme_email", "acme_server",
             "dns_provider", "dns_credentials", "cert_types",
+            "split_horizon_dns", "split_horizon_resolvers",
         ):
             if field in existing:
                 value = existing[field]
@@ -392,6 +412,7 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "UPLOAD_HTTPS_RSA":     "true" if "https_rsa" in certificate_targets(s) else "false",
         "UPLOAD_RADIUS":        "true" if "radius" in certificate_targets(s) else "false",
         "UPLOAD_RADSEC":        "true" if "radsec" in certificate_targets(s) else "false",
+        "ACME_DNS_RESOLVERS":   ",".join(acme_dns_resolvers(s)),
         "SERVER_CERT_DIR":      str(server_cert_dir(s)),
         "SERVER_LOG_DIR":       str(server_cert_dir(s) / "logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
