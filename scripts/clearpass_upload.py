@@ -692,7 +692,10 @@ def _serve_pkcs12_and_upload(
         log.warning("  Could not resolve %s — callback server will accept connections from any source", host)
 
     # Mutable container so the handler thread can write back to the main thread.
-    _state = {"rejected_ip": None}
+    # fetches: (client_ip, bytes_sent, file_size) per GET of the PKCS12 file.
+    # bad_paths: (client_ip, path) for requests to anything else.
+    _state = {"rejected_ip": None, "fetches": [], "bad_paths": []}
+    pfx_size = Path(pfx_path).stat().st_size
 
     class _SilentHandler(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *_):
@@ -708,9 +711,26 @@ def _serve_pkcs12_and_upload(
                 return False
             # Only serve the exact PKCS12 file — no directory listings or other paths
             if self.path.lstrip("/") != pfx_name:
+                _state["bad_paths"].append((client_ip, self.path))
+                log.warning("  Callback: %s requested unexpected path %r (expected /%s)",
+                            client_ip, self.path, pfx_name)
                 self.send_error(404, "Not Found")
                 return False
             return True
+
+        def copyfile(self, source, outputfile):
+            # Count what actually goes out, so a dropped connection shows up as
+            # a partial download rather than a successful one.
+            client_ip = self.client_address[0]
+            sent = 0
+            try:
+                while chunk := source.read(64 * 1024):
+                    outputfile.write(chunk)
+                    sent += len(chunk)
+            finally:
+                _state["fetches"].append((client_ip, sent, pfx_size))
+                log.info("  Callback: %s downloaded %s (%d of %d bytes)",
+                         client_ip, pfx_name, sent, pfx_size)
 
         def do_GET(self):
             if self._check_request():
@@ -744,11 +764,17 @@ def _serve_pkcs12_and_upload(
             "pkcs12_passphrase": passphrase,
         }
 
+        started = time.monotonic()
         resp = _req.put(url, headers=headers, json=body,
                         verify=verify_ssl, timeout=60)
-        log.debug("  PUT %s → HTTP %d  body=%s",
-                  url.split("/api/")[1], resp.status_code, resp.text[:300])
+        log.debug("  PUT %s → HTTP %d in %.1fs  body=%s",
+                  url.split("/api/")[1], resp.status_code,
+                  time.monotonic() - started, resp.text[:300])
         if resp.status_code not in (200, 201, 204):
+            log.error("  %s", _callback_diagnosis(
+                _state, pfx_url, callback_host, callback_port, passphrase,
+                time.monotonic() - started,
+            ))
             if _state["rejected_ip"] is not None:
                 resolved = sorted(_allowed_ips) if _allowed_ips else ["(resolution failed)"]
                 raise RuntimeError(
@@ -774,6 +800,36 @@ def _serve_pkcs12_and_upload(
     finally:
         httpd.shutdown()
         os.chdir(orig_dir)
+
+
+def _callback_diagnosis(state: dict, pfx_url: str, callback_host: str,
+                        callback_port: int, passphrase: str, elapsed: float) -> str:
+    """Explain a failed PUT using what the callback server saw during it."""
+    fetches = state["fetches"]
+    complete = [f for f in fetches if f[1] == f[2]]
+    if complete:
+        ip, sent, _ = complete[-1]
+        hint = ("the Cert Passphrase is empty — ClearPass may not accept a PKCS12 "
+                "without one" if not passphrase else
+                "check the Cert Passphrase and the certificate/key contents")
+        return (f"Callback diagnosis: ClearPass ({ip}) downloaded the PKCS12 "
+                f"({sent} bytes) but rejected it — {hint}.")
+    if fetches:
+        ip, sent, size = fetches[-1]
+        return (f"Callback diagnosis: the download from {ip} stopped after {sent} of "
+                f"{size} bytes — the connection to {callback_host}:{callback_port} "
+                f"was interrupted (firewall, proxy or MTU on the path).")
+    if state["bad_paths"]:
+        ip, path = state["bad_paths"][-1]
+        return (f"Callback diagnosis: {ip} connected but requested {path!r} instead of "
+                f"{pfx_url} — check for a proxy or NAT rewriting the request.")
+    if state["rejected_ip"] is not None:
+        return (f"Callback diagnosis: a connection from {state['rejected_ip']} was "
+                f"refused by the callback allowlist.")
+    return (f"Callback diagnosis: ClearPass never connected to {pfx_url} "
+            f"(waited {elapsed:.0f}s) — check that ClearPass can reach "
+            f"{callback_host}:{callback_port} (routing/firewall between networks, "
+            f"Docker port published, correct Callback Host).")
 
 
 def upload_https_certificate(

@@ -636,7 +636,19 @@ access to **Administration → Server Manager** or equivalent.
 JSON-only. CPPM must fetch the PKCS12 from the `pkcs12_file_url` provided in
 the request body. If CPPM cannot reach that URL, it times out and returns 422.
 
-**Fix:** Ensure `CPPM_CALLBACK_HOST` is set correctly in the web UI (Servers →
+`cppm_upload.log` shows what the callback server saw during the upload. Each
+download is logged as `Callback: <ip> downloaded <file> (<sent> of <size> bytes)`,
+and a failed upload adds a `Callback diagnosis:` line:
+
+| Diagnosis | Meaning |
+|---|---|
+| *ClearPass never connected to …* | Network problem: ClearPass can't reach the callback host/port (see the fix below) |
+| *downloaded the PKCS12 … but rejected it* | The network is fine; ClearPass didn't accept the file. Check the Cert Passphrase is set |
+| *download … stopped after N of M bytes* | The connection was cut mid-transfer (firewall, proxy, MTU) |
+| *requested '…' instead of …* | Something between ClearPass and the container rewrote the URL |
+| *refused by the callback allowlist* | ClearPass connected from an IP that isn't the configured ClearPass host |
+
+**Fix (network):** Ensure `CPPM_CALLBACK_HOST` is set correctly in the web UI (Servers →
 Edit → Callback Host), `CPPM_CALLBACK_PORT` is correct in
 `docker-compose.override.yml`, and the port is published:
 
