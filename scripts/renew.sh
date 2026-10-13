@@ -105,6 +105,8 @@ if output:
         err "Server ${SERVER_ID}: DOMAIN is empty – skipping"
         continue
     fi
+    # Wildcard-safe filename stem (*.example.com → _.example.com)
+    DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
 
     # ── ClearPass reachability probe ────────────────────────────────────────
     # Runs on every renewal check so CPPM outages are detected independently
@@ -248,8 +250,8 @@ except Exception as e:
     # exist from a previous run that crashed before install), then fall back to full
     # re-issue if install fails (no Lego state at all).
     NEEDS_ISSUE=false
-    [[ "$ISSUE_ECC" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.ecc.cer" ]] && NEEDS_ISSUE=true
-    [[ "$ISSUE_RSA" == "true" && ! -f "${CERT_DIR}/${DOMAIN}.rsa.cer" ]] && NEEDS_ISSUE=true
+    [[ "$ISSUE_ECC" == "true" && ! -f "${CERT_DIR}/${DOMAIN_FILE}.ecc.cer" ]] && NEEDS_ISSUE=true
+    [[ "$ISSUE_RSA" == "true" && ! -f "${CERT_DIR}/${DOMAIN_FILE}.rsa.cer" ]] && NEEDS_ISSUE=true
     if [[ "$NEEDS_ISSUE" == "true" ]]; then
         log "Flat cert(s) missing for ${DOMAIN} – attempting install from Lego state first..."
         status_write "WARN" "RENEW" "Flat cert(s) missing for ${DOMAIN} at renewal check – attempting install"
@@ -269,8 +271,8 @@ except Exception as e:
     fi
 
     # Log current expiry
-    PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.ecc.cer"
-    [[ "$ISSUE_ECC" != "true" ]] && PRIMARY_FLAT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+    PRIMARY_FLAT="${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+    [[ "$ISSUE_ECC" != "true" ]] && PRIMARY_FLAT="${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
     EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_FLAT" 2>/dev/null \
              | cut -d= -f2 || echo "unknown")
     DAYS_LEFT=$(python3 -c "

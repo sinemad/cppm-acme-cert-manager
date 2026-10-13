@@ -254,10 +254,12 @@ if output:
     fi
 
     # Certificate state decision (use per-server directory)
-    FLAT_ECC="${SERVER_CERT_DIR}/${DOMAIN}.ecc.cer"
-    FLAT_RSA="${SERVER_CERT_DIR}/${DOMAIN}.rsa.cer"
-    LEGO_ECC_CERT="${SERVER_CERT_DIR}/lego-ecc/certificates/${DOMAIN}.crt"
-    LEGO_RSA_CERT="${SERVER_CERT_DIR}/lego-rsa/certificates/${DOMAIN}.crt"
+    # Wildcard-safe filename stem (*.example.com → _.example.com)
+    DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
+    FLAT_ECC="${SERVER_CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+    FLAT_RSA="${SERVER_CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
+    LEGO_ECC_CERT="${SERVER_CERT_DIR}/lego-ecc/certificates/${DOMAIN_FILE}.crt"
+    LEGO_RSA_CERT="${SERVER_CERT_DIR}/lego-rsa/certificates/${DOMAIN_FILE}.crt"
 
     # Determine which cert types are expected for this server
     NEED_ECC="${ISSUE_ECC:-true}"

@@ -290,6 +290,11 @@ consumers expect:
 All cert files for a given ClearPass server live inside `/data/certs/<cppm_host>/`,
 where `<cppm_host>` is the sanitized ClearPass hostname (e.g. `cppm.example.com`).
 
+**Wildcard certificates:** for a wildcard domain the `*` is replaced with `_` in
+every filename, so `*.example.com` is stored as `_.example.com.ecc.cer`,
+`_.example.com.rsa.key`, and so on. This matches the names Lego uses under
+`certificates/`. The certificate itself is still issued for `*.example.com`.
+
 ---
 
 ## Persistent Storage Layout

@@ -19,3 +19,6 @@ coverage/
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code per-user settings
+.claude/settings.local.json

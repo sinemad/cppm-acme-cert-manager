@@ -22,6 +22,8 @@ log() { local m="[$(ts)] [HOOK]  $*"; echo "$m";    echo "$m" >> "$LOG" 2>/dev/n
 err() { local m="[$(ts)] [ERROR] $*"; echo "$m" >&2; echo "$m" >> "$LOG" 2>/dev/null; }
 
 source /opt/cppm/status.sh
+# Wildcard-safe filename stem (*.example.com → _.example.com)
+DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
 
 # Serialize all upload invocations — the callback HTTP server binds a fixed
 # port, so two concurrent deploy_hook.sh runs (e.g. cert pipeline + manual
@@ -63,10 +65,10 @@ UPLOAD_ARGS=()
 PRIMARY_CERT=""
 
 if [[ "$UPLOAD_HTTPS_ECC" == "true" ]]; then
-    HTTPS_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
-    HTTPS_KEY="${CERT_DIR}/${DOMAIN}.ecc.key"
-    HTTPS_FULLCHAIN="${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer"
-    HTTPS_CA="${CERT_DIR}/${DOMAIN}.ecc.ca.cer"
+    HTTPS_CERT="${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+    HTTPS_KEY="${CERT_DIR}/${DOMAIN_FILE}.ecc.key"
+    HTTPS_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.ecc.fullchain.cer"
+    HTTPS_CA="${CERT_DIR}/${DOMAIN_FILE}.ecc.ca.cer"
     for f in "$HTTPS_CERT" "$HTTPS_KEY" "$HTTPS_FULLCHAIN"; do
         [[ -f "$f" ]] || { err "Required file not found: $f"; status_write "FAILED" "UPLOAD" "Cert file missing – ${f}"; exit 1; }
     done
@@ -79,10 +81,10 @@ else
 fi
 
 if [[ "$UPLOAD_HTTPS_RSA" == "true" || "$UPLOAD_RADIUS" == "true" || "$UPLOAD_RADSEC" == "true" ]]; then
-    RADIUS_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
-    RADIUS_KEY="${CERT_DIR}/${DOMAIN}.rsa.key"
-    RADIUS_FULLCHAIN="${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer"
-    RADIUS_CA="${CERT_DIR}/${DOMAIN}.rsa.ca.cer"
+    RADIUS_CERT="${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
+    RADIUS_KEY="${CERT_DIR}/${DOMAIN_FILE}.rsa.key"
+    RADIUS_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.rsa.fullchain.cer"
+    RADIUS_CA="${CERT_DIR}/${DOMAIN_FILE}.rsa.ca.cer"
     for f in "$RADIUS_CERT" "$RADIUS_KEY" "$RADIUS_FULLCHAIN"; do
         [[ -f "$f" ]] || { err "Required file not found: $f"; status_write "FAILED" "UPLOAD" "Cert file missing – ${f}"; exit 1; }
     done

@@ -9,6 +9,7 @@
 # Lego cert state (inside SERVER_CERT_DIR):
 #   ECC: lego-ecc/certificates/<domain>.crt / .key / .issuer.crt
 #   RSA: lego-rsa/certificates/<domain>.crt / .key / .issuer.crt
+#   (<domain> has '*' replaced by '_' for wildcards: *.example.com → _.example.com)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -23,6 +24,8 @@ log() { echo "[$(ts)] [INSTALL] $*" | tee -a "$LOG"; }
 err() { echo "[$(ts)] [ERROR  ] $*" | tee -a "$LOG" >&2; }
 
 source /opt/cppm/status.sh
+# Wildcard-safe filename stem (*.example.com → _.example.com)
+DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
 unset DEBUG
 
 die() { err "$*"; status_write "FAILED" "CERT" "$*"; exit 1; }
@@ -48,8 +51,8 @@ python3 /opt/cppm/acme_cli.py install 2>&1 | tee -a "$LOG" || INSTALL_EXIT=$?
 [[ $INSTALL_EXIT -ne 0 ]] && die "Certificate install failed (exit ${INSTALL_EXIT}) – check ${LOG}"
 
 # Log expiry from the installed flat files
-PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
-[[ "$ISSUE_ECC" != "true" ]] && PRIMARY_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+PRIMARY_CERT="${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+[[ "$ISSUE_ECC" != "true" ]] && PRIMARY_CERT="${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
 EXPIRY=$(openssl x509 -enddate -noout -in "$PRIMARY_CERT" 2>/dev/null \
          | cut -d= -f2 || echo "unknown")
 DAYS_LEFT=$(python3 -c "
@@ -63,7 +66,7 @@ except Exception:
 " "$EXPIRY" 2>/dev/null || echo "unknown")
 log "Certificate expires ${EXPIRY} (${DAYS_LEFT} days)"
 if [[ "$ISSUE_ECC" == "true" && "$ISSUE_RSA" == "true" ]]; then
-    RSA_EXPIRY=$(openssl x509 -enddate -noout -in "${CERT_DIR}/${DOMAIN}.rsa.cer" 2>/dev/null \
+    RSA_EXPIRY=$(openssl x509 -enddate -noout -in "${CERT_DIR}/${DOMAIN_FILE}.rsa.cer" 2>/dev/null \
                  | cut -d= -f2 || echo "unknown")
     log "RSA certificate expires ${RSA_EXPIRY}"
 fi

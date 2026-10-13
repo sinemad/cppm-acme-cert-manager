@@ -39,6 +39,7 @@ except ImportError:
     HAS_CRYPTOGRAPHY = False
 
 sys.path.insert(0, "/opt/cppm")
+from acme_provider import cert_file_stem
 from auth_utils import (
     HAS_BCRYPT, SESSION_LIFETIME, HTPASSWD_FILE,
     load_session_secret, make_session_token, verify_session_token,
@@ -363,8 +364,8 @@ def build_server_status(server: dict) -> dict:
         "callback_host":   server.get("cppm_callback_host", ""),
         "callback_port":   str(server.get("cppm_callback_port", "8765")),
         "certs": {
-            "ecc": parse_cert(cert_dir / f"{domain}.ecc.cer"),
-            "rsa": parse_cert(cert_dir / f"{domain}.rsa.cer"),
+            "ecc": parse_cert(cert_dir / f"{cert_file_stem(domain)}.ecc.cer"),
+            "rsa": parse_cert(cert_dir / f"{cert_file_stem(domain)}.rsa.cer"),
         },
         "targets": certificate_targets(server) or ["https_ecc", "https_rsa", "radius", "radsec"],
         "cluster_mode": bool(server.get("cppm_cluster_mode", False)),

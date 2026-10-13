@@ -19,6 +19,7 @@
 # Lego stores cert state in per-key-type subdirectories:
 #   ECC: $SERVER_CERT_DIR/lego-ecc/certificates/<domain>.crt
 #   RSA: $SERVER_CERT_DIR/lego-rsa/certificates/<domain>.crt
+#   (<domain> has '*' replaced by '_' for wildcards: *.example.com → _.example.com)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

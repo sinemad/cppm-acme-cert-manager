@@ -78,9 +78,11 @@ if output:
         err "Server ${SERVER_ID}: DOMAIN is empty – skipping"
         continue
     fi
+    # Wildcard-safe filename stem (*.example.com → _.example.com)
+    DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
 
-    ECC_CERT="${CERT_DIR}/${DOMAIN}.ecc.cer"
-    RSA_CERT="${CERT_DIR}/${DOMAIN}.rsa.cer"
+    ECC_CERT="${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+    RSA_CERT="${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
 
     # Skip if any enabled cert type has not yet been issued
     CERTS_READY=true
@@ -114,16 +116,16 @@ if output:
     # Build args based on which cert types are enabled for this server
     TRUST_ARGS=(--only-trust-check)
     [[ "${ISSUE_ECC:-true}" == "true" ]] && TRUST_ARGS+=(
-        --https-ecc-cert  "${CERT_DIR}/${DOMAIN}.ecc.cer"
-        --https-ecc-key   "${CERT_DIR}/${DOMAIN}.ecc.key"
-        --https-fullchain "${CERT_DIR}/${DOMAIN}.ecc.fullchain.cer"
-        --https-ca        "${CERT_DIR}/${DOMAIN}.ecc.ca.cer"
+        --https-ecc-cert  "${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+        --https-ecc-key   "${CERT_DIR}/${DOMAIN_FILE}.ecc.key"
+        --https-fullchain "${CERT_DIR}/${DOMAIN_FILE}.ecc.fullchain.cer"
+        --https-ca        "${CERT_DIR}/${DOMAIN_FILE}.ecc.ca.cer"
     )
     [[ "${ISSUE_RSA:-true}" == "true" ]] && TRUST_ARGS+=(
-        --radius-cert      "${CERT_DIR}/${DOMAIN}.rsa.cer"
-        --radius-key       "${CERT_DIR}/${DOMAIN}.rsa.key"
-        --radius-fullchain "${CERT_DIR}/${DOMAIN}.rsa.fullchain.cer"
-        --radius-ca        "${CERT_DIR}/${DOMAIN}.rsa.ca.cer"
+        --radius-cert      "${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
+        --radius-key       "${CERT_DIR}/${DOMAIN_FILE}.rsa.key"
+        --radius-fullchain "${CERT_DIR}/${DOMAIN_FILE}.rsa.fullchain.cer"
+        --radius-ca        "${CERT_DIR}/${DOMAIN_FILE}.rsa.ca.cer"
     )
     python3 /opt/cppm/clearpass_upload.py "${TRUST_ARGS[@]}" \
         2>&1 | tee -a "$LOG" 2>/dev/null || TRUST_EXIT=$?

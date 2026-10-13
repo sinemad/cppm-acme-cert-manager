@@ -530,6 +530,11 @@ After successful issuance, flat cert files are written to `/opt/cppm-certs/`:
 | `<domain>.rsa.fullchain.cer` | RSA cert + intermediates |
 | `<domain>.rsa.ca.cer` | RSA CA chain |
 
+**Wildcard certificates:** for a wildcard domain the `*` is replaced with `_` in
+every filename, so `*.example.com` is stored as `_.example.com.ecc.cer`,
+`_.example.com.rsa.key`, and so on. This matches the names Lego uses under
+`certificates/`. The certificate itself is still issued for `*.example.com`.
+
 Private keys are never transmitted to CPPM directly. Each cert is converted to
 an ephemeral PKCS12 file written to `/tmp` and deleted immediately after upload.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult
+from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult, cert_file_stem
 
 _ACME_BIN = "/usr/local/bin/acme.sh"
 _ACME_HOME = "/root/.acme.sh"
@@ -194,6 +194,9 @@ class AcmeShProvider(AcmeProvider):
         key_types: list[str],
         log_file: str,
     ) -> None:
+        # acme.sh state dirs keep the literal domain; only our flat output
+        # files use the wildcard-safe stem.
+        stem = cert_file_stem(domain)
         if "ecc" in key_types:
             state_cert = os.path.join(cert_dir, f"{domain}_ecc", f"{domain}.cer")
             if not os.path.exists(state_cert):
@@ -206,15 +209,15 @@ class AcmeShProvider(AcmeProvider):
                 "--ecc",
                 "--home",          _ACME_HOME,
                 "--cert-home",     cert_dir,
-                "--cert-file",      os.path.join(cert_dir, f"{domain}.ecc.cer"),
-                "--key-file",       os.path.join(cert_dir, f"{domain}.ecc.key"),
-                "--fullchain-file", os.path.join(cert_dir, f"{domain}.ecc.fullchain.cer"),
-                "--ca-file",        os.path.join(cert_dir, f"{domain}.ecc.ca.cer"),
+                "--cert-file",      os.path.join(cert_dir, f"{stem}.ecc.cer"),
+                "--key-file",       os.path.join(cert_dir, f"{stem}.ecc.key"),
+                "--fullchain-file", os.path.join(cert_dir, f"{stem}.ecc.fullchain.cer"),
+                "--ca-file",        os.path.join(cert_dir, f"{stem}.ecc.ca.cer"),
                 "--log",           log_file,
             ]).returncode
             if rc != 0:
                 raise AcmeError(f"acme.sh --install-cert (ECC) failed (exit {rc})")
-            os.chmod(os.path.join(cert_dir, f"{domain}.ecc.key"), 0o600)
+            os.chmod(os.path.join(cert_dir, f"{stem}.ecc.key"), 0o600)
 
         if "rsa" in key_types:
             state_cert = os.path.join(cert_dir, domain, f"{domain}.cer")
@@ -227,27 +230,27 @@ class AcmeShProvider(AcmeProvider):
                 "--domain",        domain,
                 "--home",          _ACME_HOME,
                 "--cert-home",     cert_dir,
-                "--cert-file",      os.path.join(cert_dir, f"{domain}.rsa.cer"),
-                "--key-file",       os.path.join(cert_dir, f"{domain}.rsa.key"),
-                "--fullchain-file", os.path.join(cert_dir, f"{domain}.rsa.fullchain.cer"),
-                "--ca-file",        os.path.join(cert_dir, f"{domain}.rsa.ca.cer"),
+                "--cert-file",      os.path.join(cert_dir, f"{stem}.rsa.cer"),
+                "--key-file",       os.path.join(cert_dir, f"{stem}.rsa.key"),
+                "--fullchain-file", os.path.join(cert_dir, f"{stem}.rsa.fullchain.cer"),
+                "--ca-file",        os.path.join(cert_dir, f"{stem}.rsa.ca.cer"),
                 "--log",           log_file,
             ]).returncode
             if rc != 0:
                 raise AcmeError(f"acme.sh --install-cert (RSA) failed (exit {rc})")
-            os.chmod(os.path.join(cert_dir, f"{domain}.rsa.key"), 0o600)
+            os.chmod(os.path.join(cert_dir, f"{stem}.rsa.key"), 0o600)
 
         # Verify all expected flat files were written — mirrors install_cert.sh
         # lines 91-104 which die on any missing file even when exit code was 0.
         missing: list[str] = []
         if "ecc" in key_types:
             for suffix in ("ecc.cer", "ecc.key", "ecc.fullchain.cer", "ecc.ca.cer"):
-                p = os.path.join(cert_dir, f"{domain}.{suffix}")
+                p = os.path.join(cert_dir, f"{stem}.{suffix}")
                 if not os.path.exists(p):
                     missing.append(os.path.basename(p))
         if "rsa" in key_types:
             for suffix in ("rsa.cer", "rsa.key", "rsa.fullchain.cer", "rsa.ca.cer"):
-                p = os.path.join(cert_dir, f"{domain}.{suffix}")
+                p = os.path.join(cert_dir, f"{stem}.{suffix}")
                 if not os.path.exists(p):
                     missing.append(os.path.basename(p))
         if missing:

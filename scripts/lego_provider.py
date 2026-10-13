@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult
+from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult, cert_file_stem
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,9 @@ class LegoProvider(AcmeProvider):
         return os.path.join(cert_dir, _LEGO_SUBDIR[kt])
 
     def _cert_file(self, cert_dir: str, domain: str, kt: str) -> str:
-        return os.path.join(self._lego_path(cert_dir, kt), "certificates", f"{domain}.crt")
+        return os.path.join(
+            self._lego_path(cert_dir, kt), "certificates", f"{cert_file_stem(domain)}.crt"
+        )
 
     def _eab_args(self, eab_kid: str, eab_hmac_key: str) -> list[str]:
         if not eab_kid and not eab_hmac_key:
@@ -204,7 +206,7 @@ class LegoProvider(AcmeProvider):
                 certs_dir = os.path.join(lego_path, "certificates")
                 if os.path.isdir(certs_dir):
                     for fname in os.listdir(certs_dir):
-                        if fname.startswith(domain + "."):
+                        if fname.startswith(cert_file_stem(domain) + "."):
                             try:
                                 os.unlink(os.path.join(certs_dir, fname))
                             except OSError:
@@ -314,12 +316,13 @@ class LegoProvider(AcmeProvider):
         log_file: str,
     ) -> None:
         log.info("install_cert: domain=%s types=%s", domain, "+".join(k.upper() for k in key_types))
+        stem = cert_file_stem(domain)
         for kt in key_types:
             if kt not in _KEY_TYPE_MAP:
                 raise AcmeError(f"Unknown key type: {kt!r}")
 
             lego_path = self._lego_path(cert_dir, kt)
-            base = os.path.join(lego_path, "certificates", domain)
+            base = os.path.join(lego_path, "certificates", stem)
             crt_file = f"{base}.crt"
             key_file_src = f"{base}.key"
             issuer_file = f"{base}.issuer.crt"
@@ -334,7 +337,7 @@ class LegoProvider(AcmeProvider):
                 )
 
             # Full chain (leaf + intermediates) → .fullchain.cer
-            shutil.copy2(crt_file, os.path.join(cert_dir, f"{domain}.{kt}.fullchain.cer"))
+            shutil.copy2(crt_file, os.path.join(cert_dir, f"{stem}.{kt}.fullchain.cer"))
 
             # Leaf cert only (first PEM block) → .cer
             chain_text = Path(crt_file).read_text()
@@ -345,19 +348,19 @@ class LegoProvider(AcmeProvider):
             )
             if not m:
                 raise AcmeError(f"Could not extract leaf certificate from {crt_file}")
-            Path(os.path.join(cert_dir, f"{domain}.{kt}.cer")).write_text(
+            Path(os.path.join(cert_dir, f"{stem}.{kt}.cer")).write_text(
                 m.group(0) + "\n"
             )
 
             # Private key → .key (chmod 600)
-            dst_key = os.path.join(cert_dir, f"{domain}.{kt}.key")
+            dst_key = os.path.join(cert_dir, f"{stem}.{kt}.key")
             shutil.copy2(key_file_src, dst_key)
             os.chmod(dst_key, 0o600)
 
             log.info("install_cert: installed %s cert files for %s", kt.upper(), domain)
 
             # CA / issuer chain → .ca.cer
-            dst_ca = os.path.join(cert_dir, f"{domain}.{kt}.ca.cer")
+            dst_ca = os.path.join(cert_dir, f"{stem}.{kt}.ca.cer")
             if os.path.exists(issuer_file):
                 shutil.copy2(issuer_file, dst_ca)
             else:
@@ -376,7 +379,7 @@ class LegoProvider(AcmeProvider):
         missing: list[str] = []
         for kt in key_types:
             for suffix in (f"{kt}.cer", f"{kt}.key", f"{kt}.fullchain.cer", f"{kt}.ca.cer"):
-                p = os.path.join(cert_dir, f"{domain}.{suffix}")
+                p = os.path.join(cert_dir, f"{stem}.{suffix}")
                 if not os.path.exists(p):
                     missing.append(os.path.basename(p))
         if missing:

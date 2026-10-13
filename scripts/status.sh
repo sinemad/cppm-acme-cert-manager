@@ -38,6 +38,13 @@ _ensure_cppm_dirs() {
     fi
 }
 
+# cert_file_stem DOMAIN – Print the filename-safe form of DOMAIN used for all
+# cert files.  Wildcards map '*' to '_' (*.example.com → _.example.com), matching
+# the names Lego writes.  Keep in sync with cert_file_stem() in acme_provider.py.
+cert_file_stem() {
+    printf '%s' "${1//\*/_}"
+}
+
 # status_write LEVEL CATEGORY MESSAGE
 #   LEVEL:    OK | INFO | FAILED | WARN
 #   CATEGORY: CERT | UPLOAD | TRUST | RENEW | STARTUP

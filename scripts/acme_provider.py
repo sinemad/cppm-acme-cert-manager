@@ -26,6 +26,16 @@ class AcmeError(Exception):
     """Raised when an ACME provider operation fails."""
 
 
+def cert_file_stem(domain: str) -> str:
+    """Return the filename-safe form of ``domain`` used for all cert files.
+
+    Wildcard domains map ``*`` to ``_`` (``*.example.com`` → ``_.example.com``),
+    matching the names Lego itself writes under ``certificates/``. Keep in sync
+    with ``cert_file_stem`` in status.sh.
+    """
+    return domain.replace("*", "_")
+
+
 class AcmeProvider(abc.ABC):
     """Common interface for ACME certificate providers.
 

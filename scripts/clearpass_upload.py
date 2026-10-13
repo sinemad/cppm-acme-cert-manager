@@ -51,6 +51,8 @@ from typing import Any, Optional
 import urllib3
 from pyclearpass import ClearPassAPILogin, ApiPlatformCertificates
 
+from acme_provider import cert_file_stem
+
 if not shutil.which("openssl"):
     sys.exit("ERROR: 'openssl' binary not found. Rebuild the image.")
 
@@ -1321,19 +1323,19 @@ def main() -> int:
     # Both ECC and RSA chains are passed so intermediates unique to either chain
     # (e.g. R13 in the RSA chain when ECC uses E6) are all discovered and uploaded.
     https_ecc_ca = args.https_ca or (
-        str(Path(args.https_ecc_cert).parent / f"{args.domain}.ecc.ca.cer")
+        str(Path(args.https_ecc_cert).parent / f"{cert_file_stem(args.domain)}.ecc.ca.cer")
         if args.https_ecc_cert else ""
     )
     https_rsa_ca = args.https_rsa_ca or (
-        str(Path(args.https_rsa_cert).parent / f"{args.domain}.rsa.ca.cer")
+        str(Path(args.https_rsa_cert).parent / f"{cert_file_stem(args.domain)}.rsa.ca.cer")
         if args.https_rsa_cert else ""
     )
     radius_ca = args.radius_ca or (
-        str(Path(args.radius_cert).parent / f"{args.domain}.rsa.ca.cer")
+        str(Path(args.radius_cert).parent / f"{cert_file_stem(args.domain)}.rsa.ca.cer")
         if args.radius_cert else ""
     )
     radsec_ca = args.radsec_ca or (
-        str(Path(args.radsec_cert).parent / f"{args.domain}.rsa.ca.cer")
+        str(Path(args.radsec_cert).parent / f"{cert_file_stem(args.domain)}.rsa.ca.cer")
         if args.radsec_cert else ""
     )
     ca_paths = [p for p in [https_ecc_ca, https_rsa_ca, radius_ca, radsec_ca] if p]
