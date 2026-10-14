@@ -518,7 +518,7 @@ Configure them through the web UI (**Servers → Add/Edit Server**) or via
 | `CPPM_CLIENT_ID` | ClearPass API client ID |
 | `CPPM_CLIENT_SECRET` | ClearPass API client secret |
 | `CPPM_VERIFY_SSL` | `true` / `false` — verify CPPM TLS certificate |
-| `CPPM_CERT_PASSPHRASE` | PKCS12 export passphrase (transient — never stored on disk) |
+| `CPPM_CERT_PASSPHRASE` | PKCS12 export passphrase. Stored in `servers.json` (chmod 600) with the other server settings; ClearPass asks for it again if the certificate is later exported |
 | `CPPM_CALLBACK_HOST` | Docker host LAN IP that ClearPass can route to |
 | `CPPM_CALLBACK_PORT` | Mirrors the container-level value for per-server use |
 | `CPPM_CLUSTER_MODE` | `true` / `false` — discover and upload to every node in the ClearPass cluster, not just `CPPM_HOST` |
