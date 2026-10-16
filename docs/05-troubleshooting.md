@@ -430,6 +430,101 @@ to a firewall silently dropping the traffic.
 
 ---
 
+## Lego v5 account migration failed, and automatic rollback also failed
+
+**Symptom:** `acme_renewal.log` contains a line like:
+
+```
+lego: automatic rollback of /data/certs/<domain>/lego-ecc FAILED (<error>) -- manual recovery needed from backup at /data/certs/<domain>/migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+**Cause:** On first use after upgrading to Lego v5, the tool auto-migrates
+pre-v5 (v4.19.0-layout) account storage in place. Before migrating, it backs
+up the `lego-ecc`/`lego-rsa` directory to a `.tar.gz` archive. If the `lego
+migrate` step itself fails, the tool restores that backup automatically. This
+message means **both** steps failed — the migration broke the directory
+*and* the automatic restore couldn't put it back — so it needs manual
+recovery. The directory is never left missing: if restore failed early, the
+original (broken) directory is still in place; if restore failed partway
+through, you'll find it renamed aside instead (see below).
+
+**This is non-fatal to certificate serving.** The existing certificate files
+on disk are untouched by this — only the *account* (the registration that
+proves ACME-account continuity) is at risk. Worst case, you lose account
+continuity and Lego registers a fresh ACME account on the next run, which is
+non-destructive.
+
+### Step 1 — find the backup and the forensic copy
+
+```bash
+ls -la /data/certs/<domain>/migration-backups/
+# lego-ecc-pre-v5-migrate-20261016T153000Z.tar.gz  (or lego-rsa-...)
+
+ls -la /data/certs/<domain>/ | grep failed-migration
+# lego-ecc.failed-migration-1760000000  (present only if restore got partway)
+```
+
+The `.failed-migration-<unix-timestamp>` directory, if present, is the
+partially-migrated state at the moment of failure — useful for understanding
+what went wrong, but don't restore from it directly.
+
+### Step 2 — check whether the backup archive is actually usable
+
+```bash
+tar -tzf /data/certs/<domain>/migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+- **Lists files cleanly** (you should see `lego-ecc/accounts/...keys/....key` and
+  `lego-ecc/certificates/...`): the archive is intact — go to Step 3.
+- **`tar: Unexpected EOF` / `not in gzip format` / similar:** the archive is
+  corrupted. Skip to Step 4.
+
+### Step 3 — restore the backup by hand
+
+```bash
+cd /data/certs/<domain>/
+
+# Move the broken directory out of the way instead of deleting it
+mv lego-ecc lego-ecc.broken-$(date +%s)
+
+# Extract the known-good backup in its place
+tar -xzf migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+This recreates `lego-ecc/` with the original pre-v5 (v4) layout. The next
+issue/renew/revoke run will detect the legacy layout again and retry the
+migration automatically — no code change or manual migrate command needed.
+Once you've confirmed the restore worked, remove the `.broken-*` directory.
+
+### Step 4 — backup is unusable: accept a fresh ACME account
+
+If the archive is corrupted and no other copy exists, the pre-v5 account
+key can't be recovered. Remove the broken state so Lego starts clean:
+
+```bash
+cd /data/certs/<domain>/
+mv lego-ecc lego-ecc.broken-$(date +%s)   # keep for forensics, don't delete
+```
+
+On the next issue/renew/revoke run, Lego will register a brand-new ACME
+account and issue/renew the certificate under it. This does **not** affect
+the current certificate's validity or chain of trust — it only means the
+*account* history restarts. Nothing further to configure; this happens
+automatically once `lego-ecc`/`lego-rsa` no longer exists at that path.
+
+### Preventing this
+
+Since the automated backup lives on the same host/volume as the data it's
+protecting, it won't survive a full disk failure. For extra safety, copy the
+`migration-backups/` directory to separate storage before upgrading a
+production server to the v5 image:
+
+```bash
+cp -r /data/certs/<domain>/migration-backups/ /path/to/offsite/backup/
+```
+
+---
+
 ## Cluster node returns 403 Forbidden
 
 **Symptom:** The dashboard shows a cluster node with error

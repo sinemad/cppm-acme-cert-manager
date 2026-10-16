@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
+import time
 from pathlib import Path
 
 from acme_provider import AcmeError, AcmeProvider, IssueResult, KeyTypeResult, cert_file_stem
@@ -194,36 +196,104 @@ class LegoProvider(AcmeProvider):
                 f"lego timed out after {timeout}s ({args[0] if args else '?'})"
             ) from exc
 
+    def _has_legacy_account(self, lego_path: str) -> bool:
+        """True if lego_path holds a pre-v5 account dir (accounts/<server>/
+        <email>/keys/<email>.key). v5 never creates a keys/ subdirectory, so
+        its presence unambiguously marks un-migrated v4 storage."""
+        accounts_dir = os.path.join(lego_path, "accounts")
+        if not os.path.isdir(accounts_dir):
+            return False
+        for root, _dirs, files in os.walk(accounts_dir):
+            if os.path.basename(root) == "keys" and any(f.endswith(".key") for f in files):
+                return True
+        return False
+
+    def _backup_before_migration(self, lego_path: str) -> str:
+        """Archive lego_path's accounts/ and certificates/ state before lego
+        rewrites it in place, so a botched migration can be rolled back by
+        hand. Stored alongside (not inside) lego_path."""
+        backups_dir = os.path.join(os.path.dirname(lego_path), "migration-backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        name = os.path.basename(lego_path)
+        archive_path = os.path.join(backups_dir, f"{name}-pre-v5-migrate-{stamp}.tar.gz")
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(lego_path, arcname=name)
+        return archive_path
+
+    def _restore_backup(self, lego_path: str, backup_path: str) -> None:
+        """Replace lego_path's contents with the pre-migration snapshot in
+        backup_path. The partially-migrated directory is renamed aside
+        (not deleted) so it's available for forensics; if extraction itself
+        fails, that renamed copy is moved back so lego_path is never left
+        empty."""
+        parent = os.path.dirname(lego_path)
+        failed_aside = f"{lego_path}.failed-migration-{int(time.time())}"
+        os.rename(lego_path, failed_aside)
+        try:
+            with tarfile.open(backup_path, "r:gz") as tar:
+                tar.extractall(path=parent, filter="data")
+        except Exception:
+            if os.path.isdir(lego_path):
+                shutil.rmtree(lego_path)
+            os.rename(failed_aside, lego_path)
+            raise
+        log.info(
+            "lego: pre-migration state restored to %s; the partially-migrated "
+            "directory was kept at %s for inspection", lego_path, failed_aside,
+        )
+
     def _migrate_legacy_storage(self, lego_path: str) -> None:
-        """One-time, idempotent conversion of pre-v5 Lego storage.
+        """One-time conversion of pre-v5 Lego account storage.
 
         Lego v5 flattened the account key layout (accounts/<server>/<email>/
         keys/<email>.key -> accounts/<server>/<email>/<email>.key). Without
         this, v5 can't read a v4 account directory and silently registers a
-        brand new ACME account instead of reusing the existing one. `lego
-        migrate` requires both accounts/ and certificates/ to already exist,
-        so this is a no-op for a server that has never issued a cert, and is
-        safe to call on every run — lego detects and skips files that are
-        already migrated. Runs with cwd=lego_path so lego's leftover
-        .lego.migration.*.yml file lands in that per-key-type directory
-        rather than wherever this process happened to start.
+        brand new ACME account instead of reusing the existing one.
+
+        Only runs when a legacy account dir is actually detected, so this
+        costs nothing on every other issue/renew/revoke call once a server
+        is fully on v5. Backs up lego_path first; if the backup itself
+        fails, skips the migration for this run rather than migrating
+        without a safety net (lego will just register a new account instead,
+        which is non-destructive and can be retried later).
         """
-        if not (
-            os.path.isdir(os.path.join(lego_path, "accounts"))
-            and os.path.isdir(os.path.join(lego_path, "certificates"))
-        ):
+        if not self._has_legacy_account(lego_path):
             return
-        rc = self._run(
-            ["migrate", "--path", lego_path],
-            confirm_input=b"y\n",
-            cwd=lego_path,
-        ).returncode
-        if rc != 0:
-            log.warning(
-                "lego migrate exited %d for %s -- continuing; lego may register "
-                "a new ACME account if the existing one could not be migrated",
-                rc, lego_path,
+
+        try:
+            backup_path = self._backup_before_migration(lego_path)
+        except OSError as exc:
+            log.error(
+                "lego: could not back up %s before migration (%s) -- skipping "
+                "migration this run; lego will register a new ACME account "
+                "instead of migrating the existing one", lego_path, exc,
             )
+            return
+
+        log.info(
+            "lego: migrating legacy (pre-v5) account storage at %s (backup: %s)",
+            lego_path, backup_path,
+        )
+        account_only = not os.path.isdir(os.path.join(lego_path, "certificates"))
+        args = ["migrate", "--path", lego_path]
+        if account_only:
+            args.append("--account-only")
+        rc = self._run(args, confirm_input=b"y\n", cwd=lego_path).returncode
+        if rc != 0:
+            log.error(
+                "lego migrate exited %d for %s -- rolling back to the pre-migration "
+                "backup at %s", rc, lego_path, backup_path,
+            )
+            try:
+                self._restore_backup(lego_path, backup_path)
+            except Exception as restore_exc:
+                log.error(
+                    "lego: automatic rollback of %s FAILED (%s) -- manual recovery "
+                    "needed from backup at %s", lego_path, restore_exc, backup_path,
+                )
+        else:
+            log.info("lego: migration of %s completed successfully", lego_path)
 
     # ── AcmeProvider interface ─────────────────────────────────────────────────
 
