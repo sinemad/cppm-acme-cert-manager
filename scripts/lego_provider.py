@@ -16,6 +16,43 @@ log = logging.getLogger(__name__)
 
 _LEGO_BIN = "/usr/local/bin/lego"
 
+# This provider's CLI flag names and subcommand shapes (see _lego_run_args,
+# _lego_revoke_args, _lego_migrate_args below) were last verified against this
+# Lego release. When bumping LEGO_VERSION in the Dockerfile, diff the new
+# release's CHANGELOG against those three helpers before deploying -- that's
+# where a flag rename or removal would need to be updated. A mismatch logs a
+# startup warning (see lego_version_warning) but does not block issuance.
+#
+# TODO(DNS-PERSIST-01): once delegated DNS-01 (acme-dns) support lands, add a
+# CI gate that runs a real `lego run` against the Let's Encrypt staging CA
+# whenever LEGO_VERSION changes in the Dockerfile. Blocked today because the
+# current DNS-01 flow needs a real production DNS credential (e.g. a
+# Cloudflare zone-edit token), which isn't safe to put in CI secrets.
+_TESTED_LEGO_VERSION = "5.5.2"
+
+_LEGO_VERSION_RE = re.compile(r"lego version (\S+)")
+
+
+def lego_version_warning(tested: str = _TESTED_LEGO_VERSION) -> str | None:
+    """Return a warning if the installed lego binary's version doesn't match
+    the version this provider's CLI flags were last verified against, or None
+    if they match (or the version can't be determined)."""
+    try:
+        out = subprocess.run(
+            [_LEGO_BIN, "--version"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:
+        return None
+    m = _LEGO_VERSION_RE.search(out)
+    if not m or m.group(1) == tested:
+        return None
+    return (
+        f"lego binary is v{m.group(1)}, but LegoProvider's CLI flags were last "
+        f"verified against v{tested} -- review _lego_run_args/_lego_revoke_args/"
+        f"_lego_migrate_args in lego_provider.py (and go-acme/lego's CHANGELOG) "
+        f"before trusting issuance/renewal"
+    )
+
 _ACME_SERVER_MAP: dict[str, str] = {
     "letsencrypt":      "https://acme-v02.api.letsencrypt.org/directory",
     "letsencrypt_test": "https://acme-staging-v02.api.letsencrypt.org/directory",
@@ -111,6 +148,59 @@ class LegoProvider(AcmeProvider):
         Lego use the container's resolvers."""
         resolvers = [r for r in dns_env.get("ACME_DNS_RESOLVERS", "").split(",") if r]
         return sum((["--dns.resolvers", r] for r in resolvers), [])
+
+    def _lego_run_args(
+        self,
+        *,
+        email: str,
+        domain: str,
+        san_domains: list[str],
+        plugin: str,
+        resolver_args: list[str],
+        lego_path: str,
+        server_url: str,
+        kt: str,
+        eab_args: list[str],
+        extra: list[str] | None = None,
+    ) -> list[str]:
+        """Build the arg list for Lego's ``run`` subcommand, shared by
+        issue_cert and renew_cert so a future flag rename (like the v4→v5
+        jump) only needs updating here, not at both call sites."""
+        return [
+            "run",
+            "--accept-tos",
+            "--enable-cn",
+            "--email",     email,
+            "--domains",   domain,
+            *sum((["--domains", san] for san in san_domains), []),
+            "--dns",       plugin,
+            *resolver_args,
+            "--path",      lego_path,
+            "--server",    server_url,
+            "--key-type",  _KEY_TYPE_MAP[kt],
+            "--cert.name", cert_file_stem(domain),
+            *eab_args,
+            *(extra or []),
+        ]
+
+    def _lego_revoke_args(
+        self, *, email: str, lego_path: str, server_url: str, domain: str,
+    ) -> list[str]:
+        """Build the arg list for Lego's ``certificates revoke`` subcommand."""
+        return [
+            "certificates", "revoke",
+            "--email",     email,
+            "--path",      lego_path,
+            "--server",    server_url,
+            "--cert.name", cert_file_stem(domain),
+        ]
+
+    def _lego_migrate_args(self, *, lego_path: str, account_only: bool) -> list[str]:
+        """Build the arg list for Lego's ``migrate`` subcommand."""
+        args = ["migrate", "--path", lego_path]
+        if account_only:
+            args.append("--account-only")
+        return args
 
     def _log_dns_resolvers(self, domain: str, resolver_args: list[str]) -> None:
         """Log which resolvers Lego will use, and warn if the container's DNS
@@ -279,9 +369,7 @@ class LegoProvider(AcmeProvider):
             lego_path, backup_path,
         )
         account_only = not os.path.isdir(os.path.join(lego_path, "certificates"))
-        args = ["migrate", "--path", lego_path]
-        if account_only:
-            args.append("--account-only")
+        args = self._lego_migrate_args(lego_path=lego_path, account_only=account_only)
         rc = self._run(args, confirm_input=b"y\n", cwd=lego_path).returncode
         if rc != 0:
             log.error(
@@ -356,22 +444,18 @@ class LegoProvider(AcmeProvider):
                             except OSError:
                                 pass
 
-            args = [
-                "run",
-                "--accept-tos",
-                "--enable-cn",
-                "--email",     email,
-                "--domains",   domain,
-                *sum((["--domains", san] for san in san_domains), []),
-                "--dns",       plugin,
-                *resolver_args,
-                "--path",      lego_path,
-                "--server",    server_url,
-                "--key-type",  _KEY_TYPE_MAP[kt],
-                "--cert.name", cert_file_stem(domain),
-                *eab_args,
-                "--always-deactivate-authorizations", "true",
-            ]
+            args = self._lego_run_args(
+                email=email,
+                domain=domain,
+                san_domains=san_domains,
+                plugin=plugin,
+                resolver_args=resolver_args,
+                lego_path=lego_path,
+                server_url=server_url,
+                kt=kt,
+                eab_args=eab_args,
+                extra=["--always-deactivate-authorizations", "true"],
+            )
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
                 log.error("lego run (%s) failed (exit %d) for %s", kt.upper(), rc, domain)
@@ -427,22 +511,18 @@ class LegoProvider(AcmeProvider):
             # mtime before/after to detect a real renewal.
             before = os.path.getmtime(cert_file) if os.path.exists(cert_file) else 0.0
 
-            args = [
-                "run",
-                "--accept-tos",
-                "--enable-cn",
-                "--email",     email,
-                "--domains",   domain,
-                *sum((["--domains", san] for san in san_domains), []),
-                "--dns",       plugin,
-                *resolver_args,
-                "--path",      lego_path,
-                "--server",    server_url,
-                "--key-type",  _KEY_TYPE_MAP[kt],
-                "--cert.name", cert_file_stem(domain),
-                *eab_args,
-                "--renew-days", "30",
-            ]
+            args = self._lego_run_args(
+                email=email,
+                domain=domain,
+                san_domains=san_domains,
+                plugin=plugin,
+                resolver_args=resolver_args,
+                lego_path=lego_path,
+                server_url=server_url,
+                kt=kt,
+                eab_args=eab_args,
+                extra=["--renew-days", "30"],
+            )
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
                 log.error("lego renew (%s) failed (exit %d) for %s", kt.upper(), rc, domain)
@@ -564,13 +644,12 @@ class LegoProvider(AcmeProvider):
                 failures.append(f"{kt.upper()} cert not found at {cert_file}")
                 continue
             self._migrate_legacy_storage(self._lego_path(cert_dir, kt))
-            args = [
-                "certificates", "revoke",
-                "--email",     email,
-                "--path",      self._lego_path(cert_dir, kt),
-                "--server",    server_url,
-                "--cert.name", cert_file_stem(domain),
-            ]
+            args = self._lego_revoke_args(
+                email=email,
+                lego_path=self._lego_path(cert_dir, kt),
+                server_url=server_url,
+                domain=domain,
+            )
             rc = self._run(args).returncode
             if rc != 0:
                 failures.append(f"{kt.upper()} exit {rc}")

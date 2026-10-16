@@ -48,6 +48,22 @@ log "=== ClearPass Certificate Manager v2.0 ==="
 log "lego    : $LEGO_VER"
 status_write "INFO" "STARTUP" "Container started – lego=${LEGO_VER}"
 
+# Warn (don't block) if the installed lego binary has drifted from the
+# version LegoProvider's CLI flags were last verified against — catches a
+# Dockerfile LEGO_VERSION bump that wasn't paired with a code review.
+LEGO_COMPAT_WARNING=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from lego_provider import lego_version_warning
+msg = lego_version_warning()
+if msg:
+    print(msg)
+" 2>/dev/null) || true
+if [[ -n "$LEGO_COMPAT_WARNING" ]]; then
+    warn "$LEGO_COMPAT_WARNING"
+    status_write "WARN" "STARTUP" "$LEGO_COMPAT_WARNING"
+fi
+
 # ── Migrate .env → servers.json (backwards compatibility) ─────────────────────
 log "Checking server configuration..."
 MIGRATE_MSG=$(python3 -c "
