@@ -50,7 +50,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # ── Install Lego ──────────────────────────────────────────────────────────────
 # Single static binary — no git, no shell patching, no seed directory needed.
 # Check latest releases: https://github.com/go-acme/lego/releases
-ENV LEGO_VERSION=4.19.0
+ENV LEGO_VERSION=5.5.2
 RUN set -e \
     && curl -fsSL \
        "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz" \
