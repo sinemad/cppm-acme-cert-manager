@@ -259,6 +259,9 @@ class LegoProvider(AcmeProvider):
         which is non-destructive and can be retried later).
         """
         if not self._has_legacy_account(lego_path):
+            # TODO: remove this line once the fleet is confirmed off v4 storage —
+            # temporary visibility while rolling out the v5 migration.
+            log.info("lego: %s has no legacy (pre-v5) account storage -- nothing to migrate", lego_path)
             return
 
         try:

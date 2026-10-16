@@ -279,8 +279,11 @@ if output:
     # Local-only (no ACME network call) and a no-op once storage is current, so
     # this runs unconditionally on every start rather than waiting for the next
     # scheduled renew to pick up a storage-layout change after an upgrade.
-    python3 /opt/cppm/acme_cli.py migrate 2>&1 | tee -a "$LOG" || \
-        err "Legacy storage migration check failed for ${DOMAIN} – check acme_renewal.log"
+    # Written to the per-server acme_renewal.log (not $LOG/startup.log) to match
+    # where issue_cert.sh/renew.sh log their own acme_cli.py calls.
+    SERVER_ACME_LOG="${SERVER_CERT_DIR}/logs/acme_renewal.log"
+    python3 /opt/cppm/acme_cli.py migrate 2>&1 | tee -a "$SERVER_ACME_LOG" || \
+        err "Legacy storage migration check failed for ${DOMAIN} – check ${SERVER_ACME_LOG}"
 
     # ── Remove legacy acme.sh per-cert state dirs (one-time, post-upgrade) ───────
     # Guard: only run when certs are already present (flat or Lego state) so this
