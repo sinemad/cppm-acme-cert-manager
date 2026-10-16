@@ -171,6 +171,8 @@ class LegoProvider(AcmeProvider):
         args: list[str],
         extra_env: dict[str, str] | None = None,
         timeout: int = 600,
+        confirm_input: bytes | None = None,
+        cwd: str | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         env = {**os.environ, **(extra_env or {})}
         # Unset DEBUG — a non-numeric value from the host causes Alpine ash
@@ -181,13 +183,47 @@ class LegoProvider(AcmeProvider):
         full_args = ["--log.format", "text", *args]
         log.debug("lego %s", " ".join(full_args))
         try:
-            return subprocess.run([_LEGO_BIN, *full_args], env=env, timeout=timeout)
+            return subprocess.run(
+                [_LEGO_BIN, *full_args], env=env, timeout=timeout,
+                input=confirm_input, cwd=cwd,
+            )
         except FileNotFoundError as exc:
             raise AcmeError(f"lego binary not found at {_LEGO_BIN}") from exc
         except subprocess.TimeoutExpired as exc:
             raise AcmeError(
                 f"lego timed out after {timeout}s ({args[0] if args else '?'})"
             ) from exc
+
+    def _migrate_legacy_storage(self, lego_path: str) -> None:
+        """One-time, idempotent conversion of pre-v5 Lego storage.
+
+        Lego v5 flattened the account key layout (accounts/<server>/<email>/
+        keys/<email>.key -> accounts/<server>/<email>/<email>.key). Without
+        this, v5 can't read a v4 account directory and silently registers a
+        brand new ACME account instead of reusing the existing one. `lego
+        migrate` requires both accounts/ and certificates/ to already exist,
+        so this is a no-op for a server that has never issued a cert, and is
+        safe to call on every run — lego detects and skips files that are
+        already migrated. Runs with cwd=lego_path so lego's leftover
+        .lego.migration.*.yml file lands in that per-key-type directory
+        rather than wherever this process happened to start.
+        """
+        if not (
+            os.path.isdir(os.path.join(lego_path, "accounts"))
+            and os.path.isdir(os.path.join(lego_path, "certificates"))
+        ):
+            return
+        rc = self._run(
+            ["migrate", "--path", lego_path],
+            confirm_input=b"y\n",
+            cwd=lego_path,
+        ).returncode
+        if rc != 0:
+            log.warning(
+                "lego migrate exited %d for %s -- continuing; lego may register "
+                "a new ACME account if the existing one could not be migrated",
+                rc, lego_path,
+            )
 
     # ── AcmeProvider interface ─────────────────────────────────────────────────
 
@@ -232,6 +268,7 @@ class LegoProvider(AcmeProvider):
                 raise AcmeError(f"Unknown key type: {kt!r}")
 
             lego_path = self._lego_path(cert_dir, kt)
+            self._migrate_legacy_storage(lego_path)
             os.makedirs(os.path.join(lego_path, "certificates"), exist_ok=True)
 
             if force:
@@ -311,6 +348,7 @@ class LegoProvider(AcmeProvider):
                 continue
 
             lego_path = self._lego_path(cert_dir, kt)
+            self._migrate_legacy_storage(lego_path)
             cert_file = self._cert_file(cert_dir, domain, kt)
             # lego renew exits 0 whether or not it actually renewed; compare
             # mtime before/after to detect a real renewal.
@@ -452,6 +490,7 @@ class LegoProvider(AcmeProvider):
             if not os.path.exists(cert_file):
                 failures.append(f"{kt.upper()} cert not found at {cert_file}")
                 continue
+            self._migrate_legacy_storage(self._lego_path(cert_dir, kt))
             args = [
                 "certificates", "revoke",
                 "--email",     email,
