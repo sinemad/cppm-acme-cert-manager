@@ -35,7 +35,8 @@ _DNS_PLUGIN_MAP: dict[str, str] = {
     "godaddy":      "godaddy",
     "gd":           "godaddy",
     "infoblox":     "infoblox",
-    "rfc2136":      "rfc2136",
+    # Lego v5 renamed the rfc2136 provider to dnsupdate.
+    "rfc2136":      "dnsupdate",
 }
 
 # Credential env var names as stored in servers.json (acme.sh convention) → Lego names.
@@ -48,7 +49,12 @@ _DNS_ENV_REMAP: dict[str, str] = {
     "GD_Secret":          "GODADDY_API_SECRET",
     "AWS_DEFAULT_REGION": "AWS_REGION",
     # Infoblox — stored under acme.sh-style names; Lego uses the same names natively.
-    # RFC 2136 — stored and passed through as-is (Lego names match).
+    # RFC 2136 — Lego v5's dnsupdate provider uses DNSUPDATE_* env var names.
+    "RFC2136_NAMESERVER":     "DNSUPDATE_NAMESERVER",
+    "RFC2136_TSIG_KEY":       "DNSUPDATE_TSIG_KEY",
+    "RFC2136_TSIG_SECRET":    "DNSUPDATE_TSIG_SECRET",
+    "RFC2136_TSIG_ALGORITHM": "DNSUPDATE_TSIG_ALGORITHM",
+    "RFC2136_DNS_TIMEOUT":    "DNSUPDATE_DNS_TIMEOUT",
 }
 
 # Env vars that acme.sh uses but Lego cloudflare plugin does not need, plus our
@@ -96,7 +102,7 @@ class LegoProvider(AcmeProvider):
             return []
         if not eab_kid or not eab_hmac_key:
             raise AcmeError("Both EAB_KID and EAB_HMAC_KEY are required for External Account Binding")
-        return ["--eab", "--kid", eab_kid, "--hmac", eab_hmac_key]
+        return ["--eab", "--eab.kid", eab_kid, "--eab.hmac", eab_hmac_key]
 
     def _resolver_args(self, dns_env: dict[str, str]) -> list[str]:
         """Return ``--dns.resolvers`` flags for split-horizon DNS, or [] to let
@@ -170,9 +176,12 @@ class LegoProvider(AcmeProvider):
         # Unset DEBUG — a non-numeric value from the host causes Alpine ash
         # integer-range errors in child processes.
         env.pop("DEBUG", None)
-        log.debug("lego %s", " ".join(args))
+        # --log.format must precede the subcommand (it's a global flag); text
+        # keeps issue_cert.sh's rate-limit grep working (default is colored).
+        full_args = ["--log.format", "text", *args]
+        log.debug("lego %s", " ".join(full_args))
         try:
-            return subprocess.run([_LEGO_BIN, *args], env=env, timeout=timeout)
+            return subprocess.run([_LEGO_BIN, *full_args], env=env, timeout=timeout)
         except FileNotFoundError as exc:
             raise AcmeError(f"lego binary not found at {_LEGO_BIN}") from exc
         except subprocess.TimeoutExpired as exc:
@@ -238,17 +247,19 @@ class LegoProvider(AcmeProvider):
                                 pass
 
             args = [
-                "--accept-tos",
-                "--email",    email,
-                "--domains",  domain,
-                *sum((["--domains", san] for san in san_domains), []),
-                "--dns",      plugin,
-                *resolver_args,
-                "--path",     lego_path,
-                "--server",   server_url,
-                "--key-type", _KEY_TYPE_MAP[kt],
-                *eab_args,
                 "run",
+                "--accept-tos",
+                "--enable-cn",
+                "--email",     email,
+                "--domains",   domain,
+                *sum((["--domains", san] for san in san_domains), []),
+                "--dns",       plugin,
+                *resolver_args,
+                "--path",      lego_path,
+                "--server",    server_url,
+                "--key-type",  _KEY_TYPE_MAP[kt],
+                "--cert.name", cert_file_stem(domain),
+                *eab_args,
                 "--always-deactivate-authorizations", "true",
             ]
             rc = self._run(args, extra_env=lego_env).returncode
@@ -306,16 +317,20 @@ class LegoProvider(AcmeProvider):
             before = os.path.getmtime(cert_file) if os.path.exists(cert_file) else 0.0
 
             args = [
-                "--email",    email,
-                "--domains",  domain,
-                "--dns",      plugin,
+                "run",
+                "--accept-tos",
+                "--enable-cn",
+                "--email",     email,
+                "--domains",   domain,
+                *sum((["--domains", san] for san in san_domains), []),
+                "--dns",       plugin,
                 *resolver_args,
-                "--path",     lego_path,
-                "--server",   server_url,
-                "--key-type", _KEY_TYPE_MAP[kt],
+                "--path",      lego_path,
+                "--server",    server_url,
+                "--key-type",  _KEY_TYPE_MAP[kt],
+                "--cert.name", cert_file_stem(domain),
                 *eab_args,
-                "renew",
-                "--days", "30",
+                "--renew-days", "30",
             ]
             rc = self._run(args, extra_env=lego_env).returncode
             if rc != 0:
@@ -438,11 +453,11 @@ class LegoProvider(AcmeProvider):
                 failures.append(f"{kt.upper()} cert not found at {cert_file}")
                 continue
             args = [
-                "--email",  email,
-                "--path",   self._lego_path(cert_dir, kt),
-                "--server", server_url,
-                "revoke",
-                "--cert", cert_file,
+                "certificates", "revoke",
+                "--email",     email,
+                "--path",      self._lego_path(cert_dir, kt),
+                "--server",    server_url,
+                "--cert.name", cert_file_stem(domain),
             ]
             rc = self._run(args).returncode
             if rc != 0:
