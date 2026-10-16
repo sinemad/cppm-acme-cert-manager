@@ -574,3 +574,14 @@ class LegoProvider(AcmeProvider):
 
         if failures:
             raise AcmeError(f"lego revoke failed for {domain}: {'; '.join(failures)}")
+
+    def migrate_legacy_storage(
+        self,
+        *,
+        cert_dir: str,
+        key_types: list[str],
+    ) -> None:
+        for kt in key_types:
+            if kt not in _KEY_TYPE_MAP:
+                raise AcmeError(f"Unknown key type: {kt!r}")
+            self._migrate_legacy_storage(self._lego_path(cert_dir, kt))

@@ -290,3 +290,11 @@ class AcmeShProvider(AcmeProvider):
             raise AcmeError(
                 f"acme.sh --revoke failed for {domain}: {'; '.join(failures)}"
             )
+
+    def migrate_legacy_storage(
+        self,
+        *,
+        cert_dir: str,  # noqa: ARG002
+        key_types: list[str],  # noqa: ARG002
+    ) -> None:
+        """No-op — acme.sh has no legacy account storage layout to convert."""

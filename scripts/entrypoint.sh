@@ -275,6 +275,13 @@ if output:
     [[ "$NEED_ECC" == "true" && ! -f "$LEGO_ECC_CERT" ]] && LEGO_STATE_OK=false
     [[ "$NEED_RSA" == "true" && ! -f "$LEGO_RSA_CERT" ]] && LEGO_STATE_OK=false
 
+    # ── Migrate legacy ACME account storage (one-time, per server) ────────────
+    # Local-only (no ACME network call) and a no-op once storage is current, so
+    # this runs unconditionally on every start rather than waiting for the next
+    # scheduled renew to pick up a storage-layout change after an upgrade.
+    python3 /opt/cppm/acme_cli.py migrate 2>&1 | tee -a "$LOG" || \
+        err "Legacy storage migration check failed for ${DOMAIN} – check acme_renewal.log"
+
     # ── Remove legacy acme.sh per-cert state dirs (one-time, post-upgrade) ───────
     # Guard: only run when certs are already present (flat or Lego state) so this
     # never fires on a first-run container that hasn't issued any certs yet.

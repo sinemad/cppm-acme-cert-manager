@@ -120,6 +120,21 @@ class AcmeProvider(abc.ABC):
     ) -> None:
         """Revoke an issued certificate."""
 
+    @abc.abstractmethod
+    def migrate_legacy_storage(
+        self,
+        *,
+        cert_dir: str,
+        key_types: list[str],
+    ) -> None:
+        """Convert any legacy on-disk account storage to the current layout.
+
+        Local-only: never makes an ACME/network call, and is a no-op when
+        storage is already current. Safe to call unconditionally on every
+        container start so a storage-layout change takes effect immediately
+        on upgrade rather than waiting for the next scheduled renew/issue.
+        """
+
 
 def get_provider(provider_type: str = "lego") -> AcmeProvider:
     """Factory: return a provider instance by name (``"acme_sh"`` or ``"lego"``)."""

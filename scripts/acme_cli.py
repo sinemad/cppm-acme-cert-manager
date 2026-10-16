@@ -226,6 +226,18 @@ def cmd_revoke(_args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_migrate(_args: argparse.Namespace) -> None:
+    cert_dir = _require("SERVER_CERT_DIR")
+    key_types = _key_types()
+
+    provider = get_provider("lego")
+    try:
+        provider.migrate_legacy_storage(cert_dir=cert_dir, key_types=key_types)
+    except AcmeError as exc:
+        log.error("Migrate failed for %s: %s", cert_dir, exc)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ACME certificate CLI (Lego)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +257,11 @@ def main() -> None:
 
     p_revoke = sub.add_parser("revoke", help="Revoke issued certificates")
     p_revoke.set_defaults(func=cmd_revoke)
+
+    p_migrate = sub.add_parser(
+        "migrate", help="Convert legacy account storage to the current layout (local-only, no-op if current)"
+    )
+    p_migrate.set_defaults(func=cmd_migrate)
 
     args = parser.parse_args()
     args.func(args)
