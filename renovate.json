@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Lego is installed via a curl'd GitHub release tarball in the Dockerfile, not a base image -- Dependabot's docker ecosystems can't see it, so Renovate watches it directly against go-acme/lego's GitHub releases.",
+      "managerFilePatterns": ["/^Dockerfile$/"],
+      "matchStrings": ["ENV LEGO_VERSION=(?<currentValue>.*?)\\n"],
+      "depNameTemplate": "go-acme/lego",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["docker", "docker-compose"],
+      "enabled": false,
+      "description": "Dependabot already covers Dockerfile base image + docker-compose images (see .github/dependabot.yml) -- Renovate here is scoped to the Lego custom manager only, to avoid two bots opening competing PRs for the same bump."
+    }
+  ]
+}

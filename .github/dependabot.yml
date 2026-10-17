@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Dockerfile base image (currently alpine:3.21).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # docker-compose.yml / docker-compose.traefik.yml images (currently traefik:v3.7).
+  # Does NOT cover LEGO_VERSION -- that's installed via a curl'd GitHub release
+  # tarball inside the Dockerfile, which Dependabot's docker ecosystems can't see.
+  # See renovate.json's customManagers entry for that.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"

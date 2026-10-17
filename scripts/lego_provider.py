@@ -23,11 +23,13 @@ _LEGO_BIN = "/usr/local/bin/lego"
 # where a flag rename or removal would need to be updated. A mismatch logs a
 # startup warning (see lego_version_warning) but does not block issuance.
 #
-# TODO(DNS-PERSIST-01): once delegated DNS-01 (acme-dns) support lands, add a
-# CI gate that runs a real `lego run` against the Let's Encrypt staging CA
-# whenever LEGO_VERSION changes in the Dockerfile. Blocked today because the
-# current DNS-01 flow needs a real production DNS credential (e.g. a
-# Cloudflare zone-edit token), which isn't safe to put in CI secrets.
+# TODO(DNS-PERSIST-01): once a CA this tool supports ships stable production
+# support for the real DNS-PERSIST-01 ACME challenge (see dns_persist01.py),
+# add a CI gate that runs a real `lego run` against that CA's staging
+# environment whenever LEGO_VERSION changes in the Dockerfile. Blocked today
+# because the current DNS-01 flow needs a real production DNS credential
+# (e.g. a Cloudflare zone-edit token), which isn't safe to put in CI secrets
+# -- DNS-PERSIST-01 would remove that need entirely once usable.
 _TESTED_LEGO_VERSION = "5.5.2"
 
 _LEGO_VERSION_RE = re.compile(r"lego version (\S+)")
