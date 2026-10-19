@@ -1,6 +1,7 @@
 """ACME provider backed by the Lego client (https://github.com/go-acme/lego)."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -60,6 +61,126 @@ _ACME_SERVER_MAP: dict[str, str] = {
     "letsencrypt_test": "https://acme-staging-v02.api.letsencrypt.org/directory",
     "zerossl":          "https://acme.zerossl.com/v2/DV90",
 }
+
+try:
+    from cryptography import x509
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
+
+# Issuing intermediate CNs observed so far, per (acme_server, key_type),
+# persisted here and grown automatically -- no hand-maintained table. A CA
+# can legitimately round-robin between several intermediates, so a single
+# remembered value would misfire on benign variance; a set that only grows
+# avoids that without anyone curating it. Shared across all cert_dirs -- the
+# same CA/key-type combo is the same learned set regardless of which domain
+# renewed first. Override for tests or an alternate data volume layout.
+_CHAIN_BASELINE_FILE = os.environ.get("CHAIN_BASELINE_FILE", "/data/certs/chain_baseline.json")
+
+
+def _load_chain_baseline() -> dict[str, dict[str, list[str]]]:
+    try:
+        with open(_CHAIN_BASELINE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_chain_baseline(baseline: dict[str, dict[str, list[str]]]) -> None:
+    """Best-effort: a failure to persist just means this CN gets re-learned
+    (and re-logged) next time rather than remembered -- never raises, since
+    this is a side-channel safety net, not the issuance path."""
+    try:
+        os.makedirs(os.path.dirname(_CHAIN_BASELINE_FILE), exist_ok=True)
+        tmp_path = f"{_CHAIN_BASELINE_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(baseline, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, _CHAIN_BASELINE_FILE)
+    except OSError as exc:
+        log.warning("chain: could not persist baseline to %s (%s)", _CHAIN_BASELINE_FILE, exc)
+
+
+_PEM_CERT_RE = re.compile(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL)
+
+
+def _first_pem_block(data: bytes) -> bytes | None:
+    """Return the first PEM certificate block in data, or None if there isn't one."""
+    m = _PEM_CERT_RE.search(data)
+    return m.group(0) if m else None
+
+
+def _issuer_cn(issuer_crt_path: str) -> str | None:
+    """Return the subject CN of the first certificate in issuer_crt_path
+    (Lego's <cert.name>.issuer.crt -- the signing intermediate(s), not the
+    leaf), or None if it can't be read/parsed.
+
+    Logs at warning level on failure (distinct from chain_drift_warning's own
+    warning) so a broken parse path doesn't masquerade as "nothing to report"
+    -- this function existing at all only matters if it keeps working."""
+    if not HAS_CRYPTOGRAPHY:
+        return None
+    try:
+        pem = Path(issuer_crt_path).read_bytes()
+        block = _first_pem_block(pem)
+        if block is None:
+            log.warning("chain: no PEM certificate found in %s -- can't check issuer chain", issuer_crt_path)
+            return None
+        cert = x509.load_pem_x509_certificate(block)
+        attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+        if not attrs:
+            log.warning("chain: issuer cert in %s has no Common Name -- can't check issuer chain", issuer_crt_path)
+            return None
+        return attrs[0].value
+    except Exception as exc:
+        log.warning("chain: could not parse %s (%s) -- can't check issuer chain", issuer_crt_path, exc)
+        return None
+
+
+def chain_drift_warning(acme_server: str, kt: str, issuer_crt_path: str) -> str | None:
+    """Informational only: surface it when the intermediate that actually
+    signed this issuance/renewal is one we haven't seen before for this
+    CA/key-type -- a CA-side chain change (or Lego falling back off a
+    --preferred-chain miss) that's otherwise silent. Returns None if the
+    issuer file can't be parsed.
+
+    No hand-maintained table: _CHAIN_BASELINE_FILE holds, per (acme_server,
+    key_type), the set of CNs ever observed. The very first CN seen for a
+    combo is recorded and logged at info level -- useful for troubleshooting
+    even though there's nothing yet to compare it against. Every CN after
+    that which is already in the set is a silent no-op (expected CA
+    round-robin variance). A CN that is NOT in the set gets added and
+    returned as a warning -- it may be benign (a round-robin member we
+    hadn't seen yet) or a real rotation; either way it's worth an operator
+    knowing the chain changed, since nothing here can tell those apart."""
+    actual = _issuer_cn(issuer_crt_path)
+    if actual is None:
+        return None
+
+    baseline = _load_chain_baseline()
+    seen = baseline.get(acme_server, {}).get(kt, [])
+
+    if actual in seen:
+        return None
+
+    first_seen = not seen
+    baseline.setdefault(acme_server, {}).setdefault(kt, [])
+    if actual not in baseline[acme_server][kt]:
+        baseline[acme_server][kt].append(actual)
+    _save_chain_baseline(baseline)
+
+    if first_seen:
+        log.info(
+            "chain: first observed intermediate for %s %s: %r (%s)",
+            acme_server, kt.upper(), actual, _CHAIN_BASELINE_FILE,
+        )
+        return None
+
+    return (
+        f"{kt.upper()} cert from {acme_server} was signed by a new intermediate "
+        f"({actual!r}) not previously seen for this CA/key-type -- recorded "
+        f"alongside the others already known: {seen}. This may be benign CA "
+        f"round-robin or a real chain rotation; check {_CHAIN_BASELINE_FILE}."
+    )
 
 # servers.json stores provider names using acme.sh conventions; map to Lego names.
 _DNS_PLUGIN_MAP: dict[str, str] = {
@@ -463,6 +584,10 @@ class LegoProvider(AcmeProvider):
                     f"lego run ({kt.upper()}) failed (exit {rc}) – check {log_file}"
                 )
             log.info("lego run (%s) succeeded for %s", kt.upper(), domain)
+            issuer_crt = os.path.join(lego_path, "certificates", f"{cert_file_stem(domain)}.issuer.crt")
+            drift = chain_drift_warning(acme_server, kt, issuer_crt)
+            if drift:
+                log.warning("chain: %s", drift)
             results.append(KeyTypeResult(key_type=kt, issued=True))
 
         return IssueResult(results=results)
@@ -536,6 +661,11 @@ class LegoProvider(AcmeProvider):
                 "lego renew (%s) for %s: %s (mtime before=%.0f after=%.0f)",
                 kt.upper(), domain, "renewed" if renewed else "not due", before, after,
             )
+            if renewed:
+                issuer_crt = os.path.join(lego_path, "certificates", f"{cert_file_stem(domain)}.issuer.crt")
+                drift = chain_drift_warning(acme_server, kt, issuer_crt)
+                if drift:
+                    log.warning("chain: %s", drift)
             results.append(KeyTypeResult(key_type=kt, issued=renewed))
 
         if failures:
@@ -575,16 +705,12 @@ class LegoProvider(AcmeProvider):
             shutil.copy2(crt_file, os.path.join(cert_dir, f"{stem}.{kt}.fullchain.cer"))
 
             # Leaf cert only (first PEM block) → .cer
-            chain_text = Path(crt_file).read_text()
-            m = re.search(
-                r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-                chain_text,
-                re.DOTALL,
-            )
-            if not m:
+            chain_bytes = Path(crt_file).read_bytes()
+            block = _first_pem_block(chain_bytes)
+            if block is None:
                 raise AcmeError(f"Could not extract leaf certificate from {crt_file}")
-            Path(os.path.join(cert_dir, f"{stem}.{kt}.cer")).write_text(
-                m.group(0) + "\n"
+            Path(os.path.join(cert_dir, f"{stem}.{kt}.cer")).write_bytes(
+                block + b"\n"
             )
 
             # Private key → .key (chmod 600)
@@ -600,11 +726,11 @@ class LegoProvider(AcmeProvider):
                 shutil.copy2(issuer_file, dst_ca)
             else:
                 # Fallback: strip the leaf from the full chain to get the CA chain.
-                end_marker = "-----END CERTIFICATE-----"
-                idx = chain_text.index(end_marker) + len(end_marker)
-                ca_chain = chain_text[idx:].lstrip()
+                end_marker = b"-----END CERTIFICATE-----"
+                idx = chain_bytes.index(end_marker) + len(end_marker)
+                ca_chain = chain_bytes[idx:].lstrip()
                 if ca_chain:
-                    Path(dst_ca).write_text(ca_chain)
+                    Path(dst_ca).write_bytes(ca_chain)
                 else:
                     raise AcmeError(
                         f"issuer.crt missing and no CA chain found in {crt_file}"
