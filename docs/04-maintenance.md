@@ -309,8 +309,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
 docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
-lego --path /data/certs/cppm.example.com/lego-ecc list  # show ECC certs known to Lego
-lego --path /data/certs/cppm.example.com/lego-rsa list  # show RSA certs known to Lego
+lego certificates list --path /data/certs/cppm.example.com/lego-ecc  # show ECC certs known to Lego
+lego certificates list --path /data/certs/cppm.example.com/lego-rsa  # show RSA certs known to Lego
 cat /data/certs/status.log             # view status log
 cat /data/certs/servers.json           # view server configuration
 ```

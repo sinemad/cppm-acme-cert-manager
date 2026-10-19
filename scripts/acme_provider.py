@@ -10,6 +10,7 @@ class KeyTypeResult:
     """Outcome for a single key-type operation."""
     key_type: str   # "ecc" or "rsa"
     issued: bool    # True = new cert issued; False = skipped (not due / already exists)
+    chain_drift: str | None = None  # set when a new issuing-CA intermediate CN was observed
 
 
 @dataclasses.dataclass
@@ -20,6 +21,10 @@ class IssueResult:
     @property
     def newly_issued(self) -> bool:
         return any(r.issued for r in self.results)
+
+    @property
+    def chain_drift_detected(self) -> bool:
+        return any(r.chain_drift for r in self.results)
 
 
 class AcmeError(Exception):
@@ -83,10 +88,8 @@ class AcmeProvider(abc.ABC):
     ) -> IssueResult:
         """Renew an existing certificate. Returns the renewal outcome.
 
-        ``dns_provider`` and ``dns_env`` are required because some providers
-        (Lego) need DNS credentials on every renewal call, not just issuance.
-        Providers that store credentials in per-cert state (acme.sh) accept
-        these parameters for interface compatibility but do not use them.
+        ``dns_provider`` and ``dns_env`` are required because Lego needs DNS
+        credentials on every renewal call, not just issuance.
         """
 
     @abc.abstractmethod
@@ -137,10 +140,7 @@ class AcmeProvider(abc.ABC):
 
 
 def get_provider(provider_type: str = "lego") -> AcmeProvider:
-    """Factory: return a provider instance by name (``"acme_sh"`` or ``"lego"``)."""
-    if provider_type == "acme_sh":
-        from acme_sh_provider import AcmeShProvider  # noqa: PLC0415
-        return AcmeShProvider()
+    """Factory: return a provider instance by name (``"lego"``)."""
     if provider_type == "lego":
         from lego_provider import LegoProvider  # noqa: PLC0415
         return LegoProvider()

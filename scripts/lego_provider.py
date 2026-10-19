@@ -588,7 +588,7 @@ class LegoProvider(AcmeProvider):
             drift = chain_drift_warning(acme_server, kt, issuer_crt)
             if drift:
                 log.warning("chain: %s", drift)
-            results.append(KeyTypeResult(key_type=kt, issued=True))
+            results.append(KeyTypeResult(key_type=kt, issued=True, chain_drift=drift))
 
         return IssueResult(results=results)
 
@@ -661,12 +661,13 @@ class LegoProvider(AcmeProvider):
                 "lego renew (%s) for %s: %s (mtime before=%.0f after=%.0f)",
                 kt.upper(), domain, "renewed" if renewed else "not due", before, after,
             )
+            drift = None
             if renewed:
                 issuer_crt = os.path.join(lego_path, "certificates", f"{cert_file_stem(domain)}.issuer.crt")
                 drift = chain_drift_warning(acme_server, kt, issuer_crt)
                 if drift:
                     log.warning("chain: %s", drift)
-            results.append(KeyTypeResult(key_type=kt, issued=renewed))
+            results.append(KeyTypeResult(key_type=kt, issued=renewed, chain_drift=drift))
 
         if failures:
             raise AcmeError(f"lego renew failed for {domain}: {'; '.join(failures)}")

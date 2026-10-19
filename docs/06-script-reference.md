@@ -20,11 +20,8 @@ On startup:
    - Flat `.cer` files exist → log expiry, nothing else
    - Lego state exists but flat files missing → `install_cert.sh`
    - No cert found → `issue_cert.sh`
-4. Performs one-time cleanup of legacy acme.sh state directories
-   (`<domain>_ecc/` and `<domain>/`) if certs are already present (guard
-   condition ensures this never fires on a fresh container with no certs).
-5. Starts `status_server.py` in the background.
-6. `exec supercronic` (becomes PID 1 subprocess).
+4. Starts `status_server.py` in the background.
+5. `exec supercronic` (becomes PID 1 subprocess).
 
 ---
 
@@ -62,11 +59,19 @@ challenge, no ACME CA contact.
 **Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/renew.sh`
 
 Delegates to `acme_cli.py renew` (which calls `LegoProvider.renew_cert()`).
-Lego always exits 0 from `lego renew`; true renewal is detected by comparing
-the cert file mtime before and after the call. Exit codes propagated by
-`acme_cli.py`:
+Lego always exits 0 from `lego run --renew-days 30`; true renewal is detected
+by comparing the cert file mtime before and after the call. Exit codes
+propagated by `acme_cli.py`:
 
-- Exit 0 → cert renewed → calls `install_cert.sh`
+- Exit 0 → cert renewed, no chain drift → calls `install_cert.sh` then `upload_profile_targets`
+- Exit 3 → cert renewed AND a new signing-CA intermediate CN was observed
+  (see [How It Works → Chain Drift Detection](02-how-it-works.md#chain-drift-detection))
+  → same as exit 0, plus `run_trust_check_for_members` runs an immediate,
+  unconditional `clearpass_upload.py --only-trust-check` across every
+  ClearPass target on the certificate profile (CA args built from
+  `ISSUE_ECC`/`ISSUE_RSA`, not gated by the `UPLOAD_*` flags), so the new
+  intermediate lands in the trust list the same cycle instead of waiting for
+  the weekly `trust_check.sh` run
 - Exit 2 → not due (>30 days remaining) → logged and treated as clean exit
 - Other → error → status_write FAILED
 
@@ -257,7 +262,7 @@ Logs to `/data/certs/logs/status_server.log`.
 
 ## acme_provider.py
 
-**Used by:** `acme_cli.py`, `lego_provider.py`, `acme_sh_provider.py`. Not called directly.
+**Used by:** `acme_cli.py`, `lego_provider.py`. Not called directly.
 
 Abstract base class and shared result types that define the common interface
 for all ACME certificate providers.
@@ -286,29 +291,9 @@ for all ACME certificate providers.
 from acme_provider import get_provider
 
 provider = get_provider("lego")      # LegoProvider (default)
-provider = get_provider("acme_sh")   # AcmeShProvider (legacy)
 ```
 
 All path arguments must be absolute. `key_types` is a list containing any combination of `"ecc"` and `"rsa"`. `dns_env` is a dict of DNS provider credential env vars (e.g. `{"CF_Token": "..."}`) merged into the subprocess environment so credentials are never globally exported.
-
----
-
-## acme_sh_provider.py
-
-**Status:** Legacy — not the active code path. Kept for reference.
-
-Concrete `AcmeProvider` implementation backed by the `acme.sh` CLI. Accepts
-`dns_provider` and `dns_env` on `renew_cert()` for interface compatibility
-(acme.sh stores DNS credentials in per-cert `.conf` files so they are not
-needed at renewal time and are silently ignored).
-
-### Behaviour notes
-
-- **`register_account`** — any non-zero exit is tolerated (idempotent).
-- **`issue_cert`** — acme.sh exit 2 (cert exists, not due) maps to `issued=False`, not an error.
-- **`renew_cert`** — tries all requested key types before raising; an ECC failure does not prevent RSA from being attempted.
-- **`DEBUG` env var** — stripped from the subprocess environment before every call.
-- **Subprocess timeout** — defaults to 600 seconds.
 
 ---
 
@@ -330,7 +315,7 @@ Translates the `dns_provider` value from `servers.json` to the Lego plugin name:
 | `digitalocean`, `do` | `digitalocean` |
 | `godaddy`, `gd` | `godaddy` |
 | `infoblox` | `infoblox` |
-| `rfc2136` | `rfc2136` |
+| `rfc2136` | `dnsupdate` (Lego v5 renamed this plugin) |
 | anything else | passthrough as-is |
 
 ### Credential remapping
@@ -355,14 +340,26 @@ compatibility. `_map_dns_env()` translates them to Lego names at runtime:
 
 - **`issue_cert`** — for `force=True`, deletes the domain's cert files from
   `lego-{ecc,rsa}/certificates/` before `lego run` to ensure a fresh issue.
-- **`renew_cert`** — uses mtime comparison before/after `lego renew --days 30`
+- **`renew_cert`** — uses mtime comparison before/after `lego run --renew-days 30`
   to detect true renewal (Lego always exits 0 regardless of whether it renewed).
+  On a true renewal, also calls `chain_drift_warning()` (see below) and carries
+  its result in `KeyTypeResult.chain_drift`.
 - **`install_cert`** — copies `.crt` → `.fullchain.cer`, extracts first PEM → `.cer`,
   `.key` → `.key` (chmod 600), `.issuer.crt` → `.ca.cer` (fallback: strip leaf
   from fullchain).
 - **`DEBUG` env var** — popped from subprocess environment before each call.
 - **Subprocess timeout** — defaults to 600 seconds; `TimeoutExpired` is caught
   and re-raised as `AcmeError`.
+- **`chain_drift_warning(acme_server, key_type, issuer_crt)`** — called after
+  every successful issuance/renewal. Reads the signing intermediate's CN from
+  `.issuer.crt` via the `cryptography` lib and compares it against a growing,
+  per-`(acme_server, key_type)` set of previously observed CNs persisted to
+  `_CHAIN_BASELINE_FILE` (`/data/certs/chain_baseline.json`, override via
+  `CHAIN_BASELINE_FILE`). No hand-maintained allowlist anywhere — see
+  [How It Works → Chain Drift Detection](02-how-it-works.md#chain-drift-detection)
+  for the full design and rationale. Returns `None` on an already-known CN
+  (or the first CN ever seen for a combo — that case is logged at `INFO` and
+  recorded instead), or a warning string on a genuinely new CN.
 
 ### Logging
 
@@ -379,6 +376,8 @@ compatibility. `_map_dns_env()` translates them to Lego names at runtime:
 | `INFO` | `renew_cert: domain=… ca=… plugin=… types=…` | Start of each renewal check |
 | `INFO` | `lego renew (ECC/RSA) for <domain>: renewed/not due (mtime before=… after=…)` | Per-key-type renewal result |
 | `ERROR` | `lego renew (ECC/RSA) failed (exit N) for <domain>` | Per-key-type failure |
+| `INFO` | `chain: first observed intermediate for <acme_server> <ECC/RSA>: '<CN>' (<baseline file>)` | First CN ever seen for a CA/key-type combo |
+| `WARN` | `chain: <ECC/RSA> cert from <acme_server> was signed by a new intermediate ('<CN>') not previously seen …` | A genuinely new intermediate CN (see [Chain Drift Detection](02-how-it-works.md#chain-drift-detection)) |
 | `INFO` | `install_cert: domain=… types=…` | Start of cert install |
 | `INFO` | `install_cert: installed ECC/RSA cert files for <domain>` | Per-key-type install |
 | `DEBUG` | `lego <args>` | Every Lego subprocess invocation |
@@ -397,7 +396,9 @@ docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py install
 docker exec -it cppm-acme-cert-manager python3 /opt/cppm/acme_cli.py revoke
 ```
 
-Exit codes: `0` = action taken (issued/renewed/installed), `2` = not due
+Exit codes: `0` = action taken (issued/renewed/installed), `3` = renewed
+AND a new signing-CA intermediate CN was observed (renew only — see
+[Chain Drift Detection](02-how-it-works.md#chain-drift-detection)), `2` = not due
 (renew only — used by `renew.sh` to distinguish "not due" from "error"),
 `1` = error.
 

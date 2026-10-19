@@ -122,16 +122,77 @@ supercronic runs renew.sh at 02:00 and 14:00 UTC every day
             │
             └── acme_cli.py renew
                     │
-                    ├── lego renew --days 30 (ECC + RSA)
+                    ├── lego run --renew-days 30 (ECC + RSA)
                     │       │
                     │       ├── mtime unchanged  (>30 days remaining)
                     │       │     └── exit 2  → Log "not due". Done.
                     │       │
-                    │       └── mtime changed  (renewed)
-                    │             └── exit 0  → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+                    │       ├── mtime changed, no chain drift
+                    │       │     └── exit 0  → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+                    │       │
+                    │       └── mtime changed, chain drift detected (see below)
+                    │             └── exit 3  → same as exit 0, PLUS an immediate,
+                    │                           unconditional trust-list check across
+                    │                           every ClearPass target on the profile
                     │
-                    └── (non-zero exit)  Log error. supercronic retries at next window.
+                    └── (exit 1)  Log error. supercronic retries at next window.
 ```
+
+---
+
+## Chain Drift Detection
+
+After every successful issuance or renewal, `lego_provider.py` reads the
+signing intermediate's CN from Lego's `<domain>.issuer.crt` and compares it
+against a per-`(acme_server, key_type)` baseline — a growing set of every
+intermediate CN observed so far for that CA/key-type combination, persisted
+to `/data/certs/chain_baseline.json` (override with `CHAIN_BASELINE_FILE`).
+This is purely informational; it never blocks issuance.
+
+```
+chain_drift_warning(acme_server, key_type, issuer_crt)
+    │
+    ├── CN not yet in this combo's recorded set, set is empty (first renewal ever)
+    │     → record it, log at INFO ("first observed intermediate …"), no warning
+    │
+    ├── CN already in this combo's recorded set
+    │     → silent no-op (expected CA round-robin — e.g. Let's Encrypt
+    │       handing out E5/E6/E7/E8/E9 across different renewals)
+    │
+    └── CN not in the set, but the set already has entries
+          → add it to the set, log a WARNING naming the new CN and the
+            previously-known ones — this is the actual "drift" signal
+```
+
+There is no hand-maintained allowlist of "valid" CNs anywhere — a static
+table would need constant upkeep as CAs rotate their intermediate pool, and
+would misfire on any CA that round-robins between several simultaneously
+valid CNs. The growing set converges after a CA's round-robin pool has been
+discovered (typically the first few renewals of a given combo) and then
+stays quiet until a genuinely new intermediate shows up — e.g. a CA retiring
+an old intermediate generation (Let's Encrypt's R10–R14/E5–E9 transition is
+real precedent) or Lego's `--preferred-chain` silently falling back to a
+different default chain.
+
+This check reads the CN from a chain fetched over an authenticated ACME
+session with the CA itself, not adversarial input — a CA-level compromise
+is CT-log-monitoring territory, out of scope for a per-renewal CN
+comparison. The purpose here is **operational drift detection** (trust-store
+compatibility), not intrusion detection.
+
+**Closing the upload gap:** `deploy_hook.sh`'s normal per-renewal trust-list
+upload only includes a key type's CA chain when at least one of its upload
+targets (`UPLOAD_HTTPS_RSA` / `UPLOAD_RADIUS` / `UPLOAD_RADSEC` for RSA,
+`UPLOAD_HTTPS_ECC` for ECC) is enabled — so a server that issues a key type
+for a purpose none of those flags cover would otherwise have to wait for the
+weekly `trust_check.sh` run (Sunday 03:00) to pick up a new intermediate.
+When `chain_drift_warning()` fires on a renewal, `acme_cli.py renew` exits
+`3` instead of `0`, and `renew.sh` responds by calling every ClearPass
+target on the profile with `clearpass_upload.py --only-trust-check`,
+building the CA arguments unconditionally from `ISSUE_ECC`/`ISSUE_RSA` (same
+as `trust_check.sh`) rather than from the upload flags — so the new
+intermediate reaches the trust list the same renewal cycle instead of
+waiting up to a week.
 
 ---
 
@@ -146,34 +207,19 @@ acme_provider.py          ← Abstract base class: AcmeProvider
                                issue_cert / renew_cert / install_cert / revoke_cert / register_account
                                Shared types: IssueResult, KeyTypeResult, AcmeError
         │
-        ├── lego_provider.py      ← LegoProvider (default): wraps Lego CLI subprocess calls
-        │                              DNS plugin mapping (cloudflare, porkbun, route53, infoblox, rfc2136, …)
-        │                              Credential remapping (CF_Token → CF_DNS_API_TOKEN, etc.; Infoblox/RFC 2136 pass-through)
-        │                              mtime-based renewal detection
-        │
-        └── acme_sh_provider.py   ← AcmeShProvider (legacy): wraps acme.sh CLI
-                                       Kept for reference; not the active code path
+        └── lego_provider.py      ← LegoProvider (default): wraps Lego CLI subprocess calls
+                                       DNS plugin mapping (cloudflare, porkbun, route53, infoblox, rfc2136, …)
+                                       Credential remapping (CF_Token → CF_DNS_API_TOKEN, etc.; Infoblox/RFC 2136 pass-through)
+                                       mtime-based renewal detection
 ```
 
-Callers switch providers via the factory (default is `"lego"`):
+Callers get the provider via the factory (default and only supported type is `"lego"`):
 
 ```python
 from acme_provider import get_provider
 
 provider = get_provider("lego")      # current default
-# provider = get_provider("acme_sh") # legacy
 ```
-
-### Lego vs acme.sh comparison
-
-| Aspect | acme.sh (legacy) | Lego (current) |
-|---|---|---|
-| DNS plugin names | `dns_cf`, `dns_porkbun`, `dns_aws`, … | `cloudflare`, `porkbun`, `route53`, … |
-| Key-type flag | `--keylength ec-256` / `2048` | `--key-type ec256` / `rsa2048` |
-| Cert state path | `{cert_dir}/{domain}_ecc/` | `{cert_dir}/lego-{ecc,rsa}/certificates/` |
-| Install step | Separate `--install-cert` required | `acme_cli.py install` copies from Lego state |
-| Account registration | Explicit `--register-account` | Implicit on first `lego run` |
-| Renewal detection | exit code (0=renewed, 2=not due) | mtime comparison before/after `lego renew` |
 
 ---
 

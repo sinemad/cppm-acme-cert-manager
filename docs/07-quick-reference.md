@@ -161,7 +161,7 @@ docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 
 # List certs known to Lego (replace hostname/path as needed)
 docker exec -it cppm-acme-cert-manager \
-    lego --path /data/certs/cppm.example.com/lego-ecc list
+    lego certificates list --path /data/certs/cppm.example.com/lego-ecc
 
 # Shell into container
 docker exec -it cppm-acme-cert-manager bash
@@ -259,5 +259,5 @@ docker exec -it cppm-acme-cert-manager sh -c '
 
 # List Lego cert state (replace hostname as needed)
 docker exec -it cppm-acme-cert-manager \
-    lego --path /data/certs/cppm.example.com/lego-ecc list
+    lego certificates list --path /data/certs/cppm.example.com/lego-ecc
 ```

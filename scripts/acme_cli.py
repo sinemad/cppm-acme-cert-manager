@@ -175,6 +175,9 @@ def cmd_renew(_args: argparse.Namespace) -> None:
         )
         if result.newly_issued:
             log.info("Certificate(s) renewed for %s", domain)
+            if result.chain_drift_detected:
+                log.warning("Chain drift detected for %s – signaling for immediate trust-list check", domain)
+                sys.exit(3)
             sys.exit(0)
         else:
             log.info("Certificate not due for renewal for %s", domain)

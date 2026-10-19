@@ -206,9 +206,6 @@ if output:
             [[ -f "${CERT_DIR}/${DOMAIN}.${ext}" ]] \
                 && mv "${CERT_DIR}/${DOMAIN}.${ext}" "${SERVER_CERT_DIR}/" || true
         done
-        # Move acme.sh state dirs so the per-server cleanup below can remove them
-        [[ -d "${CERT_DIR}/${DOMAIN}" ]]     && mv "${CERT_DIR}/${DOMAIN}"     "${SERVER_CERT_DIR}/" || true
-        [[ -d "${CERT_DIR}/${DOMAIN}_ecc" ]] && mv "${CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/" || true
         # Seed per-server logs from global copies (status.log must be copied
         # before status_server_init creates a new empty one)
         [[ -f "${CERT_DIR}/status.log" ]] \
@@ -301,19 +298,6 @@ if output:
     python3 /opt/cppm/acme_cli.py migrate 2>&1 | tee -a "$SERVER_ACME_LOG" || \
         err "Legacy storage migration check failed for ${DOMAIN} – check ${SERVER_ACME_LOG}"
 
-    # ── Remove legacy acme.sh per-cert state dirs (one-time, post-upgrade) ───────
-    # Guard: only run when certs are already present (flat or Lego state) so this
-    # never fires on a first-run container that hasn't issued any certs yet.
-    if [[ "$FLAT_OK" == "true" || "$LEGO_STATE_OK" == "true" ]]; then
-        for legacy_dir in "${SERVER_CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/${DOMAIN}"; do
-            if [[ -d "$legacy_dir" ]]; then
-                rm -rf "$legacy_dir"
-                log "  Removed legacy acme.sh state: ${legacy_dir}"
-                status_write "INFO" "STARTUP" "Removed legacy acme.sh state dir: ${legacy_dir}"
-            fi
-        done
-    fi
-
     # Primary cert for expiry reporting (ECC preferred, else RSA)
     PRIMARY_FLAT="$FLAT_ECC"
     [[ "$NEED_ECC" != "true" ]] && PRIMARY_FLAT="$FLAT_RSA"
@@ -363,14 +347,6 @@ except Exception:
         CPPM_UPLOAD_TRIGGER=restart upload_profile_targets "${CERTIFICATE_ID}"
     fi
 done
-
-# ── Remove legacy acme.sh shared state directory (one-time, post-upgrade) ────
-ACME_LEGACY_SHARED="${CERT_DIR}/.acme-state"
-if [[ -d "$ACME_LEGACY_SHARED" ]]; then
-    rm -rf "$ACME_LEGACY_SHARED"
-    log "Removed legacy acme.sh shared state: ${ACME_LEGACY_SHARED}"
-    status_write "INFO" "STARTUP" "Removed legacy acme.sh shared state dir"
-fi
 
 # Restore global STATUS_LOG so post-loop container-level messages go to the
 # right place regardless of how many servers were processed.

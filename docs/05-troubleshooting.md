@@ -713,6 +713,48 @@ flags manually in the CPPM Admin UI.
 
 ---
 
+## `chain:` warning in `acme_renewal.log` — "new intermediate observed"
+
+**Symptom:** `acme_renewal.log` contains a line like:
+```
+[WARN ] chain: RSA cert from letsencrypt was signed by a new intermediate ('R12')
+        not previously seen for this CA/key-type -- recorded alongside the others
+        already known: ['E5', 'E6']. This may be benign CA round-robin or a real
+        chain rotation; check /data/certs/chain_baseline.json.
+```
+
+This is informational, not an error — issuance/renewal still succeeded. It
+means the CA handed out a signing intermediate whose Common Name hasn't been
+seen before for that ACME server/key-type combination. See
+[How It Works → Chain Drift Detection](02-how-it-works.md#chain-drift-detection)
+for the full mechanism; in short, a growing per-combo set of known CNs is
+kept in `/data/certs/chain_baseline.json`, and this warning fires only on a
+*new* CN once the set already has at least one entry — not on every renewal.
+
+Common, harmless causes:
+- The CA round-robins between several valid intermediates (expected —
+  subsequent renewals landing back on an already-known CN won't re-warn).
+- The CA retired an old intermediate generation and replaced it with a new
+  one (e.g. Let's Encrypt's R10–R14/E5–E9 transitions).
+- Lego's `--preferred-chain` silently fell back to a different default chain.
+
+No action is required — the new intermediate's CA cert is picked up
+automatically by the existing trust-list pre-flight. If the renewal that
+produced this warning actually issued a cert (`acme_cli.py renew` exited
+`3`, not `0`), `renew.sh` already forced an immediate, unconditional
+`clearpass_upload.py --only-trust-check` across every ClearPass target on
+the certificate profile in the same cycle — you don't need to wait for the
+weekly `trust_check.sh` run or run anything manually. If you want to verify
+the new intermediate actually landed in a target's trust list, check
+**Administration → Certificates → Trust List** on that ClearPass node, or
+re-run `trust_check.sh` manually (see [04-maintenance.md](04-maintenance.md)).
+
+A first-ever CN for a given combo (empty baseline) is logged at `INFO`, not
+`WARN`, and never produces this warning — that line exists purely so a
+future drift warning has something to name as "previously known."
+
+---
+
 ## HTTPS upload fails — `GET /api/cluster/server/this` returns error
 
 **Symptom:** `upload.log` shows an error fetching the server's own UUID.

@@ -143,7 +143,6 @@ cppm-acme-cert-manager/
 │   ├── acme_cli.py             # CLI bridge: issue / renew / install / revoke commands
 │   ├── acme_provider.py        # Abstract ACME provider interface + shared types
 │   ├── lego_provider.py        # Lego-backed AcmeProvider implementation
-│   ├── acme_sh_provider.py     # Legacy acme.sh AcmeProvider (kept for reference)
 │   ├── clearpass_upload.py     # Uploads certs to CPPM via pyclearpass SDK
 │   ├── trust_check.sh          # Weekly trust list verification (supercronic, Sunday 03:00)
 │   ├── status_server.py        # Web UI and REST API (port STATUS_PORT)
@@ -185,7 +184,7 @@ cppm-acme-cert-manager/
 │
 ├── cppm.example.com/                         ← Legacy per-server directory
 │   ├── status.log                            ← Activity log (web UI Activity tab, public)
-│   ├── <domain>.ecc.cer / .ecc.key / ...     ← ECC cert files (flat layout, identical to acme.sh output)
+│   ├── <domain>.ecc.cer / .ecc.key / ...     ← ECC cert files (flat layout)
 │   ├── <domain>.rsa.cer / .rsa.key / ...     ← RSA cert files
 │   ├── lego-ecc/                             ← Lego ECC internal state
 │   ├── lego-rsa/                             ← Lego RSA internal state
