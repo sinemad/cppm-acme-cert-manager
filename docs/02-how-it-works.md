@@ -349,7 +349,7 @@ image and is recreated on every `docker compose build`.
 | Path in image | Contents | Source |
 |---|---|---|
 | `/usr/local/bin/lego` | Lego binary (static) | GitHub release tarball (curl at build time) |
-| `/opt/cppm/acme-ca-certs/` | ACME CA PEM files (Let's Encrypt, ZeroSSL, Buypass) | CA websites (curl at build time) |
+| `/opt/cppm/acme-ca-certs/` | ACME CA PEM files (Let's Encrypt, ZeroSSL) | CA websites (curl at build time) |
 | `/opt/cppm/` | All management scripts | COPY from project directory |
 | Python packages | pyclearpass, requests, urllib3 | pip at build time |
 

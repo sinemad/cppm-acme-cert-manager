@@ -2,7 +2,7 @@
 """
 clearpass_upload.py – Uploads an ACME-issued certificate to Aruba ClearPass.
 
-Supports Let's Encrypt, ZeroSSL, Buypass, Infoblox/RFC 2136 DNS providers,
+Supports Let's Encrypt, ZeroSSL, Infoblox/RFC 2136 DNS providers,
 and any ACME-compatible CA (including private CAs such as Step-CA, EJBCA,
 HashiCorp Vault PKI, or AD CS with ACME).
 Uses the official pyclearpass SDK (github.com/aruba/pyclearpass) for all API
@@ -74,8 +74,6 @@ def _ca_label(acme_server: str) -> str:
         "letsencrypt":      "Let's Encrypt",
         "letsencrypt_test": "Let's Encrypt (Staging)",
         "zerossl":          "ZeroSSL",
-        "buypass":          "Buypass",
-        "buypass_test":     "Buypass (Staging)",
     }
     if acme_server in _KNOWN:
         return _KNOWN[acme_server]

@@ -16,7 +16,7 @@ around for renewals — but it isn't usable yet, for two independent reasons:
    draft is revised, so **re-check this link often** rather than trusting
    anything summarized here against a future revision — the record format
    has already changed materially once, see below).
-2. No CA this tool currently supports (Let's Encrypt, ZeroSSL, Buypass) has
+2. No CA this tool currently supports (Let's Encrypt, ZeroSSL) has
    confirmed *production* support. Let's Encrypt has it in **staging only**,
    and staging is currently stuck on an older draft revision than clients
    expect: staging implements **draft 00**, which has no `accounturi` field
@@ -173,7 +173,7 @@ eventual servers.json schema around once this becomes buildable.
 
 ## Revisit when
 
-A CA already selectable in this tool (`letsencrypt`, `zerossl`, `buypass`)
+A CA already selectable in this tool (`letsencrypt`, `zerossl`)
 publishes confirmed production support, or the draft is adopted as an RFC —
 whichever comes first. At that point, flip the relevant `_CA_CAPABLE` entry
 in `scripts/dns_persist01.py` and design the actual user-facing feature

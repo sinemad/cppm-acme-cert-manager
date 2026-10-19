@@ -13,7 +13,7 @@
 #   Any Lego DNS provider name can be used directly.
 #
 # ACME CA is selected via ACME_SERVER in servers.json. Supported values:
-#   letsencrypt  letsencrypt_test  zerossl  buypass  buypass_test
+#   letsencrypt  letsencrypt_test  zerossl
 #   Any ACME directory URL for a custom/private CA (e.g. Step-CA, EJBCA, Vault PKI)
 #
 # Lego stores cert state in per-key-type subdirectories:
@@ -62,8 +62,6 @@ case "$ACME_CA_LABEL" in
     letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
     letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
     zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
-    buypass)          ACME_CA_LABEL="Buypass" ;;
-    buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
     http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
 esac
 

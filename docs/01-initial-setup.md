@@ -209,7 +209,7 @@ All ClearPass server configuration — credentials, DNS provider, domain, and AC
 |---|---|
 | **Identity** | Friendly label (e.g. `Production ClearPass`) |
 | **ClearPass** | Host/IP, Client ID, Client Secret (from Step 3), Cert Passphrase, Callback Host, Callback Port, Verify SSL |
-| **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority (Let's Encrypt / ZeroSSL / Buypass / Custom) |
+| **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority (Let's Encrypt / ZeroSSL / Custom) |
 | **DNS Provider** | Provider selector + credentials (see below) |
 
 4. Click **Add Server** to save.
@@ -298,7 +298,7 @@ Create a Production API key at the
 
 #### Custom / Private ACME CA
 
-In addition to the standard public CAs (Let's Encrypt, ZeroSSL, Buypass), the
+In addition to the standard public CAs (Let's Encrypt, ZeroSSL), the
 **Certificate Authority** dropdown includes a **Custom / Private CA** option.
 Select it and enter any ACME directory URL (e.g. a Step-CA, EJBCA, or HashiCorp
 Vault PKI endpoint). The URL is stored directly as `ACME_SERVER` and passed to

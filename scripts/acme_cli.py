@@ -103,8 +103,6 @@ def _ca_label(acme_server: str) -> str:
         "letsencrypt":      "Let's Encrypt",
         "letsencrypt_test": "Let's Encrypt (Staging)",
         "zerossl":          "ZeroSSL",
-        "buypass":          "Buypass",
-        "buypass_test":     "Buypass (Staging)",
     }
     if acme_server in _KNOWN:
         return _KNOWN[acme_server]

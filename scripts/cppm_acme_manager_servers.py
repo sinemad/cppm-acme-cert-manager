@@ -61,7 +61,6 @@ _ACME_SERVERS = {
     "letsencrypt":      "Let's Encrypt",
     "letsencrypt_test": "Let's Encrypt (Staging)",
     "zerossl":          "ZeroSSL",
-    "buypass":          "Buypass",
 }
 
 # (env_key, display_label, is_secret, hint)

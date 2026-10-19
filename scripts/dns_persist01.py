@@ -52,8 +52,6 @@ _CA_CAPABLE: dict[str, bool] = {
     "letsencrypt":      False,  # production: not yet (phased rollout, status unconfirmed)
     "letsencrypt_test": False,  # staging: known accounturi bugs reported 2026-07
     "zerossl":          False,  # no public statement found
-    "buypass":          False,
-    "buypass_test":     False,
 }
 
 # The literal issuer-domain-name token each CA expects in the TXT record
@@ -64,8 +62,6 @@ _CA_ISSUER_DOMAIN: dict[str, str | None] = {
     "letsencrypt":      None,
     "letsencrypt_test": None,
     "zerossl":          None,
-    "buypass":          None,
-    "buypass_test":     None,
 }
 
 

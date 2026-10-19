@@ -153,7 +153,7 @@ cppm-acme-cert-manager/
 │   ├── cppm_acme_manager_users.py    # CLI: manage admin user accounts
 │   └── status.sh               # Shared status logging library
 ├── acme-ca-certs/
-│   └── *.pem                   # Bundled CA PEM files (LE, ZeroSSL, Buypass)
+│   └── *.pem                   # Bundled CA PEM files (LE, ZeroSSL)
 └── docs/
     ├── 01-initial-setup.md
     ├── 02-how-it-works.md
@@ -616,7 +616,7 @@ and configure their ACME and DNS provider settings. Each entry covers:
 
 - **Identity** — friendly label
 - **ClearPass** — host, API client credentials, cert passphrase, callback host/port, SSL verification toggle
-- **Domain & ACME** — domain, ACME contact email, certificate authority (Let's Encrypt / Staging / ZeroSSL / Buypass)
+- **Domain & ACME** — domain, ACME contact email, certificate authority (Let's Encrypt / Staging / ZeroSSL)
 - **DNS Provider** — provider selection with dynamic credential fields (Cloudflare, Porkbun, Route 53, DigitalOcean, GoDaddy)
 
 Each ClearPass host must be unique. Configurations are stored in

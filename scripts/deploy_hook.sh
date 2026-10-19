@@ -48,8 +48,6 @@ case "$ACME_CA_LABEL" in
     letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
     letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
     zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
-    buypass)          ACME_CA_LABEL="Buypass" ;;
-    buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
     http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
 esac
 

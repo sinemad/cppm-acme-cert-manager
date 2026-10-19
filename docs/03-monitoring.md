@@ -267,7 +267,7 @@ Click **+ Add Server** and fill in all fields.
 |---|---|
 | **Identity** | Friendly label |
 | **ClearPass** | Host/IP, Client ID, Client Secret, Cert Passphrase, Callback Host/Port, Verify SSL |
-| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Buypass / Custom) |
+| **ACME Provider** | Domain, ACME email address, Certificate Authority (Let's Encrypt / Staging / ZeroSSL / Custom) |
 | **DNS Provider** | Provider selector; credential fields update dynamically for the selected provider |
 
 Selecting **Custom / Private CA** reveals a URL input field and a warning
