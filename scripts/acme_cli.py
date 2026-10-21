@@ -17,6 +17,8 @@ Environment variables (exported by entrypoint.sh via get_server_shell_env):
 Exit codes:
     0  Action taken (cert issued, renewed, installed, or revoked)
     2  No action needed (cert not due for renewal)
+    3  Renewed, and chain drift detected (renew only; treat like 0 plus an
+       immediate trust-list check)
     1  Error
 """
 from __future__ import annotations

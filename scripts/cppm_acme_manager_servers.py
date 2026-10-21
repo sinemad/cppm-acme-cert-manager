@@ -219,6 +219,28 @@ def _collect_server(existing: dict = None) -> dict:
     return s
 
 
+def _print_split_horizon_warning(entry: dict) -> None:
+    """Best-effort split-horizon DNS check, run right after a server is saved.
+
+    Catches a split-horizon misconfiguration before the first issuance
+    attempt instead of only surfacing it later via the dashboard or renewal
+    log. Read-only (SOA lookups via dig); any failure here is swallowed.
+    """
+    if not entry.get("domain"):
+        return
+    try:
+        from dns_utils import split_horizon_check
+        problem = split_horizon_check(
+            entry.get("domain", ""),
+            bool(entry.get("split_horizon_dns")),
+            acme_dns_resolvers(entry),
+        )
+    except Exception:
+        return
+    if problem:
+        print(f"\n  Warning: {problem['message']}")
+
+
 # ── Subcommands ───────────────────────────────────────────────────────────────
 
 def cmd_ids() -> int:
@@ -312,6 +334,7 @@ def cmd_add() -> int:
         server_id = add_server(entry)
         print(f"\nServer '{entry.get('label')}' added successfully.")
         print(f"  ID: {server_id}")
+        _print_split_horizon_warning(entry)
         return 0
     except ValueError as exc:
         print(f"\nError: {exc}")
@@ -334,6 +357,7 @@ def cmd_edit(server_id: str) -> int:
     try:
         update_server(server_id, entry)
         print(f"\nServer '{entry.get('label')}' updated.")
+        _print_split_horizon_warning(entry)
         return 0
     except ValueError as exc:
         print(f"\nError: {exc}")

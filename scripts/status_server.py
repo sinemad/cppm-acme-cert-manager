@@ -1071,6 +1071,28 @@ def _check_dns(server: dict = None) -> dict:
     return result
 
 
+def _split_horizon_preflight(entry: dict) -> str | None:
+    """Best-effort split-horizon DNS check run right after a server is saved.
+
+    Catches a split-horizon misconfiguration before the first issuance
+    attempt instead of only surfacing it later in the dashboard DNS tile or
+    the renewal log. Read-only (SOA lookups via dig); any failure here is
+    swallowed so it never blocks saving the server.
+    """
+    if not entry.get("domain"):
+        return None
+    try:
+        from dns_utils import split_horizon_check
+        problem = split_horizon_check(
+            entry.get("domain", ""),
+            bool(entry.get("split_horizon_dns")),
+            acme_dns_resolvers(entry),
+        )
+    except Exception:
+        return None
+    return problem["message"] if problem else None
+
+
 def _check_dns_provider(server: dict = None) -> dict:
     """Check the ACME / DNS setup, then DNS provider API connectivity.
 
@@ -5355,7 +5377,11 @@ class Handler(BaseHTTPRequestHandler):
             server_id = add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
             _spawn_cert_pipeline(server_id, force=True)
-            self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
+            warning = _split_horizon_preflight(entry)
+            msg = "Server+added.+Certificate+pipeline+started."
+            if warning:
+                msg = f"{msg}+Warning:+{_url_enc(warning)}"
+            self._redirect(f"/settings?ft=ok&fm={msg}")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
             self._serve_html(
@@ -5373,7 +5399,11 @@ class Handler(BaseHTTPRequestHandler):
             if not found:
                 return self._redirect("/settings?ft=err&fm=Server+not+found")
             _log.info("settings: '%s' updated server '%s'", username, entry.get("label"))
-            self._redirect("/settings?ft=ok&fm=Server+updated")
+            warning = _split_horizon_preflight(entry)
+            msg = "Server+updated"
+            if warning:
+                msg = f"{msg}.+Warning:+{_url_enc(warning)}"
+            self._redirect(f"/settings?ft=ok&fm={msg}")
         except Exception as e:
             _log.error("settings: edit '%s' failed: %s\n%s",
                        server_id, e, traceback.format_exc())
