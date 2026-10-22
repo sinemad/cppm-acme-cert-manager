@@ -143,7 +143,7 @@ docker compose up -d
 docker compose up -d --force-recreate
 
 # Re-upload cert to CPPM (certs unchanged)
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 
 # Install flat files from Lego state (no re-issue)
 docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh

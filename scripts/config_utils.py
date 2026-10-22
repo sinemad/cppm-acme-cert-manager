@@ -24,6 +24,11 @@ SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 # ClearPass fields are always required: they are what the tool monitors and uploads to.
 _REQUIRED = {"label", "cppm_host", "cppm_client_id", "cppm_client_secret"}
 
+# Required fields per target_type. "clearpass" is the only implemented type
+# today; this map is the seam future target types (New Central, Mist, a
+# generic Linux target, ...) hang their own required fields off of.
+_REQUIRED_BY_TYPE = {"clearpass": _REQUIRED}
+
 # ACME / DNS fields are optional as a group. All blank = ClearPass-only
 # monitoring (warning, not an error). Partly filled or invalid = error, because
 # the certificate pipeline would fail.
@@ -76,8 +81,24 @@ def get_server(server_id: str) -> Optional[dict]:
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
+def _resolve_target_fields(entry: dict) -> dict:
+    """Return entry with target_config flattened over its top-level fields.
+
+    A target's type-specific config (today: ClearPass's cppm_*/cert_types
+    fields) can live either as flat legacy fields, the way every existing
+    servers.json entry stores them, or nested under a "target_config" dict,
+    the way new entries will. This lets every reader work from one flat view
+    without a migration step, and without the shape of one target_type
+    leaking into another's.
+    """
+    resolved = dict(entry)
+    resolved.update(entry.get("target_config") or {})
+    return resolved
+
+
 def certificate_targets(entry: dict) -> list[str]:
     """Return normalized ClearPass targets, including legacy config values."""
+    entry = _resolve_target_fields(entry)
     targets = set(entry.get("cert_types") or [])
     if "ecc" in targets:
         targets.add("https_ecc")
@@ -152,25 +173,28 @@ def le_dns_problems(entry: dict) -> list[str]:
 
 def validate_server(entry: dict) -> None:
     """Raises ValueError on missing or invalid fields."""
-    for field in _REQUIRED:
-        if not str(entry.get(field, "")).strip():
+    resolved = _resolve_target_fields(entry)
+    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
+    required = _REQUIRED_BY_TYPE.get(target_type, _REQUIRED)
+    for field in required:
+        if not str(resolved.get(field, "")).strip():
             label = _FIELD_LABELS.get(field, field)
             raise ValueError(f"{label} is required.")
-    if le_dns_configured(entry):
-        problems = le_dns_problems(entry)
+    if le_dns_configured(resolved):
+        problems = le_dns_problems(resolved)
         if problems:
             raise ValueError(" ".join(problems))
     try:
-        port = int(entry.get("cppm_callback_port", 8765))
+        port = int(resolved.get("cppm_callback_port", 8765))
         if not 1 <= port <= 65535:
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError("Callback port must be a number between 1 and 65535.")
     try:
-        acme_dns_resolvers(entry)
+        acme_dns_resolvers(resolved)
     except ValueError as exc:
         raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
-    cert_types = certificate_targets(entry)
+    cert_types = certificate_targets(resolved)
     valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
     if not any(t in cert_types for t in valid_types):
         raise ValueError("At least one ClearPass certificate target must be selected.")
@@ -184,6 +208,7 @@ def _check_duplicate_host(host: str, exclude_id: str = None) -> None:
     for s in load_servers():
         if s.get("id") == exclude_id:
             continue
+        s = _resolve_target_fields(s)
         if s.get("cppm_host", "").strip().lower() == host:
             label = s.get("label") or s.get("cppm_host", "")
             raise ValueError(
@@ -221,7 +246,7 @@ def add_server(entry: dict) -> str:
     """Validate, check for duplicate host, and append. Returns the assigned server ID."""
     entry = _inherit_certificate_profile(dict(entry))
     validate_server(entry)
-    _check_duplicate_host(entry.get("cppm_host", ""))
+    _check_duplicate_host(_resolve_target_fields(entry).get("cppm_host", ""))
     entry = dict(entry)
     entry["id"] = str(uuid.uuid4())
     servers = load_servers()
@@ -234,7 +259,7 @@ def update_server(server_id: str, entry: dict) -> bool:
     """Replace the existing entry with the given ID. Returns True if found."""
     entry = _inherit_certificate_profile(dict(entry), exclude_id=server_id)
     validate_server(entry)
-    _check_duplicate_host(entry.get("cppm_host", ""), exclude_id=server_id)
+    _check_duplicate_host(_resolve_target_fields(entry).get("cppm_host", ""), exclude_id=server_id)
     servers = load_servers()
     for i, s in enumerate(servers):
         if s.get("id") == server_id:
@@ -333,7 +358,7 @@ def server_cert_dir(server: dict) -> Path:
         safe = re.sub(r"[^\w.\-]", "_", certificate_id).strip("._-") or "certificate"
         return SERVERS_FILE.parent / "certificates" / safe
 
-    host = str(server.get("cppm_host", "")).strip()
+    host = str(_resolve_target_fields(server).get("cppm_host", "")).strip()
     safe = re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
     return SERVERS_FILE.parent / safe
 
@@ -343,7 +368,7 @@ def certificate_id(server: dict) -> str:
     configured = str(server.get("certificate_id", "")).strip()
     if configured:
         return configured
-    host = str(server.get("cppm_host", "")).strip()
+    host = str(_resolve_target_fields(server).get("cppm_host", "")).strip()
     return re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
 
 
@@ -390,9 +415,11 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
     if not s:
         return None
 
+    s = _resolve_target_fields(s)
     creds = s.get("dns_credentials") or {}
     env: dict[str, str] = {
         "CERTIFICATE_ID":       certificate_id(s),
+        "TARGET_TYPE":          str(s.get("target_type", "clearpass") or "clearpass"),
         "DOMAIN":               str(s.get("domain",               "")),
         "SAN_DNS":              "|".join(san_dns_names(s)),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),

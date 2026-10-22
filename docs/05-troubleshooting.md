@@ -806,7 +806,7 @@ ip route get <cppm-ip>
 After updating the override file, restart the container:
 ```bash
 docker compose down && docker compose up -d
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 ```
 
 ---
@@ -847,7 +847,7 @@ If mismatched, set `FORCE_RENEW: "true"` in `docker-compose.override.yml` and re
 
 ```bash
 # Force a re-run of the trust list pre-flight
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 tail -f /opt/cppm-certs/<cppm_host>/status.log
 ```
 

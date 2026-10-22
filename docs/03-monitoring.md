@@ -239,7 +239,7 @@ the wrong row while working through a list of servers.
 
 **Force Cert Issue** shows a confirmation dialog warning that the action counts against your ACME CA rate limit (Let's Encrypt allows 5 duplicate certificates per domain per week). Use it only when you need to rotate a cert immediately. After clicking, you are redirected to the server detail page where the Activity Log updates as the pipeline progresses.
 
-**Force ClearPass Upload** runs only the upload pipeline (`deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
+**Force ClearPass Upload** runs only the upload pipeline (`clearpass_deploy_hook.sh` → `clearpass_upload.py`) against certs already on disk. It does not contact the ACME CA or consume any rate limit quota. Use it to push an already-issued cert into ClearPass after a CPPM restore, a failed previous upload, or a passphrase change. After clicking, you are redirected to the server detail page.
 
 > Only one upload pipeline can run at a time. If a second upload is triggered while one is already in progress (e.g. a scheduled renewal happened to be uploading), the second request is queued and a WARN entry appears in the Activity Log.
 
@@ -440,7 +440,7 @@ startup and shutdown events only (not per-server cert or upload activity).
 | `CERT` | Per-server `status.log` | `entrypoint.sh`, `issue_cert.sh`, `install_cert.sh` | Issuance, install-cert, expiry status |
 | `RENEW` | Per-server `status.log` | `renew.sh` | Daily renewal check results |
 | `TRUST` | Per-server `status.log` | `clearpass_upload.py`, `trust_check.sh` | CA trust list pre-flight and weekly check |
-| `UPLOAD` | Per-server `status.log` | `deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
+| `UPLOAD` | Per-server `status.log` | `clearpass_deploy_hook.sh`, `clearpass_upload.py` | ClearPass API upload results |
 | `CPPM` | Per-server `status.log` | `status_server.py` | ClearPass API connectivity state changes |
 | `DNS` | Per-server `status.log` | `status_server.py` | DNS provider credential state changes |
 | `CALLBACK` | Per-server `status.log` | `status_server.py` | Callback HTTP service reachability changes |

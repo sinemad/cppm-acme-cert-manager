@@ -78,6 +78,6 @@ python3 /opt/cppm/notify.py \
     2>/dev/null || true
 
 log "Triggering ClearPass upload..."
-/opt/cppm/deploy_hook.sh
+/opt/cppm/clearpass_deploy_hook.sh
 
 log "=== Install complete ==="

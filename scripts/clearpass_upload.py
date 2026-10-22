@@ -1220,7 +1220,7 @@ def _install_cluster_host_header(fqdn: str) -> None:
 
 
 def _write_node_results(results: list[dict]) -> None:
-    """Write per-node outcomes to CPPM_NODE_RESULTS_FILE for deploy_hook.sh.
+    """Write per-node outcomes to CPPM_NODE_RESULTS_FILE for clearpass_deploy_hook.sh.
 
     The hook uses this to build the status line and notification, so the
     operator sees which nodes received the cert and which did not.

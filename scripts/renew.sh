@@ -55,7 +55,7 @@ if output:
     print(output)
 " 2>/dev/null) || true
         [[ -z "$member_env" ]] && continue
-        ( eval "$member_env"; /opt/cppm/deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
+        ( eval "$member_env"; /opt/cppm/clearpass_deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
             err "Upload failed for target ${member_id} – check target upload log"
     done
 }
@@ -64,7 +64,7 @@ if output:
 # sharing this certificate profile, regardless of each target's configured
 # upload flags (UPLOAD_HTTPS_RSA/UPLOAD_RADIUS/UPLOAD_RADSEC) -- those flags
 # only control which *services* get the new cert, and can leave an issued
-# key type's CA chain out of deploy_hook.sh's normal upload entirely. Without
+# key type's CA chain out of clearpass_deploy_hook.sh's normal upload entirely. Without
 # this, a chain-drift warning on such a target would wait for the next
 # Sunday trust_check.sh run instead of being caught right away.
 run_trust_check_for_members() {

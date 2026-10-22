@@ -164,7 +164,7 @@ if output:
 " 2>/dev/null) || true
         [[ -z "$member_env" ]] && continue
         log "  Uploading shared certificate profile ${profile_id} to target ${member_id}..."
-        ( eval "$member_env"; export CPPM_UPLOAD_TRIGGER="${CPPM_UPLOAD_TRIGGER:-}"; /opt/cppm/deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
+        ( eval "$member_env"; export CPPM_UPLOAD_TRIGGER="${CPPM_UPLOAD_TRIGGER:-}"; /opt/cppm/clearpass_deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
             err "Upload failed for target ${member_id} – check target upload log"
     done
 }

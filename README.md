@@ -139,7 +139,7 @@ cppm-acme-cert-manager/
 │   ├── issue_cert.sh           # Issues ECC + RSA certs via DNS-01
 │   ├── install_cert.sh         # Copies flat files from Lego state to /data/certs/
 │   ├── renew.sh                # Called by supercronic — runs lego renew
-│   ├── deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
+│   ├── clearpass_deploy_hook.sh          # Called after issuance/renewal — triggers CPPM upload
 │   ├── acme_cli.py             # CLI bridge: issue / renew / install / revoke commands
 │   ├── acme_provider.py        # Abstract ACME provider interface + shared types
 │   ├── lego_provider.py        # Lego-backed AcmeProvider implementation
@@ -461,7 +461,7 @@ entrypoint.sh
                             └── acme_cli.py install
                                     ├── lego-ecc/certificates/<domain>.crt → <domain>.ecc.*
                                     ├── lego-rsa/certificates/<domain>.crt → <domain>.rsa.*
-                                    └── deploy_hook.sh
+                                    └── clearpass_deploy_hook.sh
                                             └── clearpass_upload.py  (pyclearpass SDK)
                                                     ├── Step 0: Trust List Pre-flight
                                                     │     Compute SHA-256 fingerprints from cert_file
@@ -494,7 +494,7 @@ supercronic (02:00 / 14:00 UTC)
             └── acme_cli.py renew
                     ├── lego renew --days 30 (ECC) — mtime detection for true renewal
                     ├── lego renew --days 30 (RSA)
-                    └── on renewal → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+                    └── on renewal → install_cert.sh → clearpass_deploy_hook.sh → clearpass_upload.py
 ```
 
 ### Authentication
@@ -943,7 +943,7 @@ on the server row. No new cert is issued and the ACME CA is not contacted.
 **CLI alternative:**
 
 ```bash
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 ```
 
 > **Troubleshooting a single run?** Check the **Debug** checkbox next to
@@ -1092,7 +1092,7 @@ A Let's Encrypt CA cert is missing from the CPPM trust list with EAP enabled.
 Force a re-run of the trust list pre-flight:
 
 ```bash
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 tail -f /opt/cppm-certs/status.log
 ```
 

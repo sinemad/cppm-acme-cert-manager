@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# deploy_hook.sh – Called after successful issuance/renewal
+# clearpass_deploy_hook.sh – Called after successful issuance/renewal
 #                  Uploads selected ECC/RSA certs to ClearPass service slots
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -26,7 +26,7 @@ source /opt/cppm/status.sh
 DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
 
 # Serialize all upload invocations — the callback HTTP server binds a fixed
-# port, so two concurrent deploy_hook.sh runs (e.g. cert pipeline + manual
+# port, so two concurrent clearpass_deploy_hook.sh runs (e.g. cert pipeline + manual
 # upload trigger) would both fail with "Address in use".
 UPLOAD_LOCK="/tmp/cppm_upload_${CPPM_CALLBACK_PORT:-8765}.lock"
 exec 9>"$UPLOAD_LOCK"

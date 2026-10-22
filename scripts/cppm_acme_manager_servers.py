@@ -159,6 +159,7 @@ def _collect_server(existing: dict = None) -> dict:
     """Walk through all server fields interactively. Pass existing for edit mode."""
     s = dict(existing) if existing else {}
     creds = dict(s.get("dns_credentials") or {})
+    s["target_type"] = "clearpass"
 
     print("\n── Server Identity ──────────────────────────────────────────────────────")
     s["label"] = _prompt("Label", s.get("label", ""), required=True,

@@ -17,13 +17,27 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   releases.
 - Split horizon DNS support, including an advanced UI option, a detection
   script that warns on split-horizon misconfiguration, and documentation.
+- Split-horizon DNS pre-flight check: a server's domain is now also checked
+  for a split-horizon mismatch right when it's added or edited (web UI and
+  CLI), instead of only surfacing the warning later in the dashboard or
+  renewal log.
 - Cloudflare account- vs. profile-scoped API token support (auto-detected
   and cached at startup).
+- Groundwork for non-ClearPass targets (HPE New Central NAC, Mist Access
+  Assurance, generic Linux certificate consumers, etc.): a `target_type`
+  field and per-type required-field validation, with `"clearpass"` as the
+  only implemented type today. Existing `servers.json` entries are
+  unaffected — ClearPass config can keep living as flat top-level fields,
+  or (for future target types) move into a nested `target_config` block,
+  without a migration step.
 
 ### Changed
 - Migrated the ACME backend from Lego v4 to Lego v5.x, including a CLI
   flag/command rewrite, an arg builder with version-drift warnings, and
   automatic one-time account-storage migration on first v5 run.
+- `deploy_hook.sh` renamed to `clearpass_deploy_hook.sh` and the cert
+  pipeline's upload step now dispatches by `target_type`, so future target
+  types register their own deploy script instead of patching this one.
 
 ### Removed
 - Legacy `acme.sh` provider and all related dead code/docs (superseded by

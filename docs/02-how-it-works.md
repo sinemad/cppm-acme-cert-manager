@@ -54,7 +54,7 @@ entrypoint.sh
                                     ├── lego-ecc/.../<domain>.crt   → <domain>.ecc.*
                                     ├── lego-rsa/.../<domain>.crt   → <domain>.rsa.*
                                     │
-                                    └── deploy_hook.sh
+                                    └── clearpass_deploy_hook.sh
                                             │
                                             └── clearpass_upload.py  (pyclearpass SDK)
                                                     │
@@ -128,7 +128,7 @@ supercronic runs renew.sh at 02:00 and 14:00 UTC every day
                     │       │     └── exit 2  → Log "not due". Done.
                     │       │
                     │       ├── mtime changed, no chain drift
-                    │       │     └── exit 0  → install_cert.sh → deploy_hook.sh → clearpass_upload.py
+                    │       │     └── exit 0  → install_cert.sh → clearpass_deploy_hook.sh → clearpass_upload.py
                     │       │
                     │       └── mtime changed, chain drift detected (see below)
                     │             └── exit 3  → same as exit 0, PLUS an immediate,
@@ -180,7 +180,7 @@ is CT-log-monitoring territory, out of scope for a per-renewal CN
 comparison. The purpose here is **operational drift detection** (trust-store
 compatibility), not intrusion detection.
 
-**Closing the upload gap:** `deploy_hook.sh`'s normal per-renewal trust-list
+**Closing the upload gap:** `clearpass_deploy_hook.sh`'s normal per-renewal trust-list
 upload only includes a key type's CA chain when at least one of its upload
 targets (`UPLOAD_HTTPS_RSA` / `UPLOAD_RADIUS` / `UPLOAD_RADSEC` for RSA,
 `UPLOAD_HTTPS_ECC` for ECC) is enabled — so a server that issues a key type

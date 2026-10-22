@@ -1510,6 +1510,9 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
                     member_env = get_server_env_dict(str(member.get("id", "")))
                     if not member_env:
                         continue
+                    deploy_script = _deploy_script_for(member_env)
+                    if deploy_script is None:
+                        continue
                     Path(member_env["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
                     upload_env = {**os.environ, **member_env}
                     if debug:
@@ -1519,7 +1522,7 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
                         env_dict["CERTIFICATE_ID"], member.get("cppm_host", member.get("id")),
                     )
                     upload_rc = subprocess.run(
-                        [str(_DEPLOY_SCRIPT)], env=upload_env, check=False
+                        [str(deploy_script)], env=upload_env, check=False
                     ).returncode
                     if upload_rc != 0:
                         _log.error("cert pipeline: upload failed for target %s (rc=%d)", member.get("id"), upload_rc)
@@ -1529,7 +1532,21 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
     threading.Thread(target=_run, daemon=True).start()
 
 
-_DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
+# Deploy script per target_type. "clearpass" is the only implemented type
+# today; this is the plug-in point future target types (New Central, Mist,
+# a generic Linux target, ...) register their own deploy script against.
+_DEPLOY_SCRIPTS = {
+    "clearpass": Path("/opt/cppm/clearpass_deploy_hook.sh"),
+}
+
+
+def _deploy_script_for(env_dict: dict) -> Path | None:
+    """Return the deploy script for env_dict's TARGET_TYPE, or None if unsupported."""
+    target_type = env_dict.get("TARGET_TYPE", "clearpass")
+    script = _DEPLOY_SCRIPTS.get(target_type)
+    if script is None:
+        _log.error("deploy: no deploy script registered for target_type '%s'", target_type)
+    return script
 
 def _status_write(status_log: str, level: str, category: str, message: str) -> None:
     """Write a single status entry directly to a server's status.log."""
@@ -1543,18 +1560,21 @@ def _status_write(status_log: str, level: str, category: str, message: str) -> N
 
 
 def _spawn_upload_pipeline(server_id: str, debug: bool = False) -> None:
-    """Run deploy_hook.sh for server_id in a background daemon thread.
+    """Run the target's deploy script for server_id in a background daemon thread.
 
     `debug` enables verbose (DEBUG) logging for this single run only — it is
     never persisted, so it has no effect on scheduled/automatic uploads.
     """
     def _run():
-        if not _DEPLOY_SCRIPT.exists():
-            _log.warning("upload pipeline: %s not found (not in container?)", _DEPLOY_SCRIPT)
-            return
         env_dict = get_server_env_dict(server_id)
         if env_dict is None:
             _log.error("upload pipeline: server %s not found", server_id)
+            return
+        deploy_script = _deploy_script_for(env_dict)
+        if deploy_script is None:
+            return
+        if not deploy_script.exists():
+            _log.warning("upload pipeline: %s not found (not in container?)", deploy_script)
             return
         Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
         status_log = env_dict.get("STATUS_LOG", "")
@@ -1571,7 +1591,7 @@ def _spawn_upload_pipeline(server_id: str, debug: bool = False) -> None:
             if debug:
                 env["LOG_LEVEL"] = "DEBUG"
             _log.info("upload pipeline: starting for %s (debug=%s)", server_id, debug)
-            rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
+            rc = subprocess.run([str(deploy_script)], env=env, check=False).returncode
             _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
         except Exception as exc:
             _log.error("upload pipeline: error for %s: %s", server_id, exc)
@@ -1609,6 +1629,7 @@ def _parse_server_form(f: dict) -> dict:
     san_dns = [f.get(f"san_dns_{i}", "").strip().lower() for i in range(1, 11)]
     return {
         "label":                f.get("label", "").strip(),
+        "target_type":          "clearpass",
         "certificate_id":       f.get("certificate_id", "").strip(),
         "cppm_host":            f.get("cppm_host", "").strip(),
         "cppm_cluster_mode":   f.get("cppm_cluster_mode", "") == "true",
@@ -1636,6 +1657,7 @@ def _default_server_from_env() -> dict:
     return {
         "id":                   None,
         "label":                "",
+        "target_type":          "clearpass",
         "certificate_id":       "",
         "cppm_host":            "",
         "cppm_cluster_mode":   False,

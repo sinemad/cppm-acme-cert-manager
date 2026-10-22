@@ -48,7 +48,7 @@ To force re-issue of an already valid cert set `FORCE_RENEW=true` (or use the
 Delegates to `acme_cli.py install` (which calls `LegoProvider.install_cert()`).
 Copies the four flat cert files from Lego's internal state directories
 (`lego-ecc/` and `lego-rsa/`) to the server cert directory. Verifies all eight
-files (four per key type) are present, then calls `deploy_hook.sh`. No DNS
+files (four per key type) are present, then calls `clearpass_deploy_hook.sh`. No DNS
 challenge, no ACME CA contact.
 
 ---
@@ -77,10 +77,10 @@ propagated by `acme_cli.py`:
 
 ---
 
-## deploy_hook.sh
+## clearpass_deploy_hook.sh
 
 **Called by:** `install_cert.sh` after cert files are verified.
-**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh`
+**Manual:** `docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh`
 **Web UI:** **Servers → Upload to ClearPass** button.
 
 Resolves cert file paths and invokes `clearpass_upload.py`. Set
@@ -97,7 +97,7 @@ released automatically when the process exits.
 
 ## clearpass_upload.py
 
-**Called by:** `deploy_hook.sh`
+**Called by:** `clearpass_deploy_hook.sh`
 **Manual:** `docker exec -it cppm-acme-cert-manager python3 /opt/cppm/clearpass_upload.py --help`
 
 Uses the **official Aruba pyclearpass SDK** (`github.com/aruba/pyclearpass`)
