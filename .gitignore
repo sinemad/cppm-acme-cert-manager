@@ -22,3 +22,6 @@ __pycache__/
 
 # Claude Code per-user settings
 .claude/settings.local.json
+
+# Local-only planning notes, not meant for the repo
+NEW_CENTRAL_NAC_TODO.md
