@@ -25,3 +25,4 @@ __pycache__/
 
 # Local-only planning notes, not meant for the repo
 NEW_CENTRAL_NAC_TODO.md
+LINUX_SSH_TARGET_PLAN.md
