@@ -289,9 +289,11 @@ def _collect_ssh_server(s: dict) -> dict:
     print("  Best practice: generate a key just for this tool rather than reusing your")
     print("  personal SSH key, so a leaked servers.json can't reach anything else:")
     print('    ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"')
-    print("  Add only acme-deploy-key.pub to a low-privilege account's authorized_keys on")
-    print("  the target, scoped to the certificate directory (+ a narrow sudoers rule if")
-    print("  the reload command needs elevation), then paste the private half below.")
+    print("  On the target: sudo useradd --system --create-home --home-dir /opt/acme-deploy \\")
+    print('      --shell /bin/bash deploy   (a real shell -- "nologin" silently breaks deploys)')
+    print("  Add only acme-deploy-key.pub to that account's authorized_keys, scoped to the")
+    print("  certificate directory (+ a narrow sudoers rule if the reload command needs")
+    print("  elevation), then paste the private half below. Full walkthrough: docs/10-linux-ssh-target.md")
     tc["ssh_private_key"] = _prompt("Private Key (paste, Ctrl-D on empty line to end)",
                                     tc.get("ssh_private_key", ""), secret=True,
                                     hint="leave blank to use a password instead")

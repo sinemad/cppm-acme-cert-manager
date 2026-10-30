@@ -2009,6 +2009,7 @@ _HELP_DOCS = [
     ("script-reference", "Script Reference",     "06-script-reference.md"),
     ("quick-reference",  "Quick Reference",      "07-quick-reference.md"),
     ("traefik",          "HTTPS with Traefik",   "08-traefik.md"),
+    ("linux-ssh-target", "Linux SSH Target",     "10-linux-ssh-target.md"),
 ]
 
 _HELP_DESC = {
@@ -2020,6 +2021,7 @@ _HELP_DESC = {
     "script-reference": "Reference for all included shell scripts and Python CLIs (cppm-servers, cppm-users, etc.).",
     "quick-reference":  "At-a-glance cheatsheet: ports, paths, environment variables, and key commands.",
     "traefik":          "Enable HTTPS for the web UI using Traefik as a reverse proxy with automatic Let's Encrypt certificates.",
+    "linux-ssh-target": "Deploy certificates to any Linux server over SSH — setup, deploy-key best practices, and target-side examples.",
 }
 
 
@@ -4163,14 +4165,27 @@ def _settings_form_page(server: dict = None, error: str = "",
           <summary style="cursor:pointer;font-size:0.78rem;color:var(--muted)">Best practice: use a dedicated deploy key, not your personal SSH key</summary>
           <div class="hint" style="margin-top:0.5rem;line-height:1.5">
             Generate a key just for this tool, so a leaked <code>servers.json</code> can't be
-            used to reach anything else:
+            used to reach anything else — run this on your own machine, not the target:
             <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"</pre>
-            Create a low-privilege account on the target (not root), add only
-            <code>acme-deploy-key.pub</code> to its <code>authorized_keys</code>, and scope it
-            to just the certificate directory above — plus a narrow <code>sudoers</code> rule
-            below if the reload command needs elevation. Paste the private half
-            (<code>acme-deploy-key</code>, no passphrase — this runs unattended) into the field
-            above.
+            On the target, create a low-privilege account (not root) and its cert directory:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">sudo useradd --system --create-home --home-dir /opt/acme-deploy --shell /bin/bash deploy
+sudo mkdir -p /opt/acme-deploy/certs
+sudo chown deploy:deploy /opt/acme-deploy/certs
+sudo chmod 750 /opt/acme-deploy/certs</pre>
+            Use a real shell (<code>/bin/bash</code>/<code>/bin/sh</code>), not
+            <code>nologin</code> — this tool runs its deploy step as a remote SSH command, which
+            a <code>nologin</code> shell silently blocks. Then install the public key and scope
+            the account to just that directory — plus a narrow <code>sudoers</code> rule below
+            if the reload command needs elevation:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">sudo mkdir -p /opt/acme-deploy/.ssh
+sudo cp acme-deploy-key.pub /opt/acme-deploy/.ssh/authorized_keys
+sudo chown -R deploy:deploy /opt/acme-deploy/.ssh
+sudo chmod 700 /opt/acme-deploy/.ssh
+sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
+            Paste the private half (<code>acme-deploy-key</code>, no passphrase — this runs
+            unattended) into the field above. Full walkthrough and target-side examples:
+            <a href="/help/linux-ssh-target#best-practice-full-setup-walkthrough" target="_blank"
+               style="color:var(--accent)">Linux SSH Target docs</a>.
           </div>
         </details>
       </div>
