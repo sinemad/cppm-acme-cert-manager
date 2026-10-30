@@ -6,6 +6,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Certificate Profile editor: a first-class way to edit the ACME/DNS
+  config shared by every server entry on the same Certificate Profile ID in
+  one place (web `/settings/profiles` and `cppm-servers profiles` /
+  `edit-profile` / `detach-profile`), instead of editing it per-server where
+  a shared field silently got overwritten on save.
+- Certificate Profile ID is now a required field (web and CLI), auto-
+  suggested from the target's domain/host but editable, so every server
+  entry always shows up under Certificate Profiles. Existing entries are
+  backfilled automatically on container startup using the ID they were
+  already implicitly grouped under.
+- A warning is now shown before saving if a typed Certificate Profile ID
+  matches a *different* existing profile, since that save will silently
+  adopt that profile's ACME/DNS config.
 - Linux SSH target: a new `linux_ssh` target type that deploys issued
   certificates to any Linux server over SSH (Apache, nginx, Frigate, Docker
   containers, etc.) and runs a configurable reload command — no agent

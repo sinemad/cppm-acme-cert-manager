@@ -78,6 +78,17 @@ if [[ -n "$MIGRATE_MSG" ]]; then
     log "  Migrated .env configuration to servers.json: $MIGRATE_MSG"
 fi
 
+# ── Backfill certificate_id on entries that predate it being required ─────────
+BACKFILL_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import backfill_certificate_ids
+print(backfill_certificate_ids())
+" 2>/dev/null || echo "0")
+if [[ "$BACKFILL_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Assigned certificate profile IDs to $BACKFILL_COUNT existing server(s)."
+fi
+
 # ── Load server IDs from servers.json ─────────────────────────────────────────
 SERVER_IDS=$(python3 -c "
 import sys

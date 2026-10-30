@@ -22,11 +22,11 @@ from dns_utils import DEFAULT_PUBLIC_RESOLVERS, parse_resolvers
 SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 
 # ClearPass fields are always required: they are what the tool monitors and uploads to.
-_REQUIRED = {"label", "cppm_host", "cppm_client_id", "cppm_client_secret"}
+_REQUIRED = {"label", "certificate_id", "cppm_host", "cppm_client_id", "cppm_client_secret"}
 
 # Linux SSH targets need either a private key or a password, checked
 # separately below since _REQUIRED_BY_TYPE only expresses "must be non-blank".
-_REQUIRED_SSH = {"label", "ssh_host", "ssh_user", "remote_cert_dir"}
+_REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert_dir"}
 
 # Required fields per target_type. "clearpass" is the only implemented type
 # today; this map is the seam future target types (New Central, Mist, a
@@ -52,6 +52,7 @@ _DNS_PROVIDER_ALIASES = {"cf": "cloudflare", "aws": "route53", "r53": "route53",
 
 _FIELD_LABELS = {
     "label":             "Label",
+    "certificate_id":    "Certificate Profile ID",
     "cppm_host":         "ClearPass Host",
     "cppm_client_id":    "Client ID",
     "cppm_client_secret":"Client Secret",
@@ -323,6 +324,12 @@ def delete_server(server_id: str) -> bool:
 
 # ── Migration ─────────────────────────────────────────────────────────────────
 
+def _slugify_certificate_id(value: str, default: str = "certificate") -> str:
+    """Sanitize a free-form string into a safe certificate_id / directory-name token."""
+    safe = re.sub(r"[^\w.\-]", "_", str(value)).strip("._-")
+    return safe or default
+
+
 def migrate_from_env() -> Optional[str]:
     """
     One-time backwards-compatibility migration.
@@ -344,7 +351,7 @@ def migrate_from_env() -> Optional[str]:
         return None
 
     entry = {
-        "certificate_id": re.sub(r"[^\w.\-]", "_", domain).strip("._-") or "certificate",
+        "certificate_id": _slugify_certificate_id(domain),
         "label":                f"ClearPass ({cppm_host})",
         "cppm_host":            cppm_host,
         "cppm_client_id":       os.environ.get("CPPM_CLIENT_ID",       ""),
@@ -392,12 +399,10 @@ def server_cert_dir(server: dict) -> Path:
     """
     certificate_id = str(server.get("certificate_id", "")).strip()
     if certificate_id:
-        safe = re.sub(r"[^\w.\-]", "_", certificate_id).strip("._-") or "certificate"
-        return SERVERS_FILE.parent / "certificates" / safe
+        return SERVERS_FILE.parent / "certificates" / _slugify_certificate_id(certificate_id)
 
     host = str(_legacy_host(server)).strip()
-    safe = re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
-    return SERVERS_FILE.parent / safe
+    return SERVERS_FILE.parent / _slugify_certificate_id(host, default="default")
 
 
 def _legacy_host(server: dict) -> str:
@@ -415,12 +420,38 @@ def certificate_id(server: dict) -> str:
     if configured:
         return configured
     host = str(_legacy_host(server)).strip()
-    return re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
+    return _slugify_certificate_id(host, default="default")
 
 
 def certificate_members(profile_id: str) -> list[dict]:
     """Return all ClearPass targets attached to a certificate profile."""
     return [s for s in load_servers() if certificate_id(s) == profile_id]
+
+
+def backfill_certificate_ids() -> int:
+    """Assign an explicit certificate_id to every entry that's missing one.
+
+    certificate_id is now a required field (see validate_server), but
+    entries written before that requirement existed may still have it
+    blank. Uses the same host-based fallback certificate_id() already
+    computes for cert-directory/trust-sync grouping, so this only makes
+    that existing (implicit) grouping explicit — it doesn't change which
+    entries are considered part of the same certificate. Run once at
+    container startup (entrypoint.sh), before anything reads servers.json.
+    """
+    servers = load_servers()
+    updated = list(servers)
+    changed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("certificate_id", "")).strip():
+            continue
+        merged = dict(s)
+        merged["certificate_id"] = certificate_id(s)
+        updated[i] = merged
+        changed += 1
+    if changed:
+        _write(updated)
+    return changed
 
 
 def list_certificate_profiles() -> list[dict]:

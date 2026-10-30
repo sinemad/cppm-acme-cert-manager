@@ -3676,37 +3676,52 @@ def _settings_form_page(server: dict = None, error: str = "",
     # fields from the matching profile on save regardless of what the form
     # posts for them; the dropdown + auto-fill below is purely to make that
     # behavior visible and to save re-typing.
-    cert_profiles_script = ""
+    # Certificate profiles are loaded in both modes now: add-mode uses them for
+    # the "share an existing profile" dropdown, edit-mode just needs them (via
+    # window.CERT_PROFILES below) to warn if the typed ID collides with a
+    # *different* existing profile (checkCertIdConflict(), shared <script>
+    # block below) -- otherwise a hand-typed ID match silently overwrites
+    # whatever's on screen via _inherit_certificate_profile on save.
+    profiles = list_certificate_profiles()
+    own_id = profile_id if is_edit else ""
+    other_profiles = [p for p in profiles if str(p.get("certificate_id", "")).strip() != own_id]
+    profiles_json = json.dumps({
+        str(p.get("certificate_id", "")).strip(): {
+            "label":            p.get("label", ""),
+            "member_count":     len(list_profile_members(str(p.get("certificate_id", "")).strip())),
+            "domain":           p.get("domain", ""),
+            "san_dns":          p.get("san_dns") or [],
+            "acme_email":       p.get("acme_email", ""),
+            "acme_server":      p.get("acme_server", ""),
+            "dns_provider":     p.get("dns_provider", ""),
+            "dns_credentials":  p.get("dns_credentials") or {},
+            "cert_types":       p.get("cert_types") or [],
+            "split_horizon_dns": bool(p.get("split_horizon_dns")),
+            "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
+        }
+        for p in other_profiles
+    }).replace("</", "<\\/")
+    cert_profiles_script = (
+        f'<script>window.CERT_PROFILES = {profiles_json};'
+        f'window.CERT_ID_AUTOSUGGEST = {"false" if is_edit else "true"};</script>'
+    )
+
     if is_edit:
         cert_profile_field_html = f'''
       <div class="field">
         <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
+        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''
-    else:
-        profiles = list_certificate_profiles()
+    elif other_profiles:
         profile_options = "".join(
             f'<option value="{_esc(pid)}">{_esc(pid)} &mdash; {_esc(p.get("label") or p.get("domain") or p.get("cppm_host") or p.get("ssh_host", ""))}</option>'
-            for p in profiles
+            for p in other_profiles
             for pid in [str(p.get("certificate_id", "")).strip()]
         )
-        if profiles:
-            profiles_json = json.dumps({
-                str(p.get("certificate_id", "")).strip(): {
-                    "domain":           p.get("domain", ""),
-                    "san_dns":          p.get("san_dns") or [],
-                    "acme_email":       p.get("acme_email", ""),
-                    "acme_server":      p.get("acme_server", ""),
-                    "dns_provider":     p.get("dns_provider", ""),
-                    "dns_credentials":  p.get("dns_credentials") or {},
-                    "cert_types":       p.get("cert_types") or [],
-                    "split_horizon_dns": bool(p.get("split_horizon_dns")),
-                    "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
-                }
-                for p in profiles
-            }).replace("</", "<\\/")
-            cert_profile_field_html = f'''
+        cert_profile_field_html = f'''
       <div class="field">
         <label>Certificate Profile <span class="hint">(share one certificate's ACME/DNS config across multiple targets, of any target type)</span></label>
         <select id="cert_profile_select" onchange="applyCertProfile(this.value)">
@@ -3716,17 +3731,19 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>
       <div class="field">
         <label>Certificate Profile ID</label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
         <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''
-            cert_profiles_script = f'<script>window.CERT_PROFILES = {profiles_json};</script>'
-        else:
-            cert_profile_field_html = f'''
+    else:
+        cert_profile_field_html = f'''
       <div class="field">
         <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
+        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''
 
     # Form body — f-string with all interpolated Python values.
@@ -4097,11 +4114,37 @@ function applyCertProfile(value) {
     notice.textContent = 'Populated from certificate profile "' + value + '". These fields are shared by every server on this profile — edit a server already on the profile to change them.';
   }
 }
+function slugifyCertId(value) {
+  return (value || '').replace(/[^\\w.-]/g, '_').replace(/^[._-]+|[._-]+$/g, '');
+}
+function checkCertIdConflict(value) {
+  var notice = document.getElementById('cert-profile-notice');
+  if (!notice) return;
+  var p = (window.CERT_PROFILES || {})[value];
+  if (value && p) {
+    notice.style.display = '';
+    notice.textContent = "'" + value + "' is already used by profile " +
+      (p.label ? '"' + p.label + '"' : '"' + value + '"') + ' (' + p.member_count +
+      ' other target(s)) — saving will share its ACME/DNS config here, replacing what is shown below.';
+  } else {
+    notice.style.display = 'none';
+  }
+}
+function suggestCertId() {
+  if (!window.CERT_ID_AUTOSUGGEST) return;
+  var idInput = document.getElementById('certificate_id_input');
+  if (!idInput || idInput.dataset.touched === '1') return;
+  var domainEl = document.getElementById('domain');
+  idInput.value = slugifyCertId(domainEl ? domainEl.value : '');
+  checkCertIdConflict(idInput.value);
+}
 (function() {
   switchDns(document.getElementById('dns_provider').value);
   switchAcme(document.getElementById('acme_server').value);
   switchTargetType(document.getElementById('target_type').value);
   updateConfigureHelper();
+  var domainEl = document.getElementById('domain');
+  if (domainEl) domainEl.addEventListener('input', suggestCertId);
 })();
 function onClusterModeChange(cb) {
   document.getElementById('cluster-check-bar').style.display = cb.checked ? 'flex' : 'none';

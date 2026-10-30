@@ -37,6 +37,7 @@ sys.path.insert(0, "/opt/cppm")
 try:
     from config_utils import (
         SERVERS_FILE,
+        _slugify_certificate_id,
         acme_dns_resolvers,
         add_server,
         delete_certificate_profile,
@@ -173,29 +174,42 @@ def _prompt_bool(label: str, default: bool = False) -> bool:
 
 # ── Interactive field collection ──────────────────────────────────────────────
 
-def _prompt_certificate_profile(s: dict) -> tuple:
-    """Offer to share an existing certificate profile's ACME/DNS config,
-    the same mechanism the web UI's "Certificate Profile" dropdown uses
-    (add_server/update_server re-derive those fields from the matching
-    profile_id on save regardless of target_type, via
-    config_utils._inherit_certificate_profile).
+def _suggest_certificate_id(s: dict) -> str:
+    """Suggest a default Certificate Profile ID from the target's host.
 
-    Returns (s, True) if a profile was picked -- the caller should skip
+    Domain isn't collected yet at the point this is called (it's asked for
+    in _prompt_shared_acme_fields, right after), so this mirrors
+    config_utils.certificate_id()'s host-based fallback rather than using
+    the domain.
+    """
+    host = s.get("cppm_host") or (s.get("target_config") or {}).get("ssh_host", "")
+    return _slugify_certificate_id(host or s.get("label", ""))
+
+
+def _prompt_certificate_profile(s: dict) -> tuple:
+    """Prompt for the (now required) Certificate Profile ID, offering to
+    share an existing profile's ACME/DNS config -- the same mechanism the
+    web UI's "Certificate Profile" dropdown uses (add_server/update_server
+    re-derive those fields from the matching profile_id on save regardless
+    of target_type, via config_utils._inherit_certificate_profile).
+
+    Returns (s, True) if a profile is shared (by picking one from the menu,
+    or by typing an ID that happens to match one) -- the caller should skip
     collecting Domain/ACME/DNS/Advanced, since they'll be overwritten on
-    save anyway -- or (s, False) if the user declined (or no profiles
-    exist yet), in which case the caller collects those fields as normal.
+    save anyway -- or (s, False) if this is a standalone/new profile.
     """
     profiles = list_certificate_profiles()
+    suggested = s.get("certificate_id") or _suggest_certificate_id(s)
+
     if not profiles:
         s["certificate_id"] = _prompt(
-            "Certificate Profile ID", s.get("certificate_id", ""),
-            hint="optional — set this to share ACME/DNS config with other "
-                 "targets later; leave blank for a standalone target")
+            "Certificate Profile ID", suggested, required=True,
+            hint="reuse this value on another target later to share its ACME/DNS config")
         return s, False
 
     print("\n  Existing certificate profiles found. Sharing one fills in this target's")
     print("  Domain/ACME/DNS config automatically -- no need to re-enter DNS credentials.")
-    choices = {"__new__": "Don't share — configure ACME/DNS for this target"}
+    choices = {"__new__": "New profile — configure ACME/DNS for this target"}
     for p in profiles:
         pid = str(p.get("certificate_id", "")).strip()
         label = p.get("label") or p.get("domain") or p.get("cppm_host") or p.get("ssh_host") or pid
@@ -207,10 +221,16 @@ def _prompt_certificate_profile(s: dict) -> tuple:
         s["certificate_id"] = chosen
         print(f"  Using certificate profile '{chosen}' — ACME/DNS config will be inherited from it.")
         return s, True
-    s["certificate_id"] = _prompt(
-        "Certificate Profile ID", current,
-        hint="optional — set this to share ACME/DNS config with other "
-             "targets later; leave blank for a standalone target")
+
+    typed = _prompt(
+        "Certificate Profile ID", current or suggested, required=True,
+        hint="reuse this value on another target later to share its ACME/DNS config")
+    if typed in choices and typed != "__new__":
+        print(f"  Note: '{typed}' matches an existing profile ({choices[typed]}) — "
+              f"its ACME/DNS config will be used here instead of whatever you'd enter next.")
+        s["certificate_id"] = typed
+        return s, True
+    s["certificate_id"] = typed
     return s, False
 
 
