@@ -14,6 +14,7 @@ Usage (run inside the container via docker exec):
     docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
     docker exec -it cppm-acme-cert-manager cppm-servers profiles
     docker exec -it cppm-acme-cert-manager cppm-servers edit-profile <profile-id>
+    docker exec -it cppm-acme-cert-manager cppm-servers rename-profile <old-id> <new-id>
     docker exec -it cppm-acme-cert-manager cppm-servers detach-profile <profile-id>
 
 Notes:
@@ -22,6 +23,9 @@ Notes:
       Use 'edit-profile' to change it once for every target that shares
       it — a shared field edited through 'edit' on a single target is
       silently re-derived from its sibling on save and will not stick.
+    - Use 'rename-profile' to change the Certificate Profile ID itself for
+      every target that shares it (also renames the on-disk certificate
+      directory, so already-issued certificates are kept, not reissued).
     - Server IDs are UUIDs assigned automatically on creation (shown by 'list')
     - Each ClearPass host must be unique across all server entries
     - Credentials are stored in /data/certs/servers.json (chmod 600)
@@ -48,6 +52,7 @@ try:
         list_profile_members,
         load_servers,
         migrate_from_env,
+        rename_certificate_profile,
         resolve_target_fields,
         update_certificate_profile,
         update_server,
@@ -623,6 +628,24 @@ def cmd_detach_profile(profile_id: str) -> int:
     return 0
 
 
+def cmd_rename_profile(old_id: str, new_id: str) -> int:
+    members = list_profile_members(old_id)
+    if not members:
+        print(f"Certificate profile '{old_id}' not found.  Run 'profiles' to see all profiles.")
+        return 1
+    print(f"Renaming certificate profile '{old_id}' to '{new_id}' — "
+          f"{len(members)} target(s) affected:")
+    for m in members:
+        print(f"  - {m.get('label', '')} ({_TARGET_TYPES.get(m.get('target_type', 'clearpass'), 'clearpass')})")
+    try:
+        n = rename_certificate_profile(old_id, new_id)
+        print(f"\nProfile renamed to '{new_id}' — {n} target(s) updated.")
+        return 0
+    except ValueError as exc:
+        print(f"\nError: {exc}")
+        return 1
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -661,9 +684,16 @@ def main() -> int:
         return {"edit-profile": cmd_edit_profile,
                 "detach-profile": cmd_detach_profile}[cmd](rest[0])
 
+    if cmd == "rename-profile":
+        if len(rest) != 2:
+            print("Usage: cppm-servers rename-profile <old-profile-id> <new-profile-id>")
+            print("  Use 'profiles' to see all certificate profile IDs.")
+            return 1
+        return cmd_rename_profile(rest[0], rest[1])
+
     print(f"Unknown command: '{cmd}'")
     print("Available commands: list, ids, show, add, edit, delete, env, "
-          "profiles, edit-profile, detach-profile")
+          "profiles, edit-profile, rename-profile, detach-profile")
     return 1
 
 

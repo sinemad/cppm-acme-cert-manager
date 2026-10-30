@@ -19,6 +19,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A warning is now shown before saving if a typed Certificate Profile ID
   matches a *different* existing profile, since that save will silently
   adopt that profile's ACME/DNS config.
+- Rename Certificate Profile (web `/settings/profiles/edit/<id>` and CLI
+  `cppm-servers rename-profile <old-id> <new-id>`): renames the Certificate
+  Profile ID across every target that shares it, and moves the on-disk
+  certificate directory to match, so already-issued certificates and Lego
+  account state are kept rather than triggering a fresh issuance.
 - Linux SSH target: a new `linux_ssh` target type that deploys issued
   certificates to any Linux server over SSH (Apache, nginx, Frigate, Docker
   containers, etc.) and runs a configurable reload command — no agent

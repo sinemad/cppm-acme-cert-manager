@@ -540,6 +540,72 @@ def delete_certificate_profile(profile_id: str) -> int:
     return len(indices)
 
 
+_CERT_ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def rename_certificate_profile(old_id: str, new_id: str) -> int:
+    """Rename a certificate profile's ID across every entry sharing it.
+
+    Also moves the on-disk certificate directory (Lego account storage,
+    issued certs, logs — see server_cert_dir()) so already-issued
+    certificates survive the rename instead of looking "missing" to the
+    pipeline and triggering a fresh issuance. Raises ValueError if new_id is
+    invalid, collides with a different existing profile (by raw ID or by
+    slugified directory name), or old_id doesn't match any entry. Returns
+    the number of entries renamed (0 if new_id == old_id).
+    """
+    old_id = str(old_id).strip()
+    new_id = str(new_id).strip()
+    if not new_id:
+        raise ValueError("Certificate Profile ID is required.")
+    if not _CERT_ID_PATTERN.fullmatch(new_id):
+        raise ValueError(
+            "Certificate Profile ID may only contain letters, numbers, '.', '_', and '-'."
+        )
+    if new_id == old_id:
+        return 0
+
+    servers = load_servers()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == old_id]
+    if not indices:
+        raise ValueError("Certificate profile not found.")
+
+    other_ids = {
+        str(s.get("certificate_id", "")).strip() for s in servers
+    } - {old_id}
+    if new_id in other_ids:
+        raise ValueError(f"'{new_id}' is already used by another certificate profile.")
+    new_slug = _slugify_certificate_id(new_id)
+    if new_slug in {_slugify_certificate_id(pid) for pid in other_ids if pid}:
+        raise ValueError(
+            f"'{new_id}' resolves to the same certificate directory as an existing profile."
+        )
+
+    old_dir = SERVERS_FILE.parent / "certificates" / _slugify_certificate_id(old_id)
+    new_dir = SERVERS_FILE.parent / "certificates" / new_slug
+    moved = False
+    if old_dir.exists():
+        if new_dir.exists():
+            raise ValueError(f"Target certificate directory already exists: {new_dir}")
+        new_dir.parent.mkdir(parents=True, exist_ok=True)
+        old_dir.rename(new_dir)
+        moved = True
+
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        merged["certificate_id"] = new_id
+        updated[i] = merged
+    try:
+        _write(updated)
+    except Exception:
+        if moved:
+            new_dir.rename(old_dir)
+        raise
+    return len(indices)
+
+
 def certificate_owner_ids() -> list[str]:
     """Return one target ID per certificate profile for ACME work."""
     owners: list[str] = []

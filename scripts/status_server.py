@@ -50,6 +50,7 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
     list_profile_members, update_certificate_profile, delete_certificate_profile,
+    rename_certificate_profile,
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
@@ -3080,8 +3081,10 @@ def _settings_list_page(servers: list, username: str,
             profile_id = str(s.get("certificate_id", "")).strip()
             if profile_id:
                 domain += (
-                    f'<br><a href="/settings/profiles/edit/{_esc(profile_id)}" '
-                    f'class="hint" style="color:var(--accent)">Profile: {_esc(profile_id)}</a>'
+                    f'<div style="margin-top:0.2rem;font-family:sans-serif;font-size:0.7rem;'
+                    f'font-weight:normal"><a href="/settings/profiles/edit/{_esc(profile_id)}" '
+                    f'style="color:var(--muted)">Profile: '
+                    f'<span style="color:var(--accent)">{_esc(profile_id)}</span></a></div>'
                 )
             run_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
@@ -3142,11 +3145,11 @@ def _settings_list_page(servers: list, username: str,
             )
             rows += (
                 f'<tr>'
-                f'<td style="white-space:nowrap"><strong>{label}</strong></td>'
-                f'<td style="font-family:monospace;font-size:0.78rem">{host}</td>'
-                f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
-                f'<td>{prov}</td>'
-                f'<td style="text-align:right">'
+                f'<td style="white-space:nowrap;vertical-align:top"><strong>{label}</strong></td>'
+                f'<td style="font-family:monospace;font-size:0.78rem;vertical-align:top">{host}</td>'
+                f'<td style="font-family:monospace;font-size:0.78rem;vertical-align:top">{domain}</td>'
+                f'<td style="vertical-align:top">{prov}</td>'
+                f'<td style="text-align:right;vertical-align:top">'
                 f'<div style="display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.4rem 0.5rem;row-gap:0.4rem">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">Edit</a>'
                 f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap;padding-left:0.6rem;padding-right:0.6rem" title="Notifications">&#128276;</a>'
@@ -3188,7 +3191,8 @@ document.addEventListener('click', function(ev) {
   <div class="card" style="overflow-x:auto">
     <table class="settings-table" style="min-width:52rem">
       <thead><tr>
-        <th style="white-space:nowrap">Label</th><th>ClearPass Host</th><th>Domain</th><th>DNS Provider</th><th></th>
+        <th style="white-space:nowrap">Label</th><th style="white-space:nowrap">ClearPass Host</th>
+        <th style="white-space:nowrap">Domain</th><th style="white-space:nowrap">DNS Provider</th><th></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -3605,6 +3609,19 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
     <p class="hint" style="margin:0.6rem 0 0">
       Saving below updates these {len(members)} target(s) at once.
     </p>
+  </div>
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Rename Profile</div>
+    <form method="POST" action="/settings/profiles/{_esc(profile_id)}/rename"
+          onsubmit="return confirm('Rename certificate profile \'{_esc(profile_id)}\' for all {len(members)} target(s)?\n\nThe certificate directory on disk is renamed too — already-issued certificates are kept, not reissued.')"
+          style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin-bottom:0;flex:1;min-width:16rem">
+        <label>Certificate Profile ID</label>
+        <input type="text" name="certificate_id" value="{_esc(profile_id)}" required
+               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+      </div>
+      <button type="submit" class="btn btn-warn">Rename</button>
+    </form>
   </div>
   <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}">
     {_acme_dns_fields_html(values)}
@@ -5658,6 +5675,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/settings/profiles/") and path.endswith("/detach"):
             profile_id = path[len("/settings/profiles/"):-len("/detach")].strip("/")
             self._handle_profile_detach(profile_id)
+        elif path.startswith("/settings/profiles/") and path.endswith("/rename"):
+            profile_id = path[len("/settings/profiles/"):-len("/rename")].strip("/")
+            self._handle_profile_rename(profile_id)
         elif path.startswith("/settings/profiles/edit/"):
             self._handle_profile_edit(path[len("/settings/profiles/edit/"):].strip("/"))
         elif path.startswith("/settings/run/"):
@@ -5951,6 +5971,26 @@ class Handler(BaseHTTPRequestHandler):
                        profile_id, e, traceback.format_exc())
             values = dict(fields)
             values["certificate_id"] = profile_id
+            self._serve_html(
+                _profile_form_page(profile_id, values, str(e), username=username)
+            )
+
+    def _handle_profile_rename(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f = self._parse_form()
+        new_id = (f.get("certificate_id", [""])[0] or "").strip()
+        try:
+            n = rename_certificate_profile(profile_id, new_id)
+            _log.info("settings: '%s' renamed certificate profile '%s' -> '%s' (%d target(s))",
+                      username, profile_id, new_id, n)
+            self._redirect(f"/settings/profiles/edit/{new_id or profile_id}?ft=ok&fm={n}+target(s)+renamed.")
+        except Exception as e:
+            _log.error("settings: profile rename '%s' -> '%s' failed: %s\n%s",
+                       profile_id, new_id, e, traceback.format_exc())
+            members = list_profile_members(profile_id)
+            values = dict(members[0]) if members else {"certificate_id": profile_id}
             self._serve_html(
                 _profile_form_page(profile_id, values, str(e), username=username)
             )
