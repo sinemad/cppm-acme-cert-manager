@@ -60,6 +60,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   onto a single shared DNS Credential. The CLI's Infoblox and RFC 2136
   credential field prompts, previously missing, are now included.
 
+### Fixed
+- Linux SSH target: a pasted private key with CRLF line endings or trailing
+  per-line whitespace (common when copy/pasting through a browser textarea,
+  especially from Windows) could fail to load with a misleading
+  `error in libcrypto: unsupported` SSH error instead of a clear format
+  error. The temp key file written for each SSH/SCP call is now normalized
+  to LF-only before use.
+
 ### Changed
 - `openssh-client` and `sshpass` added to the container image for the Linux
   SSH target's SSH/SCP/password-auth support.

@@ -73,7 +73,12 @@ def _temp_key_file(private_key: str):
     if not private_key.strip():
         yield None
         return
-    key = private_key if private_key.endswith("\n") else private_key + "\n"
+    # Pasted keys (web textarea, copy/paste from Windows, etc.) can pick up
+    # CRLF line endings or trailing whitespace per line. OpenSSL's PEM/PKCS8
+    # parser is strict about this and fails with a misleading
+    # "error in libcrypto: unsupported" instead of a clear format error, so
+    # normalize before writing.
+    key = "\n".join(line.rstrip() for line in private_key.splitlines()) + "\n"
     tmp = tempfile.NamedTemporaryFile(mode="w", prefix="cppm_ssh_key_", delete=False)
     try:
         tmp.write(key)
