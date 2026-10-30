@@ -365,6 +365,7 @@ def build_server_status(server: dict) -> dict:
     status = {
         "id":              server.get("id", ""),
         "label":           server.get("label", domain),
+        "target_type":     server.get("target_type", "clearpass"),
         "cppm_host":       server.get("cppm_host", ""),
         "dns_provider":    dns_credential.get("dns_provider", ""),
         "acme_server":     server.get("acme_server", ""),
@@ -3145,18 +3146,21 @@ def _settings_list_page(servers: list, username: str,
                 f'</div>'
                 f'</div>'
             )
+            is_linux_ssh = s.get("target_type") == "linux_ssh"
+            upload_label = "Force Linux Server Upload" if is_linux_ssh else "Force ClearPass Upload"
+            upload_dest = "the Linux server" if is_linux_ssh else "ClearPass"
             upload_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
                 f'<form method="POST" action="/settings/upload/{sid}" id="upload-form-{sid}"'
                 f' style="display:inline-flex"'
                 f' onsubmit="return confirm('
-                f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
+                f"'Force-upload the current certificate for {label} to {upload_dest}?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
                 f'<input type="hidden" name="debug" id="upload-debug-{sid}" value="0">'
                 f'<button type="submit" class="btn btn-warn" style="white-space:nowrap;border-top-right-radius:0;'
                 f'border-bottom-right-radius:0" title="Manual override — only needed if automatic upload has failed">'
-                f'&#8679; Force ClearPass Upload</button>'
+                f'&#8679; {upload_label}</button>'
                 f'</form>'
                 f'<button type="button" class="btn btn-warn" style="white-space:nowrap;padding:0 0.5rem;'
                 f'border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid rgba(0,0,0,0.25)"'
@@ -3208,19 +3212,19 @@ document.addEventListener('click', function(ev) {
     body = f"""
 <div class="app">
   <div class="page-hdr">
-    <span class="page-title">ClearPass Servers</span>
+    <span class="page-title">Servers</span>
     <a href="/settings/add" class="btn btn-primary">&#43; Add Server</a>
   </div>
   {flash_html}
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-    Certificates are issued and uploaded to ClearPass automatically on the renewal schedule.
-    <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force ClearPass Upload</strong>
+    Certificates are issued and uploaded to their target automatically on the renewal schedule.
+    <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force Upload</strong>
     are manual overrides — only use them when troubleshooting a failed renewal or upload.
   </p>
   <div class="card" style="overflow-x:auto">
     <table class="settings-table" style="min-width:52rem">
       <thead><tr>
-        <th style="white-space:nowrap">Label</th><th style="white-space:nowrap">ClearPass Host</th>
+        <th style="white-space:nowrap">Label</th><th style="white-space:nowrap">Host</th>
         <th style="white-space:nowrap">Domain</th><th style="white-space:nowrap">DNS Provider</th><th></th>
       </tr></thead>
       <tbody>{rows}</tbody>
@@ -4647,13 +4651,16 @@ def _overview_rows(servers: list) -> str:
         def _dot(kind: str) -> str:
             return (f'<span id="ov-{_esc(raw_sid)}-{kind}" class="sdot checking"'
                     f' title="checking…" style="margin-right:0.2rem"></span>')
+        if s.get("target_type") == "linux_ssh":
+            dot_items = (("ssh", "SSH"), ("dns", "DNS/ACME"))
+        else:
+            dot_items = (("cppm", "CPPM"), ("dns", "DNS/ACME"), ("cb", "Callback"))
         dots = (f'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
-                f'{_dot("cppm")}<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'
-                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
-                f'{_dot("dns")}<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'
-                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
-                f'{_dot("cb")}<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
-                f'</div>')
+                + f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'.join(
+                    f'{_dot(kind)}<span style="font-size:0.68rem;color:var(--subtle)">{label}</span>'
+                    for kind, label in dot_items
+                )
+                + f'</div>')
         cert_badges = (
             (f'{_mini_cert(ecc, "HTTPS(ECC)")}' if "https_ecc" in tgts else "")
             + (f'{_mini_cert(rsa, "HTTPS(RSA)")}' if "https_rsa" in tgts else "")
@@ -5077,12 +5084,13 @@ function ovDot(sid,kind){
   var tip=h?(state+(h.message?': '+h.message:'')):'checking…';
   return'<span id="ov-'+esc(sid)+'-'+kind+'" class="sdot '+state+'" data-tooltip="'+esc(tip)+'" style="margin-right:0.2rem"></span>';
 }
-function renderDots(sid){
+function renderDots(sid,targetType){
   var sep='<span style="color:var(--border2);margin:0 0.15rem">\xb7</span>';
+  var items=targetType==='linux_ssh'
+    ?[['ssh','SSH'],['dns','DNS/ACME']]
+    :[['cppm','CPPM'],['dns','DNS/ACME'],['cb','Callback']];
   return'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
-    +ovDot(sid,'cppm')+'<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'+sep
-    +ovDot(sid,'dns')+'<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'+sep
-    +ovDot(sid,'cb')+'<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
+    +items.map(function(it){return ovDot(sid,it[0])+'<span style="font-size:0.68rem;color:var(--subtle)">'+it[1]+'</span>';}).join(sep)
     +'</div>';
 }
 function nav(el){window.location.href='/server/'+el.dataset.sid;}
@@ -5099,7 +5107,7 @@ function renderRow(s){
   return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
     +'<td><div class="srv-label">'+esc(s.label||s.cppm_host)+'</div>'
     +'<div class="srv-host">'+esc(s.cppm_host)+'</div>'
-    +renderDots(sid)+'</td>'
+    +renderDots(sid,s.target_type)+'</td>'
     +'<td>'+esc(dnsLabel(s.dns_provider))
     +'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">'+esc(acmeLabel(s.acme_server))+'</div></td>'
     +'<td><div class="cert-badges">'+certBadges+'</div></td>'
@@ -5114,7 +5122,7 @@ function applyAllHealthDots(){
   var servers=(_ovHealth&&_ovHealth.servers)||{};
   Object.keys(servers).forEach(function(sid){
     var sh=servers[sid]||{};
-    ['cppm','dns','callback'].forEach(function(k){
+    Object.keys(sh).forEach(function(k){
       var elId='ov-'+sid+'-'+(k==='callback'?'cb':k);
       var el=document.getElementById(elId);
       if(el&&sh[k])applyDot(el,sh[k]);
