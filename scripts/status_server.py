@@ -2235,6 +2235,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .field label{display:block;font-size:0.78rem;font-weight:500;color:var(--muted);margin-bottom:0.35rem}
 .field label .hint{font-weight:400;color:var(--subtle)}
 .field input{width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.5rem 0.75rem;color:var(--text);font-size:0.85rem;outline:none;transition:border-color .15s}
+.field input::placeholder,.field textarea::placeholder{color:var(--subtle);font-style:italic;opacity:1}
 .field input:focus{border-color:var(--accent)}
 .btn-submit{width:100%;padding:0.55rem;background:var(--accent);color:#0f172a;border:none;border-radius:0.4rem;font-size:0.9rem;font-weight:600;cursor:pointer;margin-top:0.5rem;transition:opacity .15s}
 .btn-submit:hover{opacity:.9}
@@ -4196,7 +4197,7 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
       <div class="field">
         <label>Remote Certificate Directory</label>
         <input type="text" name="remote_cert_dir" id="remote_cert_dir" value="{fv('remote_cert_dir')}"
-               placeholder="/opt/acme-deploy/certs" oninput="updateConfigureHelper()">
+               placeholder="e.g. /opt/acme-deploy/certs" oninput="updateConfigureHelper()">
         <div class="hint">The certificate will be written here as <code>fullchain.pem</code> and <code>privkey.pem</code>.</div>
       </div>
       <details style="margin:0.75rem 0">
