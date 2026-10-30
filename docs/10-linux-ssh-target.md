@@ -138,14 +138,27 @@ services:
       - /opt/acme-deploy/certs:/etc/letsencrypt/live/frigate:ro
 ```
 
+**After adding or changing this `volumes` line, run `docker compose up -d`**
+to recreate the container. `docker restart frigate` reuses the container
+exactly as it was already created — it will *not* pick up a new or
+changed mount, only new file contents under one already in place. This
+trips people up: if TLS still shows the default self-signed cert after
+editing `compose.yml`, a plain restart instead of a recreate is almost
+always why.
+
 See Frigate's own [TLS docs](https://docs.frigate.video/configuration/tls/)
-for the authoritative requirements. No reload command is needed: Frigate
+for the authoritative requirements, including that `tls.enabled` must be
+on (default is enabled, but check `config.yml` / Settings → System → TLS
+if it was ever turned off). Once the container is correctly recreated
+with the mount, no reload command is needed for routine renewals: Frigate
 compares the fingerprint of `fullchain.pem` against its running NGINX cert
 once a minute and reloads NGINX itself when they differ. Frigate's docs
 don't explicitly cover ECC certs or a key-only change (no fullchain
 change), so leaving a `docker restart frigate` reload command configured
 is a harmless fallback if you want to be certain a renewal takes effect
-immediately rather than within a minute.
+immediately rather than within a minute — restart is safe for *this*
+purpose since the mount itself isn't changing between renewals, only the
+files under it.
 
 ### Generic Docker container
 

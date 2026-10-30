@@ -4269,9 +4269,14 @@ var CONFIGURE_HELPER_SNIPPETS = {
     // inside the container (not configurable) — see
     // https://docs.frigate.video/configuration/tls/
     snippet: 'services:\\n  frigate:\\n    volumes:\\n      - {{DIR}}:/etc/letsencrypt/live/frigate:ro\\n'
-      + '# Not required: Frigate checks the fullchain.pem fingerprint every minute\\n'
-      + '# and reloads NGINX itself. A reload command is only a fallback if you want\\n'
-      + '# a renewal to take effect immediately instead of within a minute.',
+      + '# After adding/changing this volumes line, run `docker compose up -d` to\\n'
+      + '# recreate the container — `docker restart frigate` reuses the container\\n'
+      + '# as already created and will NOT pick up a new/changed mount.\\n'
+      + '#\\n'
+      + '# No reload command is needed for routine renewals after that: Frigate\\n'
+      + '# checks the fullchain.pem fingerprint every minute and reloads NGINX\\n'
+      + '# itself. The reload command below is only a fallback if you want a\\n'
+      + '# renewal to take effect immediately instead of within a minute.',
     reload: 'docker restart frigate'
   },
   docker: {
