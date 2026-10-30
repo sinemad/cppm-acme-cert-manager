@@ -175,3 +175,87 @@ directory and run one reload command on one host" instead of every system
 that trusts your personal key. The web UI's Add/Edit Server form and the
 CLI's `add`/`edit` flow both surface this same guidance inline next to the
 Private Key field.
+
+**The deploy account needs a real login shell — not `nologin`/`false`.**
+It's tempting to lock the account down with `/usr/sbin/nologin` the way
+you would for most service accounts, but this tool's deploy step runs as
+`ssh deploy@host 'mv ... && mv ...'` (and the reload command the same way)
+— both are still shell invocations under the hood, even though nothing
+about them looks like an interactive login. A `nologin` shell makes sshd
+reject those commands, so every deploy fails at the `mv` step even though
+the SSH connection itself succeeds — and the failure can be non-obvious
+since the SCP upload before it still works. Give it `/bin/bash` or
+`/bin/sh` instead. This doesn't weaken the account: it still can't get an
+*interactive* login unless someone has its password (it has none — auth
+is key-only) or physical/console access, and `authorized_keys` only
+accepts the one key you installed.
+
+**Scope the account to one directory, nothing else.** Give it its own
+home directory and own the certificate directory under it (not something
+shared like `/etc` or `/var/www`), so a compromised key can only write
+certs to that one path and, if you added one, run the one reload command
+your `sudoers` rule names — never arbitrary commands, never other users'
+files.
+
+See [Best practice: full setup walkthrough](#best-practice-full-setup-walkthrough)
+below for the exact commands to set all of this up from scratch.
+
+### Best practice: full setup walkthrough
+
+Assumes you're comfortable at a Linux shell but haven't set this up
+before. Run these on the **target** unless noted otherwise. See the
+[Security note](#security-note) above for the reasoning behind each
+choice.
+
+**1. Create the deploy account:**
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/acme-deploy \
+    --shell /bin/bash deploy
+```
+
+**2. Create and lock down the certificate directory:**
+
+```bash
+sudo mkdir -p /opt/acme-deploy/certs
+sudo chown deploy:deploy /opt/acme-deploy/certs
+sudo chmod 750 /opt/acme-deploy/certs
+```
+
+**3. Generate the deploy keypair** — on your own machine, not the target:
+
+```bash
+ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"
+```
+
+**4. Install the public key on the target**, into the deploy account's
+`authorized_keys`:
+
+```bash
+sudo mkdir -p /opt/acme-deploy/.ssh
+sudo cp acme-deploy-key.pub /opt/acme-deploy/.ssh/authorized_keys
+sudo chown -R deploy:deploy /opt/acme-deploy/.ssh
+sudo chmod 700 /opt/acme-deploy/.ssh
+sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys
+```
+
+**5. (Optional) If the reload command needs root**, e.g.
+`sudo systemctl reload nginx`, add a narrow `sudoers` rule scoped to
+exactly that command — see the snippet under
+[Test Connection](#test-connection) above. Skip this if the target
+doesn't need a reload (e.g. a container that re-reads certs on its own).
+
+**6. Verify the key works** before touching this tool at all:
+
+```bash
+ssh -i ./acme-deploy-key deploy@<host> 'touch /opt/acme-deploy/certs/probe && rm /opt/acme-deploy/certs/probe && echo OK'
+```
+
+**7. In this tool**, add the server with:
+- **SSH User**: `deploy`
+- **Private Key**: the private half from step 3
+- **Remote Cert Directory**: `/opt/acme-deploy/certs`
+- **Reload Command**: whatever step 5 scoped, or blank
+
+Then use [Test Connection](#test-connection) to confirm read/write/delete
+access (and the sudo dry-check, if a reload command is set) before saving.
