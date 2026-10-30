@@ -12,6 +12,8 @@ RUN apk add --no-cache \
     bash \
     curl \
     openssl \
+    openssh-client \
+    sshpass \
     python3 \
     py3-pip \
     py3-cryptography \

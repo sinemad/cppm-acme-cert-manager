@@ -24,10 +24,14 @@ SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 # ClearPass fields are always required: they are what the tool monitors and uploads to.
 _REQUIRED = {"label", "cppm_host", "cppm_client_id", "cppm_client_secret"}
 
+# Linux SSH targets need either a private key or a password, checked
+# separately below since _REQUIRED_BY_TYPE only expresses "must be non-blank".
+_REQUIRED_SSH = {"label", "ssh_host", "ssh_user", "remote_cert_dir"}
+
 # Required fields per target_type. "clearpass" is the only implemented type
 # today; this map is the seam future target types (New Central, Mist, a
 # generic Linux target, ...) hang their own required fields off of.
-_REQUIRED_BY_TYPE = {"clearpass": _REQUIRED}
+_REQUIRED_BY_TYPE = {"clearpass": _REQUIRED, "linux_ssh": _REQUIRED_SSH}
 
 # ACME / DNS fields are optional as a group. All blank = ClearPass-only
 # monitoring (warning, not an error). Partly filled or invalid = error, because
@@ -55,6 +59,9 @@ _FIELD_LABELS = {
     "acme_email":        "ACME Email",
     "acme_server":       "ACME Server",
     "dns_provider":      "DNS Provider",
+    "ssh_host":          "SSH Host",
+    "ssh_user":          "SSH User",
+    "remote_cert_dir":   "Remote Certificate Directory",
 }
 
 
@@ -94,6 +101,11 @@ def _resolve_target_fields(entry: dict) -> dict:
     resolved = dict(entry)
     resolved.update(entry.get("target_config") or {})
     return resolved
+
+
+# Public alias — other modules (status_server.py, cppm_acme_manager_servers.py)
+# need the same flattening to read a server entry regardless of target_type.
+resolve_target_fields = _resolve_target_fields
 
 
 def certificate_targets(entry: dict) -> list[str]:
@@ -180,41 +192,70 @@ def validate_server(entry: dict) -> None:
         if not str(resolved.get(field, "")).strip():
             label = _FIELD_LABELS.get(field, field)
             raise ValueError(f"{label} is required.")
+    if target_type == "linux_ssh":
+        if not str(resolved.get("ssh_private_key", "")).strip() \
+                and not str(resolved.get("ssh_password", "")).strip():
+            raise ValueError("Either a private key or a password is required.")
     if le_dns_configured(resolved):
         problems = le_dns_problems(resolved)
         if problems:
             raise ValueError(" ".join(problems))
     try:
-        port = int(resolved.get("cppm_callback_port", 8765))
-        if not 1 <= port <= 65535:
-            raise ValueError()
-    except (ValueError, TypeError):
-        raise ValueError("Callback port must be a number between 1 and 65535.")
-    try:
         acme_dns_resolvers(resolved)
     except ValueError as exc:
         raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
-    cert_types = certificate_targets(resolved)
-    valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
-    if not any(t in cert_types for t in valid_types):
-        raise ValueError("At least one ClearPass certificate target must be selected.")
+    if target_type == "clearpass":
+        try:
+            port = int(resolved.get("cppm_callback_port", 8765))
+            if not 1 <= port <= 65535:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("Callback port must be a number between 1 and 65535.")
+        cert_types = certificate_targets(resolved)
+        valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
+        if not any(t in cert_types for t in valid_types):
+            raise ValueError("At least one ClearPass certificate target must be selected.")
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
-def _check_duplicate_host(host: str, exclude_id: str = None) -> None:
-    """Raise ValueError if another entry already uses the same cppm_host."""
-    host = host.strip().lower()
+def _check_duplicate_host(entry: dict, exclude_id: str = None) -> None:
+    """Raise ValueError if another entry already targets the same host.
+
+    Clearpass entries are deduped on cppm_host, linux_ssh entries on ssh_host
+    — each target_type's uniqueness key is a property of its own fields, so
+    an empty host of one type never collides with an empty host of another.
+    """
+    resolved = _resolve_target_fields(entry)
+    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
+    host_field = "ssh_host" if target_type == "linux_ssh" else "cppm_host"
+    host = str(resolved.get(host_field, "")).strip().lower()
+    if not host:
+        return
     for s in load_servers():
         if s.get("id") == exclude_id:
             continue
         s = _resolve_target_fields(s)
-        if s.get("cppm_host", "").strip().lower() == host:
-            label = s.get("label") or s.get("cppm_host", "")
+        other_type = str(s.get("target_type", "clearpass") or "clearpass")
+        if other_type != target_type:
+            continue
+        if s.get(host_field, "").strip().lower() == host:
+            label = s.get("label") or s.get(host_field, "")
             raise ValueError(
-                f"A server entry for '{s.get('cppm_host', '')}' already exists "
-                f"('{label}'). Each ClearPass host must be unique."
+                f"A server entry for '{s.get(host_field, '')}' already exists "
+                f"('{label}'). Each {_FIELD_LABELS.get(host_field, host_field)} must be unique."
             )
+
+
+# The ACME/DNS fields a certificate profile shares across every target that
+# references it, regardless of target_type. Used both to pull these fields
+# into a newly saved entry (_inherit_certificate_profile) and to push an
+# edited value out to every entry sharing a profile (update_certificate_profile).
+_SHARED_PROFILE_FIELDS = (
+    "domain", "san_dns", "acme_email", "acme_server",
+    "dns_provider", "dns_credentials", "cert_types",
+    "split_horizon_dns", "split_horizon_resolvers",
+)
 
 
 def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
@@ -228,11 +269,7 @@ def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
         if str(existing.get("certificate_id", "")).strip() != profile_id:
             continue
         merged = dict(entry)
-        for field in (
-            "domain", "san_dns", "acme_email", "acme_server",
-            "dns_provider", "dns_credentials", "cert_types",
-            "split_horizon_dns", "split_horizon_resolvers",
-        ):
+        for field in _SHARED_PROFILE_FIELDS:
             if field in existing:
                 value = existing[field]
                 merged[field] = dict(value) if field == "dns_credentials" else (
@@ -246,7 +283,7 @@ def add_server(entry: dict) -> str:
     """Validate, check for duplicate host, and append. Returns the assigned server ID."""
     entry = _inherit_certificate_profile(dict(entry))
     validate_server(entry)
-    _check_duplicate_host(_resolve_target_fields(entry).get("cppm_host", ""))
+    _check_duplicate_host(entry)
     entry = dict(entry)
     entry["id"] = str(uuid.uuid4())
     servers = load_servers()
@@ -259,7 +296,7 @@ def update_server(server_id: str, entry: dict) -> bool:
     """Replace the existing entry with the given ID. Returns True if found."""
     entry = _inherit_certificate_profile(dict(entry), exclude_id=server_id)
     validate_server(entry)
-    _check_duplicate_host(_resolve_target_fields(entry).get("cppm_host", ""), exclude_id=server_id)
+    _check_duplicate_host(entry, exclude_id=server_id)
     servers = load_servers()
     for i, s in enumerate(servers):
         if s.get("id") == server_id:
@@ -358,9 +395,18 @@ def server_cert_dir(server: dict) -> Path:
         safe = re.sub(r"[^\w.\-]", "_", certificate_id).strip("._-") or "certificate"
         return SERVERS_FILE.parent / "certificates" / safe
 
-    host = str(_resolve_target_fields(server).get("cppm_host", "")).strip()
+    host = str(_legacy_host(server)).strip()
     safe = re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
     return SERVERS_FILE.parent / safe
+
+
+def _legacy_host(server: dict) -> str:
+    """Return the target-type-appropriate host used as a fallback directory key."""
+    resolved = _resolve_target_fields(server)
+    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
+    if target_type == "linux_ssh":
+        return str(resolved.get("ssh_host", ""))
+    return str(resolved.get("cppm_host", ""))
 
 
 def certificate_id(server: dict) -> str:
@@ -368,7 +414,7 @@ def certificate_id(server: dict) -> str:
     configured = str(server.get("certificate_id", "")).strip()
     if configured:
         return configured
-    host = str(_resolve_target_fields(server).get("cppm_host", "")).strip()
+    host = str(_legacy_host(server)).strip()
     return re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
 
 
@@ -380,7 +426,10 @@ def certificate_members(profile_id: str) -> list[dict]:
 def list_certificate_profiles() -> list[dict]:
     """Return one representative server entry per distinct *explicit* certificate
     profile ID (the value typed into the Certificate Profile ID field — this is
-    what _inherit_certificate_profile matches on, not the host-based fallback)."""
+    what _inherit_certificate_profile matches on, not the host-based fallback).
+
+    Entries are resolved (target_config flattened) so callers can read a
+    profile's host/label the same way regardless of target_type."""
     profiles: list[dict] = []
     seen: set[str] = set()
     for server in load_servers():
@@ -388,8 +437,76 @@ def list_certificate_profiles() -> list[dict]:
         if not profile_id or profile_id in seen:
             continue
         seen.add(profile_id)
-        profiles.append(server)
+        profiles.append(_resolve_target_fields(server))
     return profiles
+
+
+def list_profile_members(profile_id: str) -> list[dict]:
+    """Return every (resolved) entry whose explicit certificate_id matches.
+
+    Same matching rule as _inherit_certificate_profile — the typed-in
+    certificate_id field, not the host-based fallback certificate_members()
+    uses for cert-directory/trust-sync purposes."""
+    profile_id = str(profile_id).strip()
+    if not profile_id:
+        return []
+    return [
+        _resolve_target_fields(s) for s in load_servers()
+        if str(s.get("certificate_id", "")).strip() == profile_id
+    ]
+
+
+def update_certificate_profile(profile_id: str, fields: dict) -> int:
+    """Apply shared ACME/DNS fields to every entry sharing profile_id.
+
+    All-or-nothing: every affected entry is validated with the merged fields
+    before anything is written, so one entry's required fields (e.g. a
+    clearpass sibling's cert_types) can't be silently broken by an edit made
+    through the profile rather than through that entry. Returns the number
+    of entries updated. Raises ValueError if the profile doesn't exist or if
+    any affected entry would fail validation.
+    """
+    profile_id = str(profile_id).strip()
+    servers = load_servers()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == profile_id]
+    if not indices:
+        raise ValueError("Certificate profile not found.")
+
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        for field in _SHARED_PROFILE_FIELDS:
+            if field in fields:
+                value = fields[field]
+                merged[field] = dict(value) if field == "dns_credentials" else (
+                    list(value) if isinstance(value, list) else value
+                )
+        validate_server(merged)
+        updated[i] = merged
+
+    _write(updated)
+    return len(indices)
+
+
+def delete_certificate_profile(profile_id: str) -> int:
+    """Detach every entry sharing profile_id (clears certificate_id on each).
+
+    Each entry keeps whatever ACME/DNS values it last had — this only stops
+    them being linked, it does not delete any server entry."""
+    profile_id = str(profile_id).strip()
+    servers = load_servers()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == profile_id]
+    if not indices:
+        return 0
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        merged["certificate_id"] = ""
+        updated[i] = merged
+    _write(updated)
+    return len(indices)
 
 
 def certificate_owner_ids() -> list[str]:
@@ -417,9 +534,11 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
 
     s = _resolve_target_fields(s)
     creds = s.get("dns_credentials") or {}
+    target_type = str(s.get("target_type", "clearpass") or "clearpass")
+    is_ssh = target_type == "linux_ssh"
     env: dict[str, str] = {
         "CERTIFICATE_ID":       certificate_id(s),
-        "TARGET_TYPE":          str(s.get("target_type", "clearpass") or "clearpass"),
+        "TARGET_TYPE":          target_type,
         "DOMAIN":               str(s.get("domain",               "")),
         "SAN_DNS":              "|".join(san_dns_names(s)),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),
@@ -433,8 +552,11 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        "ISSUE_ECC":            "true" if "https_ecc" in certificate_targets(s) else "false",
-        "ISSUE_RSA":            "true" if any(t in certificate_targets(s) for t in ("https_rsa", "radius", "radsec")) else "false",
+        # Linux SSH targets always issue (and deploy) the ECC cert only —
+        # matches the fixed fullchain.pem/privkey.pem layout. ClearPass
+        # entries keep deriving flags from the selected cert_types.
+        "ISSUE_ECC":            "true" if (is_ssh or "https_ecc" in certificate_targets(s)) else "false",
+        "ISSUE_RSA":            "false" if is_ssh else ("true" if any(t in certificate_targets(s) for t in ("https_rsa", "radius", "radsec")) else "false"),
         "UPLOAD_HTTPS_ECC":     "true" if "https_ecc" in certificate_targets(s) else "false",
         "UPLOAD_HTTPS_RSA":     "true" if "https_rsa" in certificate_targets(s) else "false",
         "UPLOAD_RADIUS":        "true" if "radius" in certificate_targets(s) else "false",
@@ -444,6 +566,13 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "SERVER_LOG_DIR":       str(server_cert_dir(s) / "logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
         "SERVER_ID":            str(s.get("id", "")),
+        "SSH_HOST":             str(s.get("ssh_host",          "")),
+        "SSH_PORT":             str(s.get("ssh_port",          "22")),
+        "SSH_USER":             str(s.get("ssh_user",          "")),
+        "REMOTE_CERT_DIR":      str(s.get("remote_cert_dir",   "")),
+        "RELOAD_COMMAND":       str(s.get("reload_command",    "")),
+        "SSH_PRIVATE_KEY":      str(s.get("ssh_private_key",   "")),
+        "SSH_PASSWORD":         str(s.get("ssh_password",      "")),
     }
     for k, v in creds.items():
         env[k] = str(v)

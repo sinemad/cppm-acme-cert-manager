@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Linux SSH target: a new `linux_ssh` target type that deploys issued
+  certificates to any Linux server over SSH (Apache, nginx, Frigate, Docker
+  containers, etc.) and runs a configurable reload command — no agent
+  required on the target. Uses plain `ssh`/`scp`/`ssh-keyscan`, TOFU host-key
+  pinning (shared per host across server entries, hard-fails rather than
+  silently re-pinning if a host key ever changes), key-primary/
+  password-fallback auth, and a fixed `fullchain.pem`/`privkey.pem` remote
+  layout.
+- Test Connection smoke test for Linux SSH targets: verifies read/write/
+  delete access to the remote certificate directory and, for `sudo`-prefixed
+  reload commands, a non-destructive `sudo -n -l` dry check — available
+  live in the Add/Edit Server form (before the entry is even saved) and in
+  the `cppm-servers add`/`edit` CLI flow. On failure it returns the specific
+  problem plus copy-pasteable remediation commands (`mkdir`/`chown`/`chmod`,
+  or a scoped sudoers snippet).
+- "Show me how to configure..." inline helper in the Add/Edit Server form:
+  Apache/nginx/Frigate/Docker config snippets and suggested reload commands,
+  templated live from the server's own `remote_cert_dir` value.
+- [Linux SSH Target](docs/10-linux-ssh-target.md) documentation.
+
+### Changed
+- `openssh-client` and `sshpass` added to the container image for the Linux
+  SSH target's SSH/SCP/password-auth support.
+
 ## [2.2.0] - 2026-10-19
 
 ### Added

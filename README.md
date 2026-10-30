@@ -88,6 +88,7 @@ no clone or install required:
 | [Script Reference](docs/06-script-reference.md) | Every script's purpose, inputs, and outputs |
 | [Quick Reference](docs/07-quick-reference.md) | Copy-pasteable commands for day-to-day operations |
 | [Traefik](docs/08-traefik.md) | Running behind a Traefik reverse proxy with HTTPS |
+| [Linux SSH Target](docs/10-linux-ssh-target.md) | Deploying certs to Apache/nginx/Frigate/Docker over SSH, host-key pinning, the Test Connection smoke test |
 
 ---
 
