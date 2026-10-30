@@ -2143,6 +2143,10 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .nav-sep{width:1px;height:16px;background:var(--border);margin:0 0.25rem}
 .nav-user{font-size:0.78rem;color:var(--subtle);padding:0.3rem 0.5rem}
 .nav-logout{color:var(--muted)}
+.subtabs{display:flex;gap:0.25rem;border-bottom:1px solid var(--border);margin-bottom:1rem}
+.subtab{padding:0.5rem 0.9rem;font-size:0.82rem;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
+.subtab:hover{color:var(--text)}
+.subtab.active{color:var(--text);border-bottom-color:var(--accent)}
 
 /* ── Dashboard layout ── */
 .app{max-width:1200px;margin:0 auto;padding:1.5rem}
@@ -3591,13 +3595,28 @@ def _dns_credential_select_html(selected_id: str, disabled: bool = False) -> str
         <label>DNS Credential</label>
         {select_html}
         <p class="hint" style="margin:0.4rem 0 0">
-          <a href="/settings/dns-credentials" target="_blank" style="color:var(--accent)">Manage DNS Credentials</a>
+          <a href="/settings/dns-credentials" style="color:var(--accent)">Manage DNS Credentials</a>
         </p>
       </div>
     </div>'''
     if disabled:
         return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
     return html
+
+
+def _profile_tabs_html(active: str) -> str:
+    """Tab bar shared by the Certificate Profiles and DNS Credentials list
+    pages, so DNS Credentials is reachable without a separate top-nav entry.
+    """
+    def tab(href, label, slug):
+        cls = "subtab active" if slug == active else "subtab"
+        return f'<a href="{href}" class="{cls}">{label}</a>'
+    return (
+        '<div class="subtabs">'
+        + tab("/settings/profiles", "Certificate Profiles", "cert-profiles")
+        + tab("/settings/dns-credentials", "DNS Credentials", "dns-credentials")
+        + '</div>'
+    )
 
 
 def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "") -> str:
@@ -3648,6 +3667,7 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
   <div class="page-hdr">
     <span class="page-title">Certificate Profiles</span>
   </div>
+  {_profile_tabs_html("cert-profiles")}
   {flash_html}
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
     A certificate profile is the ACME/DNS configuration shared by every server that has the
@@ -3767,6 +3787,7 @@ def _dns_credential_list_page(username: str, flash_type: str = "", flash_msg: st
     <span class="page-title">DNS Credentials</span>
     <a href="/settings/dns-credentials/new" class="btn btn-primary">+ Add DNS Credential</a>
   </div>
+  {_profile_tabs_html("dns-credentials")}
   {flash_html}
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
     A DNS Credential is a reusable DNS vendor account (e.g. a Cloudflare API token) that any
