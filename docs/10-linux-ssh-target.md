@@ -126,16 +126,26 @@ recreated.
 
 ### Frigate (docker-compose)
 
+Frigate's TLS cert path is hardcoded to `/etc/letsencrypt/live/frigate`
+inside the container — it is not configurable via `config.yml` or an env
+var — so the container-side mount path must be that fixed path, not the
+host's `remote_cert_dir`:
+
 ```yaml
 services:
   frigate:
     volumes:
-      - /opt/acme-deploy/certs:/opt/acme-deploy/certs:ro
+      - /opt/acme-deploy/certs:/etc/letsencrypt/live/frigate:ro
 ```
 
-The container only reads the files, so the atomic `mv` on deploy is usually
-enough on its own. Reload command (only if the service doesn't hot-reload):
-`docker restart frigate`
+See Frigate's own [TLS docs](https://docs.frigate.video/configuration/tls/)
+for the authoritative requirements. No reload command is needed: Frigate
+compares the fingerprint of `fullchain.pem` against its running NGINX cert
+once a minute and reloads NGINX itself when they differ. Frigate's docs
+don't explicitly cover ECC certs or a key-only change (no fullchain
+change), so leaving a `docker restart frigate` reload command configured
+is a harmless fallback if you want to be certain a renewal takes effect
+immediately rather than within a minute.
 
 ### Generic Docker container
 

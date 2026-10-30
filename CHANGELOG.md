@@ -67,6 +67,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `error in libcrypto: unsupported` SSH error instead of a clear format
   error. The temp key file written for each SSH/SCP call is now normalized
   to LF-only before use.
+- Linux SSH target's Frigate setup snippet (docs and the Add/Edit Server
+  form's "Show me how to configure..." helper) mounted the host cert
+  directory at the same path inside the container
+  (`{{DIR}}:{{DIR}}:ro`), but Frigate's cert path is hardcoded to
+  `/etc/letsencrypt/live/frigate` and is not configurable — the mount now
+  targets that fixed path. Also notes that Frigate hot-reloads on its own
+  (polls `fullchain.pem`'s fingerprint every minute), so the suggested
+  `docker restart frigate` reload command is an optional fallback, not a
+  requirement.
 
 ### Changed
 - `openssh-client` and `sshpass` added to the container image for the Linux

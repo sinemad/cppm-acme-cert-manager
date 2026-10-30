@@ -3147,7 +3147,7 @@ def _settings_list_page(servers: list, username: str,
                 f'</div>'
             )
             is_linux_ssh = s.get("target_type") == "linux_ssh"
-            upload_label = "Force Linux Server Upload" if is_linux_ssh else "Force ClearPass Upload"
+            upload_label = "Force Linux Upload" if is_linux_ssh else "Force ClearPass Upload"
             upload_dest = "the Linux server" if is_linux_ssh else "ClearPass"
             upload_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
@@ -3222,7 +3222,7 @@ document.addEventListener('click', function(ev) {
     are manual overrides — only use them when troubleshooting a failed renewal or upload.
   </p>
   <div class="card" style="overflow-x:auto">
-    <table class="settings-table" style="min-width:52rem">
+    <table class="settings-table" style="min-width:55rem">
       <thead><tr>
         <th style="white-space:nowrap">Label</th><th style="white-space:nowrap">Host</th>
         <th style="white-space:nowrap">Domain</th><th style="white-space:nowrap">DNS Provider</th><th></th>
@@ -4265,7 +4265,13 @@ var CONFIGURE_HELPER_SNIPPETS = {
     reload: 'sudo systemctl reload nginx'
   },
   frigate: {
-    snippet: 'services:\\n  frigate:\\n    volumes:\\n      - {{DIR}}:{{DIR}}:ro',
+    // Frigate's cert path is hardcoded to /etc/letsencrypt/live/frigate
+    // inside the container (not configurable) — see
+    // https://docs.frigate.video/configuration/tls/
+    snippet: 'services:\\n  frigate:\\n    volumes:\\n      - {{DIR}}:/etc/letsencrypt/live/frigate:ro\\n'
+      + '# Not required: Frigate checks the fullchain.pem fingerprint every minute\\n'
+      + '# and reloads NGINX itself. A reload command is only a fallback if you want\\n'
+      + '# a renewal to take effect immediately instead of within a minute.',
     reload: 'docker restart frigate'
   },
   docker: {
