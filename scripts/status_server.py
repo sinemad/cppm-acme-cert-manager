@@ -5980,7 +5980,7 @@ class Handler(BaseHTTPRequestHandler):
         if not username:
             return self._redirect("/login")
         f = self._parse_form()
-        new_id = (f.get("certificate_id", [""])[0] or "").strip()
+        new_id = f.get("certificate_id", "").strip()
         try:
             n = rename_certificate_profile(profile_id, new_id)
             _log.info("settings: '%s' renamed certificate profile '%s' -> '%s' (%d target(s))",
