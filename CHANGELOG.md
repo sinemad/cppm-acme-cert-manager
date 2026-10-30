@@ -47,6 +47,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Apache/nginx/Frigate/Docker config snippets and suggested reload commands,
   templated live from the server's own `remote_cert_dir` value.
 - [Linux SSH Target](docs/10-linux-ssh-target.md) documentation.
+- DNS Credentials: DNS vendor credentials (provider + API tokens/keys) are
+  now a first-class, reusable entity separate from Certificate Profiles
+  (web `/settings/dns-credentials` and `cppm-servers dns-credentials` /
+  `add-dns-credential` / `edit-dns-credential` / `rename-dns-credential` /
+  `delete-dns-credential`), so the same DNS vendor account can be shared
+  across multiple Certificate Profiles without re-entering its credentials.
+  Certificate Profiles now reference a DNS Credential by ID
+  (`dns_credential_id`) instead of embedding `dns_provider`/
+  `dns_credentials` directly. Existing entries are migrated automatically
+  on container startup, deduplicating identical provider/credential pairs
+  onto a single shared DNS Credential. The CLI's Infoblox and RFC 2136
+  credential field prompts, previously missing, are now included.
 
 ### Changed
 - `openssh-client` and `sshpass` added to the container image for the Linux

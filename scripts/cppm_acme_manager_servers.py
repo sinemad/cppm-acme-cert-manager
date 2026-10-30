@@ -16,16 +16,28 @@ Usage (run inside the container via docker exec):
     docker exec -it cppm-acme-cert-manager cppm-servers edit-profile <profile-id>
     docker exec -it cppm-acme-cert-manager cppm-servers rename-profile <old-id> <new-id>
     docker exec -it cppm-acme-cert-manager cppm-servers detach-profile <profile-id>
+    docker exec -it cppm-acme-cert-manager cppm-servers dns-credentials
+    docker exec -it cppm-acme-cert-manager cppm-servers add-dns-credential
+    docker exec -it cppm-acme-cert-manager cppm-servers edit-dns-credential <id>
+    docker exec -it cppm-acme-cert-manager cppm-servers rename-dns-credential <old-id> <new-id>
+    docker exec -it cppm-acme-cert-manager cppm-servers delete-dns-credential <id>
 
 Notes:
-    - A certificate profile is the ACME/DNS config shared by every server
-      entry with the same Certificate Profile ID (set via 'add'/'edit').
-      Use 'edit-profile' to change it once for every target that shares
-      it — a shared field edited through 'edit' on a single target is
-      silently re-derived from its sibling on save and will not stick.
+    - A certificate profile is the cert identity (Domain/SAN/ACME Email/CA/
+      EAB/cert types/split-horizon) shared by every server entry with the
+      same Certificate Profile ID (set via 'add'/'edit'). Use 'edit-profile'
+      to change it once for every target that shares it — a shared field
+      edited through 'edit' on a single target is silently re-derived from
+      its sibling on save and will not stick.
     - Use 'rename-profile' to change the Certificate Profile ID itself for
       every target that shares it (also renames the on-disk certificate
       directory, so already-issued certificates are kept, not reissued).
+    - A DNS Credential is a separate, reusable DNS vendor account (provider
+      + its credentials) that any number of Certificate Profiles can point
+      at via a DNS Credential ID — e.g. two unrelated domains can share one
+      Cloudflare token without re-entering it. Manage these with
+      'dns-credentials'/'add-dns-credential'/'edit-dns-credential'/
+      'rename-dns-credential'/'delete-dns-credential'.
     - Server IDs are UUIDs assigned automatically on creation (shown by 'list')
     - Each ClearPass host must be unique across all server entries
     - Credentials are stored in /data/certs/servers.json (chmod 600)
@@ -43,18 +55,25 @@ try:
         SERVERS_FILE,
         _slugify_certificate_id,
         acme_dns_resolvers,
+        add_dns_credential,
         add_server,
         delete_certificate_profile,
+        delete_dns_credential,
         delete_server,
+        dns_credential_owner_ids,
+        get_dns_credential,
         get_server,
         get_server_shell_env,
         list_certificate_profiles,
+        list_dns_credentials,
         list_profile_members,
         load_servers,
         migrate_from_env,
         rename_certificate_profile,
+        rename_dns_credential,
         resolve_target_fields,
         update_certificate_profile,
+        update_dns_credential,
         update_server,
     )
 except ImportError as exc:
@@ -74,6 +93,8 @@ _DNS_PROVIDERS = {
     "route53":      "AWS Route 53",
     "digitalocean": "DigitalOcean",
     "godaddy":      "GoDaddy",
+    "infoblox":     "Infoblox",
+    "rfc2136":      "RFC 2136 (nsupdate / AD DNS)",
 }
 
 _ACME_SERVERS = {
@@ -111,6 +132,21 @@ _DNS_CRED_FIELDS = {
     "godaddy": [
         ("GD_Key",    "API Key",    False, ""),
         ("GD_Secret", "API Secret", True,  ""),
+    ],
+    "infoblox": [
+        ("INFOBLOX_HOST",         "Grid Master Host",  False, "hostname or IP"),
+        ("INFOBLOX_USERNAME",     "Username",           False, ""),
+        ("INFOBLOX_PASSWORD",     "Password",           True,  ""),
+        ("INFOBLOX_VIEW",         "DNS View",           False, "default: default"),
+        ("INFOBLOX_WAPI_VERSION", "WAPI Version",       False, "default: 2.5"),
+        ("INFOBLOX_SSL_VERIFY",   "SSL Verify",         False, "true/false, default: true"),
+    ],
+    "rfc2136": [
+        ("RFC2136_NAMESERVER",      "Nameserver",        False, "host or host:port"),
+        ("RFC2136_TSIG_KEY",        "TSIG Key Name",     False, "leave blank for unsigned updates"),
+        ("RFC2136_TSIG_SECRET",     "TSIG Secret",       True,  ""),
+        ("RFC2136_TSIG_ALGORITHM",  "TSIG Algorithm",    False, "default: hmac-md5"),
+        ("RFC2136_DNS_TIMEOUT",     "DNS Timeout",       False, "seconds, default: 10"),
     ],
 }
 
@@ -292,7 +328,6 @@ def _collect_ssh_server(s: dict) -> dict:
 def _collect_server(existing: dict = None) -> dict:
     """Walk through all server fields interactively. Pass existing for edit mode."""
     s = dict(resolve_target_fields(existing)) if existing else {}
-    creds = dict(s.get("dns_credentials") or {})
 
     print("\n── Server Identity ──────────────────────────────────────────────────────")
     s["label"] = _prompt("Label", s.get("label", ""), required=True,
@@ -320,19 +355,64 @@ def _collect_server(existing: dict = None) -> dict:
     if inherited:
         return s
 
-    return _prompt_shared_acme_fields(s)
+    return _prompt_identity_fields(s)
 
 
-def _prompt_shared_acme_fields(s: dict) -> dict:
-    """Prompt for the ACME/DNS fields a certificate profile shares across targets.
+def _prompt_dns_credential_fields(dns_provider: str, existing: dict = None) -> dict:
+    """Prompt for one provider's vendor credential fields."""
+    creds = dict(existing or {})
+    fields = _DNS_CRED_FIELDS.get(dns_provider, [])
+    if fields:
+        print(f"\n  Credentials for {_DNS_PROVIDERS.get(dns_provider, dns_provider)}:")
+        for key, label, is_secret, hint in fields:
+            creds[key] = _prompt(label, creds.get(key, ""), hint=hint, secret=is_secret)
+    return creds
+
+
+def _prompt_dns_credential(current_id: str = "") -> str:
+    """Prompt for a dns_credential_id -- pick an existing DNS Credential to
+    reuse, or create a new one inline. Mirrors _prompt_certificate_profile's
+    "share an existing one, or configure a new one" pattern.
+    """
+    existing_creds = list_dns_credentials()
+    if existing_creds:
+        print("\n  Existing DNS Credentials found. Reusing one shares its vendor credentials")
+        print("  across targets -- no need to re-enter the same API token.")
+        choices = {"__new__": "New DNS Credential — configure a DNS provider/credentials"}
+        for c in existing_creds:
+            cid = c["id"]
+            prov_label = _DNS_PROVIDERS.get(c.get("dns_provider", ""), c.get("dns_provider", ""))
+            choices[cid] = f"{cid} ({prov_label})"
+        default = current_id if current_id in choices else "__new__"
+        chosen = _prompt_choice("DNS Credential", choices, default)
+        if chosen != "__new__":
+            return chosen
+
+    print("\n── DNS Provider ─────────────────────────────────────────────────────────")
+    provider = _prompt_choice("Provider", _DNS_PROVIDERS, "cloudflare")
+    creds = _prompt_dns_credential_fields(provider, {})
+
+    existing_ids = {c["id"] for c in existing_creds}
+    cred_id = provider
+    n = 2
+    while cred_id in existing_ids:
+        cred_id = f"{provider}-{n}"
+        n += 1
+    add_dns_credential(cred_id, provider, creds)
+    print(f"  Created DNS Credential '{cred_id}'.")
+    return cred_id
+
+
+def _prompt_identity_fields(s: dict) -> dict:
+    """Prompt for the cert-identity fields a certificate profile shares across
+    targets (Domain/ACME Email/CA/EAB/split-horizon). DNS vendor credentials
+    are a separate, reusable DNS Credential selected via _prompt_dns_credential.
 
     Mirrors config_utils._SHARED_PROFILE_FIELDS (minus cert_types, which this
     CLI has never prompted for — it defaults to all cert types, same as
     add_server/update_server). Used both by _collect_server (new entry) and
     cmd_edit_profile (editing a shared profile across every target at once).
     """
-    creds = dict(s.get("dns_credentials") or {})
-
     print("\n── Domain & ACME ────────────────────────────────────────────────────────")
     s["domain"]      = _prompt("Domain",     s.get("domain", ""),      required=True,
                                hint="e.g. cppm.example.com")
@@ -343,22 +423,12 @@ def _prompt_shared_acme_fields(s: dict) -> dict:
 
     if s["acme_server"] == "zerossl":
         print("\n  ZeroSSL External Account Binding credentials:")
-        creds["EAB_KID"] = _prompt("EAB KID", creds.get("EAB_KID", ""), required=True)
-        creds["EAB_HMAC_KEY"] = _prompt(
-            "EAB HMAC Key", creds.get("EAB_HMAC_KEY", ""), required=True, secret=True
+        s["eab_kid"] = _prompt("EAB KID", s.get("eab_kid", ""), required=True)
+        s["eab_hmac_key"] = _prompt(
+            "EAB HMAC Key", s.get("eab_hmac_key", ""), required=True, secret=True
         )
 
-    print("\n── DNS Provider ─────────────────────────────────────────────────────────")
-    s["dns_provider"] = _prompt_choice("Provider", _DNS_PROVIDERS,
-                                       s.get("dns_provider", "cloudflare"))
-
-    fields = _DNS_CRED_FIELDS.get(s["dns_provider"], [])
-    if fields:
-        print(f"\n  Credentials for {_DNS_PROVIDERS[s['dns_provider']]}:")
-        for key, label, is_secret, hint in fields:
-            creds[key] = _prompt(label, creds.get(key, ""), hint=hint, secret=is_secret)
-
-    s["dns_credentials"] = creds
+    s["dns_credential_id"] = _prompt_dns_credential(s.get("dns_credential_id", ""))
 
     print("\n── Advanced ─────────────────────────────────────────────────────────────")
     print("  Split-horizon: answer yes only if your internal DNS server has its own copy")
@@ -427,7 +497,9 @@ def cmd_list() -> int:
     print(f"Configured servers ({len(servers)}) — {SERVERS_FILE}:")
     for raw in servers:
         s = resolve_target_fields(raw)
-        dns  = _DNS_PROVIDERS.get(s.get("dns_provider", ""), s.get("dns_provider", "—"))
+        credential = get_dns_credential(s.get("dns_credential_id", "")) or {}
+        dns_provider = credential.get("dns_provider", "")
+        dns  = _DNS_PROVIDERS.get(dns_provider, dns_provider or "—")
         acme = _ACME_SERVERS.get(s.get("acme_server",   ""), s.get("acme_server",   "—"))
         target_type = s.get("target_type", "clearpass") or "clearpass"
         host = s.get("ssh_host", "") if target_type == "linux_ssh" else s.get("cppm_host", "")
@@ -448,8 +520,11 @@ def cmd_show(server_id: str) -> int:
         print(f"Server '{server_id}' not found.  Run 'list' to see all IDs.")
         return 1
     s = resolve_target_fields(raw)
-    creds = s.get("dns_credentials") or {}
-    dns  = _DNS_PROVIDERS.get(s.get("dns_provider", ""), s.get("dns_provider", "—"))
+    cred_id = str(s.get("dns_credential_id", "")).strip()
+    credential = get_dns_credential(cred_id) or {}
+    creds = credential.get("dns_credentials") or {}
+    dns_provider = credential.get("dns_provider", "")
+    dns  = _DNS_PROVIDERS.get(dns_provider, dns_provider or "—")
     acme = _ACME_SERVERS.get(s.get("acme_server",   ""), s.get("acme_server",   "—"))
     target_type = s.get("target_type", "clearpass") or "clearpass"
 
@@ -479,9 +554,13 @@ def cmd_show(server_id: str) -> int:
     print(f"  Domain:           {s.get('domain', '')}")
     print(f"  ACME Email:       {s.get('acme_email', '')}")
     print(f"  Certificate Auth: {acme}")
+    if s.get("acme_server") == "zerossl":
+        print(f"  EAB KID:          {'(set)' if s.get('eab_kid') else '(empty)'}")
+        print(f"  EAB HMAC Key:     {'(set)' if s.get('eab_hmac_key') else '(empty)'}")
     print()
+    print(f"  DNS Credential:   {cred_id or '(none)'}")
     print(f"  DNS Provider:     {dns}")
-    for key, label, is_secret, _ in _DNS_CRED_FIELDS.get(s.get("dns_provider", ""), []):
+    for key, label, is_secret, _ in _DNS_CRED_FIELDS.get(dns_provider, []):
         if is_secret:
             val = "(set)" if creds.get(key) else "(empty)"
         else:
@@ -573,13 +652,15 @@ def cmd_profiles() -> int:
     print(f"Certificate profiles ({len(profiles)}):")
     for p in profiles:
         pid = str(p.get("certificate_id", "")).strip()
-        dns  = _DNS_PROVIDERS.get(p.get("dns_provider", ""), p.get("dns_provider", "—"))
+        cred_id = str(p.get("dns_credential_id", "")).strip()
+        dns_provider = (get_dns_credential(cred_id) or {}).get("dns_provider", "")
+        dns  = _DNS_PROVIDERS.get(dns_provider, dns_provider or cred_id or "—")
         acme = _ACME_SERVERS.get(p.get("acme_server",   ""), p.get("acme_server",   "—"))
         members = list_profile_members(pid)
         print()
         print(f"  Profile:  {pid}")
         print(f"  Domain:   {p.get('domain', '')}")
-        print(f"  DNS:      {dns}")
+        print(f"  DNS:      {dns} ({cred_id or '—'})")
         print(f"  ACME CA:  {acme}")
         print(f"  Members:  " + ", ".join(
             f"{m.get('label', '')} ({_TARGET_TYPES.get(m.get('target_type', 'clearpass'), 'clearpass')})"
@@ -598,7 +679,7 @@ def cmd_edit_profile(profile_id: str) -> int:
         print(f"  - {m.get('label', '')} ({_TARGET_TYPES.get(m.get('target_type', 'clearpass'), 'clearpass')})")
     print("Press Enter to keep the current value; Ctrl-C to cancel.")
     try:
-        fields = _prompt_shared_acme_fields(dict(members[0]))
+        fields = _prompt_identity_fields(dict(members[0]))
     except KeyboardInterrupt:
         print("\nCancelled.")
         return 0
@@ -652,6 +733,112 @@ def cmd_rename_profile(old_id: str, new_id: str) -> int:
         return 1
 
 
+def cmd_dns_credentials() -> int:
+    creds = list_dns_credentials()
+    if not creds:
+        print("No DNS Credentials configured.")
+        print("  Add one with: cppm-servers add-dns-credential")
+        return 0
+    print(f"DNS Credentials ({len(creds)}):")
+    for c in creds:
+        cid = c["id"]
+        dns = _DNS_PROVIDERS.get(c.get("dns_provider", ""), c.get("dns_provider", "—"))
+        owners = dns_credential_owner_ids(cid)
+        print()
+        print(f"  DNS Credential: {cid}")
+        print(f"  Provider:       {dns}")
+        print(f"  Used by:        " + (", ".join(owners) if owners else "(unused)"))
+    return 0
+
+
+def cmd_add_dns_credential() -> int:
+    print("Adding a new DNS Credential.")
+    print("Press Enter to accept a default value; Ctrl-C to cancel.")
+    try:
+        existing = {c["id"] for c in list_dns_credentials()}
+        cred_id = _prompt("DNS Credential ID", required=True,
+                          hint="e.g. cloudflare-main — reuse this on multiple certificate profiles")
+        while cred_id in existing:
+            print(f"  '{cred_id}' is already used by another DNS Credential.")
+            cred_id = _prompt("DNS Credential ID", required=True)
+        print("\n── DNS Provider ─────────────────────────────────────────────────────────")
+        provider = _prompt_choice("Provider", _DNS_PROVIDERS, "cloudflare")
+        creds = _prompt_dns_credential_fields(provider, {})
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return 0
+    try:
+        add_dns_credential(cred_id, provider, creds)
+        print(f"\nDNS Credential '{cred_id}' added successfully.")
+        return 0
+    except ValueError as exc:
+        print(f"\nError: {exc}")
+        return 1
+
+
+def cmd_edit_dns_credential(cred_id: str) -> int:
+    existing = get_dns_credential(cred_id)
+    if existing is None:
+        print(f"DNS Credential '{cred_id}' not found.  Run 'dns-credentials' to see all.")
+        return 1
+    owners = dns_credential_owner_ids(cred_id)
+    print(f"Editing DNS Credential '{cred_id}'" +
+          (f" — used by {len(owners)} certificate profile(s):" if owners else " (unused):"))
+    for o in owners:
+        print(f"  - {o}")
+    print("Press Enter to keep the current value; Ctrl-C to cancel.")
+    try:
+        print("\n── DNS Provider ─────────────────────────────────────────────────────────")
+        provider = _prompt_choice("Provider", _DNS_PROVIDERS,
+                                  existing.get("dns_provider", "cloudflare"))
+        creds = _prompt_dns_credential_fields(provider, existing.get("dns_credentials") or {})
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return 0
+    try:
+        update_dns_credential(cred_id, {"dns_provider": provider, "dns_credentials": creds})
+        print(f"\nDNS Credential '{cred_id}' updated — {len(owners)} certificate profile(s) affected.")
+        return 0
+    except ValueError as exc:
+        print(f"\nError: {exc}")
+        return 1
+
+
+def cmd_rename_dns_credential(old_id: str, new_id: str) -> int:
+    if get_dns_credential(old_id) is None:
+        print(f"DNS Credential '{old_id}' not found.  Run 'dns-credentials' to see all.")
+        return 1
+    try:
+        rename_dns_credential(old_id, new_id)
+        print(f"DNS Credential renamed to '{new_id}'.")
+        return 0
+    except ValueError as exc:
+        print(f"\nError: {exc}")
+        return 1
+
+
+def cmd_delete_dns_credential(cred_id: str) -> int:
+    if get_dns_credential(cred_id) is None:
+        print(f"DNS Credential '{cred_id}' not found.  Run 'dns-credentials' to see all.")
+        return 1
+    owners = dns_credential_owner_ids(cred_id)
+    if owners:
+        print(f"This will detach {len(owners)} certificate profile(s) from DNS Credential '{cred_id}':")
+        for o in owners:
+            print(f"  - {o}")
+    try:
+        confirm = input(f"Delete DNS Credential '{cred_id}'? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if confirm != "y":
+        print("Cancelled.")
+        return 0
+    n = delete_dns_credential(cred_id)
+    print(f"DNS Credential '{cred_id}' deleted — {n} certificate profile(s) detached.")
+    return 0
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -697,9 +884,32 @@ def main() -> int:
             return 1
         return cmd_rename_profile(rest[0], rest[1])
 
+    if cmd == "dns-credentials":
+        return cmd_dns_credentials()
+
+    if cmd == "add-dns-credential":
+        return cmd_add_dns_credential()
+
+    if cmd in ("edit-dns-credential", "delete-dns-credential"):
+        if not rest:
+            print(f"Usage: cppm-servers {cmd} <dns-credential-id>")
+            print("  Use 'dns-credentials' to see all DNS Credential IDs.")
+            return 1
+        return {"edit-dns-credential": cmd_edit_dns_credential,
+                "delete-dns-credential": cmd_delete_dns_credential}[cmd](rest[0])
+
+    if cmd == "rename-dns-credential":
+        if len(rest) != 2:
+            print("Usage: cppm-servers rename-dns-credential <old-id> <new-id>")
+            print("  Use 'dns-credentials' to see all DNS Credential IDs.")
+            return 1
+        return cmd_rename_dns_credential(rest[0], rest[1])
+
     print(f"Unknown command: '{cmd}'")
     print("Available commands: list, ids, show, add, edit, delete, env, "
-          "profiles, edit-profile, rename-profile, detach-profile")
+          "profiles, edit-profile, rename-profile, detach-profile, "
+          "dns-credentials, add-dns-credential, edit-dns-credential, "
+          "rename-dns-credential, delete-dns-credential")
     return 1
 
 

@@ -35,8 +35,9 @@ _REQUIRED_BY_TYPE = {"clearpass": _REQUIRED, "linux_ssh": _REQUIRED_SSH}
 
 # ACME / DNS fields are optional as a group. All blank = ClearPass-only
 # monitoring (warning, not an error). Partly filled or invalid = error, because
-# the certificate pipeline would fail.
-_LE_DNS_FIELDS = ("domain", "acme_email", "acme_server", "dns_provider")
+# the certificate pipeline would fail. DNS credential completeness is checked
+# separately via the referenced DNS Credential (see le_dns_problems).
+_LE_DNS_FIELDS = ("domain", "acme_email", "acme_server")
 
 # DNS credential options per provider, matching entrypoint.sh validate_dns_creds.
 # Any one option with all its keys filled in is enough.
@@ -60,6 +61,7 @@ _FIELD_LABELS = {
     "acme_email":        "ACME Email",
     "acme_server":       "ACME Server",
     "dns_provider":      "DNS Provider",
+    "dns_credential_id": "DNS Credential",
     "ssh_host":          "SSH Host",
     "ssh_user":          "SSH User",
     "remote_cert_dir":   "Remote Certificate Directory",
@@ -148,19 +150,24 @@ def acme_dns_resolvers(entry: dict) -> list[str]:
 
 def le_dns_configured(entry: dict) -> bool:
     """True if any ACME / DNS field is filled in."""
-    return any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
+    return bool(str(entry.get("dns_credential_id", "")).strip()) or \
+        any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
 
 
 def le_dns_problems(entry: dict) -> list[str]:
     """Return errors for a partly filled or invalid ACME / DNS setup.
 
     Called only when le_dns_configured() is true. Checks shape and required
-    credentials, not live API access.
+    credentials (resolved through the referenced DNS Credential), not live
+    API access.
     """
     problems = []
     for field in _LE_DNS_FIELDS:
         if not str(entry.get(field, "")).strip():
             problems.append(f"{_FIELD_LABELS.get(field, field)} is required when ACME / DNS is set up.")
+    dns_credential_id = str(entry.get("dns_credential_id", "")).strip()
+    if not dns_credential_id:
+        problems.append("A DNS Credential is required when ACME / DNS is set up.")
     if problems:
         return problems
 
@@ -171,9 +178,13 @@ def le_dns_problems(entry: dict) -> list[str]:
     if acme not in ("letsencrypt", "zerossl") and not acme.startswith("https://"):
         problems.append("ACME Server must be 'letsencrypt', 'zerossl', or an https:// URL.")
 
-    provider = str(entry.get("dns_provider", "")).strip().lower()
+    credential = get_dns_credential(dns_credential_id)
+    if credential is None:
+        problems.append(f"DNS Credential '{dns_credential_id}' not found.")
+        return problems
+    provider = str(credential.get("dns_provider", "")).strip().lower()
     provider = _DNS_PROVIDER_ALIASES.get(provider, provider)
-    creds = entry.get("dns_credentials") or {}
+    creds = credential.get("dns_credentials") or {}
     if provider not in _DNS_CREDENTIAL_OPTIONS:
         # Unknown providers are allowed; credentials can't be pre-checked.
         return problems
@@ -248,14 +259,19 @@ def _check_duplicate_host(entry: dict, exclude_id: str = None) -> None:
             )
 
 
-# The ACME/DNS fields a certificate profile shares across every target that
-# references it, regardless of target_type. Used both to pull these fields
-# into a newly saved entry (_inherit_certificate_profile) and to push an
-# edited value out to every entry sharing a profile (update_certificate_profile).
+# The cert-identity fields a certificate profile shares across every target
+# that references it, regardless of target_type. DNS vendor credentials are
+# NOT part of this bundle — they live in their own reusable DNS Credential
+# entity (see "DNS Credentials" below) and are referenced by dns_credential_id,
+# since the same DNS vendor account can be shared across profiles that can
+# never share an identity (different domains/targets). Used both to pull
+# these fields into a newly saved entry (_inherit_certificate_profile) and to
+# push an edited value out to every entry sharing a profile
+# (update_certificate_profile).
 _SHARED_PROFILE_FIELDS = (
-    "domain", "san_dns", "acme_email", "acme_server",
-    "dns_provider", "dns_credentials", "cert_types",
-    "split_horizon_dns", "split_horizon_resolvers",
+    "domain", "san_dns", "acme_email", "acme_server", "dns_credential_id",
+    "cert_types", "split_horizon_dns", "split_horizon_resolvers",
+    "eab_kid", "eab_hmac_key",
 )
 
 
@@ -273,9 +289,7 @@ def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
         for field in _SHARED_PROFILE_FIELDS:
             if field in existing:
                 value = existing[field]
-                merged[field] = dict(value) if field == "dns_credentials" else (
-                    list(value) if isinstance(value, list) else value
-                )
+                merged[field] = list(value) if isinstance(value, list) else value
         return merged
     return entry
 
@@ -510,9 +524,7 @@ def update_certificate_profile(profile_id: str, fields: dict) -> int:
         for field in _SHARED_PROFILE_FIELDS:
             if field in fields:
                 value = fields[field]
-                merged[field] = dict(value) if field == "dns_credentials" else (
-                    list(value) if isinstance(value, list) else value
-                )
+                merged[field] = list(value) if isinstance(value, list) else value
         validate_server(merged)
         updated[i] = merged
 
@@ -540,7 +552,10 @@ def delete_certificate_profile(profile_id: str) -> int:
     return len(indices)
 
 
-_CERT_ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]+")
+# Shared ID-format validator for both Certificate Profile IDs and DNS
+# Credential IDs — same allowed charset, same rename/collision semantics.
+_ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]+")
+_CERT_ID_PATTERN = _ID_PATTERN  # back-compat alias
 
 
 def rename_certificate_profile(old_id: str, new_id: str) -> int:
@@ -618,6 +633,247 @@ def certificate_owner_ids() -> list[str]:
     return owners
 
 
+# ── DNS Credentials ───────────────────────────────────────────────────────────
+#
+# A DNS Credential is a reusable (provider, auth fields) pair, referenced by
+# Certificate Profiles / server entries via dns_credential_id. Unlike a
+# Certificate Profile it has no on-disk directory of its own — it's a pure
+# credential reference — so renaming/deleting it never touches the filesystem.
+
+DNS_CREDENTIALS_FILE = SERVERS_FILE.parent / "dns_credentials.json"
+
+
+def load_dns_credentials() -> dict:
+    """Return {dns_credential_id: {"dns_provider": ..., "dns_credentials": {...}}}."""
+    if not DNS_CREDENTIALS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(DNS_CREDENTIALS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_dns_credentials(creds: dict) -> None:
+    DNS_CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DNS_CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+    DNS_CREDENTIALS_FILE.chmod(0o600)
+
+
+def list_dns_credentials() -> list[dict]:
+    """Return every DNS Credential as a dict with its id included."""
+    return [
+        {"id": cred_id, **cred}
+        for cred_id, cred in sorted(load_dns_credentials().items())
+    ]
+
+
+def get_dns_credential(dns_credential_id: str) -> Optional[dict]:
+    """Return the {"dns_provider", "dns_credentials"} dict for an id, or None."""
+    dns_credential_id = str(dns_credential_id).strip()
+    if not dns_credential_id:
+        return None
+    creds = load_dns_credentials()
+    cred = creds.get(dns_credential_id)
+    return dict(cred) if cred is not None else None
+
+
+def dns_credential_owner_ids(dns_credential_id: str) -> list[str]:
+    """Return every certificate_id (profile or legacy) referencing this credential."""
+    dns_credential_id = str(dns_credential_id).strip()
+    owners: list[str] = []
+    seen: set[str] = set()
+    for server in load_servers():
+        if str(server.get("dns_credential_id", "")).strip() != dns_credential_id:
+            continue
+        profile_id = certificate_id(server)
+        if profile_id not in seen:
+            seen.add(profile_id)
+            owners.append(profile_id)
+    return owners
+
+
+def _validate_dns_credential_fields(dns_provider: str, dns_credentials: dict) -> None:
+    provider = str(dns_provider).strip().lower()
+    provider = _DNS_PROVIDER_ALIASES.get(provider, provider)
+    if not provider:
+        raise ValueError("DNS Provider is required.")
+    options = _DNS_CREDENTIAL_OPTIONS.get(provider)
+    if options is None:
+        # Unknown providers are allowed; credentials can't be pre-checked.
+        return
+    creds = dns_credentials or {}
+    if not any(all(str(creds.get(k, "")).strip() for k in opt) for opt in options):
+        wanted = " or ".join(" + ".join(opt) for opt in options)
+        raise ValueError(f"DNS credentials for {provider} are incomplete: need {wanted}.")
+
+
+def add_dns_credential(dns_credential_id: str, dns_provider: str, dns_credentials: dict) -> str:
+    """Create a new DNS Credential. Raises ValueError on invalid id/fields or collision."""
+    dns_credential_id = str(dns_credential_id).strip()
+    if not dns_credential_id:
+        raise ValueError("DNS Credential ID is required.")
+    if not _ID_PATTERN.fullmatch(dns_credential_id):
+        raise ValueError("DNS Credential ID may only contain letters, numbers, '.', '_', and '-'.")
+    _validate_dns_credential_fields(dns_provider, dns_credentials)
+    creds = load_dns_credentials()
+    if dns_credential_id in creds:
+        raise ValueError(f"'{dns_credential_id}' is already used by another DNS Credential.")
+    creds[dns_credential_id] = {
+        "dns_provider": str(dns_provider).strip().lower(),
+        "dns_credentials": dict(dns_credentials or {}),
+    }
+    _write_dns_credentials(creds)
+    return dns_credential_id
+
+
+def update_dns_credential(dns_credential_id: str, fields: dict) -> None:
+    """Update an existing DNS Credential's provider/credentials in place.
+
+    Raises ValueError if the credential doesn't exist or the merged fields
+    fail validation.
+    """
+    dns_credential_id = str(dns_credential_id).strip()
+    creds = load_dns_credentials()
+    existing = creds.get(dns_credential_id)
+    if existing is None:
+        raise ValueError("DNS Credential not found.")
+    merged = dict(existing)
+    if "dns_provider" in fields:
+        merged["dns_provider"] = str(fields["dns_provider"]).strip().lower()
+    if "dns_credentials" in fields:
+        merged["dns_credentials"] = dict(fields["dns_credentials"] or {})
+    _validate_dns_credential_fields(merged.get("dns_provider", ""), merged.get("dns_credentials", {}))
+    creds[dns_credential_id] = merged
+    _write_dns_credentials(creds)
+
+
+def delete_dns_credential(dns_credential_id: str) -> int:
+    """Delete a DNS Credential, detaching it (clears dns_credential_id) from
+    every referencing server entry — same semantics as
+    delete_certificate_profile. Returns the number of entries detached
+    (0 if the credential didn't exist)."""
+    dns_credential_id = str(dns_credential_id).strip()
+    creds = load_dns_credentials()
+    if dns_credential_id not in creds:
+        return 0
+    del creds[dns_credential_id]
+    _write_dns_credentials(creds)
+
+    servers = load_servers()
+    updated = list(servers)
+    detached = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip() != dns_credential_id:
+            continue
+        merged = dict(s)
+        merged["dns_credential_id"] = ""
+        updated[i] = merged
+        detached += 1
+    if detached:
+        _write(updated)
+    return detached
+
+
+def rename_dns_credential(old_id: str, new_id: str) -> int:
+    """Rename a DNS Credential's ID, rewriting dns_credential_id on every
+    referencing server entry. Simpler than rename_certificate_profile since
+    there's no on-disk directory to move. Returns the number of entries
+    rewritten (0 if new_id == old_id). Raises ValueError if new_id is
+    invalid, collides with an existing credential, or old_id doesn't exist.
+    """
+    old_id = str(old_id).strip()
+    new_id = str(new_id).strip()
+    if not new_id:
+        raise ValueError("DNS Credential ID is required.")
+    if not _ID_PATTERN.fullmatch(new_id):
+        raise ValueError("DNS Credential ID may only contain letters, numbers, '.', '_', and '-'.")
+    if new_id == old_id:
+        return 0
+
+    creds = load_dns_credentials()
+    if old_id not in creds:
+        raise ValueError("DNS Credential not found.")
+    if new_id in creds:
+        raise ValueError(f"'{new_id}' is already used by another DNS Credential.")
+
+    creds[new_id] = creds.pop(old_id)
+    _write_dns_credentials(creds)
+
+    servers = load_servers()
+    updated = list(servers)
+    renamed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip() != old_id:
+            continue
+        merged = dict(s)
+        merged["dns_credential_id"] = new_id
+        updated[i] = merged
+        renamed += 1
+    if renamed:
+        _write(updated)
+    return renamed
+
+
+def migrate_dns_credentials_from_servers() -> int:
+    """One-time, idempotent startup migration: extract embedded dns_provider/
+    dns_credentials fields out of servers.json entries into the DNS
+    Credentials store, replacing them with a dns_credential_id reference.
+
+    Entries that already have dns_credential_id (or neither legacy field)
+    are left alone. Entries with an identical (provider, credentials) pair
+    are deduped onto the same new DNS Credential rather than creating one
+    per entry. Run once at container startup (entrypoint.sh), right after
+    backfill_certificate_ids(), before anything else reads servers.json.
+    """
+    servers = load_servers()
+    creds = load_dns_credentials()
+    # Map a dedup key to the credential id created/reused for it in this pass.
+    by_key: dict[tuple, str] = {}
+    for cred_id, cred in creds.items():
+        key = (
+            str(cred.get("dns_provider", "")).strip().lower(),
+            tuple(sorted((cred.get("dns_credentials") or {}).items())),
+        )
+        by_key.setdefault(key, cred_id)
+
+    updated = list(servers)
+    changed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip():
+            continue
+        provider = str(s.get("dns_provider", "")).strip()
+        if not provider:
+            continue
+        cred_fields = s.get("dns_credentials") or {}
+        key = (provider.lower(), tuple(sorted(cred_fields.items())))
+        cred_id = by_key.get(key)
+        if cred_id is None:
+            base = _slugify_certificate_id(provider.lower(), default="dns-credential")
+            cred_id = base
+            n = 2
+            while cred_id in creds:
+                cred_id = f"{base}-{n}"
+                n += 1
+            creds[cred_id] = {
+                "dns_provider": provider.lower(),
+                "dns_credentials": dict(cred_fields),
+            }
+            by_key[key] = cred_id
+
+        merged = dict(s)
+        merged["dns_credential_id"] = cred_id
+        merged.pop("dns_provider", None)
+        merged.pop("dns_credentials", None)
+        updated[i] = merged
+        changed += 1
+
+    if changed:
+        _write_dns_credentials(creds)
+        _write(updated)
+    return changed
+
+
 # ── Shell environment export ───────────────────────────────────────────────────
 
 def get_server_env_dict(server_id: str) -> Optional[dict]:
@@ -630,7 +886,9 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         return None
 
     s = _resolve_target_fields(s)
-    creds = s.get("dns_credentials") or {}
+    credential = get_dns_credential(s.get("dns_credential_id", "")) or {}
+    dns_provider = str(credential.get("dns_provider", ""))
+    creds = credential.get("dns_credentials") or {}
     target_type = str(s.get("target_type", "clearpass") or "clearpass")
     is_ssh = target_type == "linux_ssh"
     env: dict[str, str] = {
@@ -640,7 +898,9 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "SAN_DNS":              "|".join(san_dns_names(s)),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),
         "ACME_SERVER":          str(s.get("acme_server",          "letsencrypt")),
-        "DNS_PROVIDER":         str(s.get("dns_provider",         "")),
+        "EAB_KID":              str(s.get("eab_kid",              "")),
+        "EAB_HMAC_KEY":         str(s.get("eab_hmac_key",         "")),
+        "DNS_PROVIDER":         dns_provider,
         "CPPM_HOST":            str(s.get("cppm_host",            "")),
         "CPPM_CLUSTER_MODE":    "true" if s.get("cppm_cluster_mode") else "false",
         "CPPM_CLIENT_ID":       str(s.get("cppm_client_id",       "")),

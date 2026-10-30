@@ -51,6 +51,9 @@ from config_utils import (
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
     list_profile_members, update_certificate_profile, delete_certificate_profile,
     rename_certificate_profile,
+    list_dns_credentials, get_dns_credential, add_dns_credential,
+    update_dns_credential, delete_dns_credential, rename_dns_credential,
+    dns_credential_owner_ids,
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
@@ -358,11 +361,12 @@ def build_server_status(server: dict) -> dict:
     tz       = _tz()
     domain   = server.get("domain", "")
     cert_dir = server_cert_dir(server)
+    dns_credential = get_dns_credential(server.get("dns_credential_id", "")) or {}
     status = {
         "id":              server.get("id", ""),
         "label":           server.get("label", domain),
         "cppm_host":       server.get("cppm_host", ""),
-        "dns_provider":    server.get("dns_provider", ""),
+        "dns_provider":    dns_credential.get("dns_provider", ""),
         "acme_server":     server.get("acme_server", ""),
         "domain":          domain,
         "callback_host":   server.get("cppm_callback_host", ""),
@@ -1128,8 +1132,9 @@ def _check_dns_provider(server: dict = None) -> dict:
     problems = le_dns_problems(server)
     if problems:
         return {"status": "error", "message": "Incomplete: " + " ".join(problems)}
-    provider = server.get("dns_provider", "")
-    _creds   = server.get("dns_credentials") or {}
+    credential = get_dns_credential(server.get("dns_credential_id", "")) or {}
+    provider = credential.get("dns_provider", "")
+    _creds   = credential.get("dns_credentials") or {}
     def g(k): return _creds.get(k, "")
     try:
         import requests as _req
@@ -1645,31 +1650,47 @@ _DNS_CRED_FIELDS: dict = {
 }
 
 
-def _parse_shared_acme_fields(f: dict) -> dict:
-    """Parse the ACME/DNS fields a certificate profile shares across targets.
+def _parse_identity_fields(f: dict) -> dict:
+    """Parse the cert-identity fields a certificate profile shares across targets.
 
     Mirrors config_utils._SHARED_PROFILE_FIELDS — used by both server-form
     parsers below and by the certificate-profile editor, which posts the
-    same field names via _acme_dns_fields_html.
+    same field names via _identity_fields_html. DNS vendor credentials are
+    parsed separately by _parse_dns_credential_fields, since they're no
+    longer part of a certificate profile's own fields.
     """
-    provider  = f.get("dns_provider", "cloudflare")
-    cred_keys = _DNS_CRED_FIELDS.get(provider, [])
-    if f.get("acme_server", "letsencrypt") == "zerossl":
-        cred_keys = [*cred_keys, "EAB_KID", "EAB_HMAC_KEY"]
     acme_sel    = f.get("acme_server", "letsencrypt")
     acme_server = f.get("acme_server_url", "").strip() if acme_sel == "custom" else acme_sel
     san_dns     = [f.get(f"san_dns_{i}", "").strip().lower() for i in range(1, 11)]
-    return {
+    fields = {
         "domain":           f.get("domain", "").strip(),
         "san_dns":          [name for name in san_dns if name],
         "acme_email":       f.get("acme_email", "").strip(),
         "acme_server":      acme_server or "letsencrypt",
-        "dns_provider":     provider,
-        "dns_credentials":  {k: f.get(k, "") for k in cred_keys},
+        "dns_credential_id": f.get("dns_credential_id", "").strip(),
         "cert_types": [t for t in ("https_ecc", "https_rsa", "radius", "radsec")
                  if f.get(f"issue_{t}") == "true"] or ["https_ecc", "https_rsa", "radius", "radsec"],
         "split_horizon_dns": f.get("split_horizon_dns", "") == "true",
         "split_horizon_resolvers": [r for r in re.split(r"[,\s]+", f.get("split_horizon_resolvers", "")) if r],
+    }
+    if acme_server == "zerossl":
+        fields["eab_kid"] = f.get("EAB_KID", "").strip()
+        fields["eab_hmac_key"] = f.get("EAB_HMAC_KEY", "")
+    return fields
+
+
+def _parse_dns_credential_fields(f: dict) -> dict:
+    """Parse the DNS provider + vendor credential fields from a form POST.
+
+    Used by the DNS Credential form's POST handler, and by
+    _parse_server_form for a non-profiled server entry that's creating its
+    DNS Credential inline rather than picking an existing one.
+    """
+    provider  = f.get("dns_provider", "cloudflare")
+    cred_keys = _DNS_CRED_FIELDS.get(provider, [])
+    return {
+        "dns_provider":    provider,
+        "dns_credentials": {k: f.get(k, "") for k in cred_keys},
     }
 
 
@@ -1684,7 +1705,7 @@ def _parse_ssh_server_form(f: dict) -> dict:
         "label":          f.get("label", "").strip(),
         "target_type":    "linux_ssh",
         "certificate_id": f.get("certificate_id", "").strip(),
-        **_parse_shared_acme_fields(f),
+        **_parse_identity_fields(f),
         "target_config": {
             "ssh_host":         f.get("ssh_host", "").strip(),
             "ssh_port":         f.get("ssh_port", "22").strip() or "22",
@@ -1713,7 +1734,7 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_cert_passphrase": f.get("cppm_cert_passphrase", ""),
         "cppm_callback_host":   f.get("cppm_callback_host", "").strip(),
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
-        **_parse_shared_acme_fields(f),
+        **_parse_identity_fields(f),
     }
 
 
@@ -1736,8 +1757,9 @@ def _default_server_from_env() -> dict:
         "san_dns":              [],
         "acme_email":           "",
         "acme_server":          "letsencrypt",
-        "dns_provider":         "cloudflare",
-        "dns_credentials":      {},
+        "dns_credential_id":    "",
+        "eab_kid":              "",
+        "eab_hmac_key":         "",
         "cert_types":           ["https_ecc", "https_rsa", "radius", "radsec"],
         "split_horizon_dns":    False,
         "split_horizon_resolvers": [],
@@ -3076,7 +3098,7 @@ def _settings_list_page(servers: list, username: str,
             label  = _esc(s.get("label", ""))
             host   = _esc(s.get("cppm_host", ""))
             domain = _esc(s.get("domain", ""))
-            prov   = _esc(s.get("dns_provider", ""))
+            prov   = _esc((get_dns_credential(s.get("dns_credential_id", "")) or {}).get("dns_provider", ""))
             acme   = _esc(s.get("acme_server", "letsencrypt"))
             profile_id = str(s.get("certificate_id", "")).strip()
             if profile_id:
@@ -3202,26 +3224,25 @@ document.addEventListener('click', function(ev) {
                  nav_user=username, active="settings", show_nav=True)
 
 
-def _acme_dns_fields_html(values: dict, disabled: bool = False) -> str:
-    """Render the ACME Provider + DNS Provider + Advanced (split-horizon) cards.
+def _identity_fields_html(values: dict, disabled: bool = False) -> str:
+    """Render the ACME Provider + Advanced (split-horizon) cards.
 
-    This is exactly the field set a certificate profile shares across targets
-    (config_utils._SHARED_PROFILE_FIELDS), so it's used both embedded in the
-    per-server Add/Edit form and standalone on the certificate-profile editor
-    — one implementation, so the two pages can never drift apart.
+    This is exactly the cert-identity field set a certificate profile shares
+    across targets (config_utils._SHARED_PROFILE_FIELDS minus
+    dns_credential_id), so it's used both embedded in the per-server Add/Edit
+    form and standalone on the certificate-profile editor — one
+    implementation, so the two pages can never drift apart. DNS vendor
+    credentials are rendered separately by _dns_credential_fields_html.
 
     disabled=True wraps the fields in a disabled <fieldset> — used by the
     per-server edit form when this target shares a profile with another
     target, so a shared value can't be silently clobbered by editing it here
     instead of on the profile (see _settings_form_page).
     """
-    s     = values
-    creds = s.get("dns_credentials", {}) or {}
+    s = values
 
-    def cv(k, d=""):  return _esc(str(creds.get(k, d)))
     def fv(k, d=""):  return _esc(str(s.get(k, d)))
     def sel(v, t):    return " selected" if v == t else ""
-    def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
 
     acme_srv_raw = s.get("acme_server", "letsencrypt")
     acme_is_custom = acme_srv_raw.startswith("http")
@@ -3277,11 +3298,11 @@ def _acme_dns_fields_html(values: dict, disabled: bool = False) -> str:
         <div class="form-2col">
           <div class="field">
             <label>EAB KID</label>
-            <input type="text" name="EAB_KID" id="EAB_KID" class="cert-shared" value="{cv('EAB_KID')}" autocomplete="off">
+            <input type="text" name="EAB_KID" id="EAB_KID" class="cert-shared" value="{fv('eab_kid')}" autocomplete="off">
           </div>
           <div class="field">
             <label>EAB HMAC Key</label>
-            <input type="password" name="EAB_HMAC_KEY" id="EAB_HMAC_KEY" class="cert-shared" value="{cv('EAB_HMAC_KEY')}" autocomplete="new-password">
+            <input type="password" name="EAB_HMAC_KEY" id="EAB_HMAC_KEY" class="cert-shared" value="{fv('eab_hmac_key')}" autocomplete="new-password">
           </div>
         </div>
       </div>
@@ -3323,8 +3344,42 @@ def _acme_dns_fields_html(values: dict, disabled: bool = False) -> str:
              RadSec <span class="hint">— RADIUS over TLS</span>
         </label>
       </div>
-    </div>
+      <details style="margin-top:1rem"{" open" if split_on else ""}>
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
+        <div class="field" style="margin:0.75rem 0 0">
+          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+            <input type="checkbox" name="split_horizon_dns" id="split_horizon_dns" class="cert-shared" value="true"{chk_split}
+                   style="width:auto;margin:0" onchange="toggleSplitHorizon(this.checked)">
+            This domain also exists on my internal DNS (split-horizon){_help_toggle('split_horizon', 'Check this if your internal DNS server has its own copy of this domain &mdash; common with Active Directory. Certificate validation will then check <strong>public</strong> DNS instead of your internal DNS.<br><br>This does not replace the Docker <code>dns:</code> setting: the container still uses that to reach ClearPass. This only changes where the certificate challenge is checked. Leave it unchecked if you are not sure &mdash; the dashboard warns you if it is needed.')}
+          </label>
+        </div>
+        <div class="field" id="split-horizon-resolvers" style="margin:0.75rem 0 0{"" if split_on else ";display:none"}">
+          <label>Custom public resolvers <span class="hint">(optional &mdash; default 1.1.1.1, 8.8.8.8; only needed if those are blocked)</span></label>
+          <input type="text" name="split_horizon_resolvers" class="cert-shared" value="{split_resolvers}"
+                 placeholder="1.1.1.1, 8.8.8.8" autocomplete="off">
+        </div>
+      </details>
+    </div>'''
+    if disabled:
+        return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
+    return html
 
+
+def _dns_credential_fields_html(values: dict, disabled: bool = False) -> str:
+    """Render the DNS Provider card (provider dropdown + per-provider fields).
+
+    Markup is unchanged from the original combined _acme_dns_fields_html —
+    only now standalone, reused by both the Add/Edit Server form's DNS
+    Credential picker ("create inline") and the DNS Credential form itself.
+    """
+    s     = values
+    creds = s.get("dns_credentials", {}) or {}
+
+    def cv(k, d=""):  return _esc(str(creds.get(k, d)))
+    def sel(v, t):    return " selected" if v == t else ""
+    def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
+
+    html = f'''
     <div class="card" style="margin-bottom:1.5rem">
       <div class="form-section-title">DNS Provider</div>
       <div class="field">
@@ -3499,22 +3554,46 @@ def _acme_dns_fields_html(values: dict, disabled: bool = False) -> str:
                  value="{cv('RFC2136_DNS_TIMEOUT', '10')}" autocomplete="off">
         </div>
       </div>
+    </div>'''
+    if disabled:
+        return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
+    return html
 
-      <details style="margin-top:1rem"{" open" if split_on else ""}>
-        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
-        <div class="field" style="margin:0.75rem 0 0">
-          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-            <input type="checkbox" name="split_horizon_dns" id="split_horizon_dns" class="cert-shared" value="true"{chk_split}
-                   style="width:auto;margin:0" onchange="toggleSplitHorizon(this.checked)">
-            This domain also exists on my internal DNS (split-horizon){_help_toggle('split_horizon', 'Check this if your internal DNS server has its own copy of this domain &mdash; common with Active Directory. Certificate validation will then check <strong>public</strong> DNS instead of your internal DNS.<br><br>This does not replace the Docker <code>dns:</code> setting: the container still uses that to reach ClearPass. This only changes where the certificate challenge is checked. Leave it unchecked if you are not sure &mdash; the dashboard warns you if it is needed.')}
-          </label>
-        </div>
-        <div class="field" id="split-horizon-resolvers" style="margin:0.75rem 0 0{"" if split_on else ";display:none"}">
-          <label>Custom public resolvers <span class="hint">(optional &mdash; default 1.1.1.1, 8.8.8.8; only needed if those are blocked)</span></label>
-          <input type="text" name="split_horizon_resolvers" class="cert-shared" value="{split_resolvers}"
-                 placeholder="1.1.1.1, 8.8.8.8" autocomplete="off">
-        </div>
-      </details>
+
+def _dns_credential_select_html(selected_id: str, disabled: bool = False) -> str:
+    """Render a <select name="dns_credential_id"> populated from existing DNS
+    Credentials, plus a link to manage them. Used by the Certificate Profile
+    form and the Add/Edit Server form in place of the old inline DNS
+    Provider card.
+    """
+    creds = list_dns_credentials()
+    selected_id = str(selected_id or "").strip()
+    if creds:
+        opts = "".join(
+            f'<option value="{_esc(c["id"])}"{" selected" if c["id"] == selected_id else ""}>'
+            f'{_esc(c["id"])} ({_esc(c.get("dns_provider", ""))})</option>'
+            for c in creds
+        )
+        empty_opt = '<option value="">— Select a DNS Credential —</option>' if not selected_id else ""
+        select_html = (
+            f'<select name="dns_credential_id" id="dns_credential_id" class="cert-shared">'
+            f'{empty_opt}{opts}</select>'
+        )
+    else:
+        select_html = (
+            '<select name="dns_credential_id" id="dns_credential_id" class="cert-shared">'
+            '<option value="">— No DNS Credentials yet —</option></select>'
+        )
+    html = f'''
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="form-section-title">DNS Credential</div>
+      <div class="field" style="margin-bottom:0">
+        <label>DNS Credential</label>
+        {select_html}
+        <p class="hint" style="margin:0.4rem 0 0">
+          <a href="/settings/dns-credentials" target="_blank" style="color:var(--accent)">Manage DNS Credentials</a>
+        </p>
+      </div>
     </div>'''
     if disabled:
         return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
@@ -3539,7 +3618,8 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
             pid     = str(p.get("certificate_id", "")).strip()
             pid_esc = _esc(pid)
             domain  = _esc(p.get("domain", ""))
-            prov    = _esc(p.get("dns_provider", ""))
+            cred_id = str(p.get("dns_credential_id", "")).strip()
+            prov    = _esc((get_dns_credential(cred_id) or {}).get("dns_provider", "") or cred_id)
             acme    = _esc(p.get("acme_server", "letsencrypt"))
             members = list_profile_members(pid)
             members_html = "<br>".join(
@@ -3624,7 +3704,8 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
     </form>
   </div>
   <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}">
-    {_acme_dns_fields_html(values)}
+    {_identity_fields_html(values)}
+    {_dns_credential_select_html(values.get("dns_credential_id", ""))}
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
       <a href="/settings/profiles" class="btn btn-ghost">Cancel</a>
       <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -3632,11 +3713,6 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
   </form>
 </div>
 <script>
-function switchDns(val) {{
-  document.querySelectorAll('.dns-section').forEach(function(el) {{ el.style.display = 'none'; }});
-  var active = document.getElementById('dns-' + val);
-  if (active) active.style.display = '';
-}}
 function switchAcme(val) {{
   document.getElementById('acme-eab-section').style.display = (val === 'zerossl') ? '' : 'none';
   document.getElementById('acme-custom-section').style.display = (val === 'custom') ? '' : 'none';
@@ -3649,13 +3725,169 @@ function toggleSplitHorizon(on) {{
                  nav_user=username, active="profiles", show_nav=True)
 
 
+def _dns_credential_list_page(username: str, flash_type: str = "", flash_msg: str = "") -> str:
+    flash_html = ""
+    if flash_msg:
+        flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+
+    creds = list_dns_credentials()
+    if not creds:
+        rows = ('<tr><td colspan="3"><div class="empty">'
+                'No DNS Credentials yet.&nbsp; '
+                '<a href="/settings/dns-credentials/new" style="color:var(--accent)">Add one</a> '
+                'to reuse a DNS vendor account across multiple Certificate Profiles.'
+                '</div></td></tr>')
+    else:
+        rows = ""
+        for c in creds:
+            cid     = str(c.get("id", "")).strip()
+            cid_esc = _esc(cid)
+            prov    = _esc(c.get("dns_provider", ""))
+            owners  = dns_credential_owner_ids(cid)
+            owners_html = "<br>".join(_esc(o) for o in owners) or '<span class="hint">(unused)</span>'
+            rows += (
+                f'<tr>'
+                f'<td style="font-family:monospace;font-size:0.78rem">{cid_esc}</td>'
+                f'<td>{prov}</td>'
+                f'<td style="font-size:0.78rem">{owners_html}</td>'
+                f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/dns-credentials/edit/{cid_esc}" class="btn btn-ghost">Edit</a> '
+                f'<form method="POST" action="/settings/dns-credentials/{cid_esc}/delete" style="display:inline"'
+                f' onsubmit="return confirm(\'Delete DNS Credential \\\'{cid_esc}\\\'? '
+                f'{len(owners)} certificate profile(s) will be detached from it.\')">'
+                f'<button type="submit" class="btn btn-danger">Delete</button>'
+                f'</form>'
+                f'</td>'
+                f'</tr>'
+            )
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">DNS Credentials</span>
+    <a href="/settings/dns-credentials/new" class="btn btn-primary">+ Add DNS Credential</a>
+  </div>
+  {flash_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    A DNS Credential is a reusable DNS vendor account (e.g. a Cloudflare API token) that any
+    number of Certificate Profiles or servers can point at via its DNS Credential ID.
+  </p>
+  <div class="card" style="overflow-x:auto">
+    <table class="settings-table" style="min-width:40rem">
+      <thead><tr>
+        <th>DNS Credential</th><th>Provider</th><th>Used by</th><th></th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>"""
+    return _base("DNS Credentials", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _dns_credential_form_page(cred_id: str, values: dict, error: str = "",
+                              username: str = "") -> str:
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    is_edit = bool(cred_id)
+    owners = dns_credential_owner_ids(cred_id) if is_edit else []
+
+    existing_ids_json = json.dumps([c["id"] for c in list_dns_credentials()])
+    id_field_html = (
+        f'<input type="hidden" name="dns_credential_id" value="{_esc(cred_id)}">'
+        if is_edit else
+        f'''<div class="field" style="margin-bottom:0">
+            <label>DNS Credential ID</label>
+            <input type="text" name="dns_credential_id" id="dns_credential_id_input" required
+                   placeholder="e.g. cloudflare-main" pattern="[A-Za-z0-9_.\\-]+"
+                   oninput="checkDnsCredentialIdConflict(this.value)" onblur="checkDnsCredentialIdConflict(this.value)">
+            <p id="dns-credential-id-notice" class="hint" style="display:none;color:var(--warn,#b45309);margin:0.4rem 0 0"></p>
+          </div>
+          <script>window.DNS_CREDENTIAL_IDS = {existing_ids_json};</script>'''
+    )
+
+    rename_html = ""
+    if is_edit:
+        rename_html = f"""
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Rename DNS Credential</div>
+    <form method="POST" action="/settings/dns-credentials/{_esc(cred_id)}/rename"
+          onsubmit="return confirm('Rename DNS Credential \\'{_esc(cred_id)}\\'?')"
+          style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin-bottom:0;flex:1;min-width:16rem">
+        <label>DNS Credential ID</label>
+        <input type="text" name="new_id" value="{_esc(cred_id)}" required
+               placeholder="e.g. cloudflare-main" pattern="[A-Za-z0-9_.\\-]+">
+      </div>
+      <button type="submit" class="btn btn-warn">Rename</button>
+    </form>
+  </div>"""
+
+    owners_html = ""
+    if is_edit:
+        owners_list = "".join(f'<li>{_esc(o)}</li>' for o in owners) or '<li class="hint">(none)</li>'
+        owners_html = f"""
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Used by</div>
+    <ul style="margin:0;padding-left:1.2rem;font-size:0.82rem">{owners_list}</ul>
+    <p class="hint" style="margin:0.6rem 0 0">
+      Saving below updates these {len(owners)} certificate profile(s) at once.
+    </p>
+  </div>"""
+
+    action = f'/settings/dns-credentials/edit/{_esc(cred_id)}' if is_edit else '/settings/dns-credentials/new'
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">{"Edit" if is_edit else "Add"} DNS Credential</span>
+    <a href="/settings/dns-credentials" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  {owners_html}
+  {rename_html}
+  <form method="POST" action="{action}">
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="form-section-title">DNS Credential ID</div>
+      {id_field_html}
+    </div>
+    {_dns_credential_fields_html(values)}
+    <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
+      <a href="/settings/dns-credentials" class="btn btn-ghost">Cancel</a>
+      <button type="submit" class="btn btn-primary">Save Changes</button>
+    </div>
+  </form>
+</div>
+<script>
+function switchDns(val) {{
+  document.querySelectorAll('.dns-section').forEach(function(el) {{
+    var active = el.id === 'dns-' + val;
+    el.style.display = active ? '' : 'none';
+    el.querySelectorAll('input').forEach(function(inp) {{ inp.disabled = !active; }});
+  }});
+}}
+switchDns(document.getElementById('dns_provider').value);
+function checkDnsCredentialIdConflict(value) {{
+  var notice = document.getElementById('dns-credential-id-notice');
+  if (!notice) return;
+  if (value && (window.DNS_CREDENTIAL_IDS || []).indexOf(value) !== -1) {{
+    notice.style.display = '';
+    notice.textContent = "'" + value + "' is already used by another DNS Credential — " +
+      'saving will fail. Choose a different ID or edit that credential instead.';
+  }} else {{
+    notice.style.display = 'none';
+  }}
+}}
+</script>"""
+    return _base("DNS Credential", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
 def _settings_form_page(server: dict = None, error: str = "",
                         is_edit: bool = False, username: str = "") -> str:
     if server is None:
         server = _default_server_from_env()
 
     s       = _resolve_target_fields(server)
-    creds   = s.get("dns_credentials", {})
     sid     = _esc(str(s.get("id", "")))
     action  = f'/settings/edit/{sid}' if is_edit else '/settings/add'
     title   = "Edit Server" if is_edit else "Add Server"
@@ -3673,7 +3905,10 @@ def _settings_form_page(server: dict = None, error: str = "",
         [m for m in list_profile_members(profile_id) if m.get("id") != s.get("id")]
         if is_edit and profile_id else []
     )
-    acme_dns_fields_html = _acme_dns_fields_html(s, disabled=bool(siblings))
+    acme_dns_fields_html = (
+        _identity_fields_html(s, disabled=bool(siblings))
+        + _dns_credential_select_html(s.get("dns_credential_id", ""), disabled=bool(siblings))
+    )
     shared_profile_notice = ""
     if siblings:
         shared_profile_notice = f'''
@@ -3710,8 +3945,9 @@ def _settings_form_page(server: dict = None, error: str = "",
             "san_dns":          p.get("san_dns") or [],
             "acme_email":       p.get("acme_email", ""),
             "acme_server":      p.get("acme_server", ""),
-            "dns_provider":     p.get("dns_provider", ""),
-            "dns_credentials":  p.get("dns_credentials") or {},
+            "dns_credential_id": p.get("dns_credential_id", ""),
+            "eab_kid":          p.get("eab_kid", ""),
+            "eab_hmac_key":     p.get("eab_hmac_key", ""),
             "cert_types":       p.get("cert_types") or [],
             "split_horizon_dns": bool(p.get("split_horizon_dns")),
             "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
@@ -4049,15 +4285,6 @@ function runSshTest() {
     res.style.display = 'block';
   });
 }
-function switchDns(val) {
-  document.querySelectorAll('.dns-section').forEach(function(el) {
-    var active = el.id === 'dns-' + val;
-    el.style.display = active ? '' : 'none';
-    el.querySelectorAll('input').forEach(function(inp) {
-      inp.disabled = !active;
-    });
-  });
-}
 function switchAcme(val) {
   var sec = document.getElementById('acme-custom-section');
   var urlInput = document.getElementById('acme_server_url');
@@ -4087,8 +4314,9 @@ function applyCertProfile(value) {
       var san = document.querySelector('[name="san_dns_' + i + '"]');
       if (san) san.value = '';
     }
-    document.querySelectorAll('.dns-section input').forEach(function(el) { el.value = ''; });
     document.getElementById('acme_server_url').value = '';
+    var credSel = document.getElementById('dns_credential_id');
+    if (credSel) credSel.value = '';
     ['issue_https_ecc', 'issue_https_rsa', 'issue_radius', 'issue_radsec'].forEach(function(name) {
       var el = document.querySelector('[name="' + name + '"]');
       if (el) el.checked = true;
@@ -4097,7 +4325,6 @@ function applyCertProfile(value) {
     document.querySelector('[name="split_horizon_resolvers"]').value = '';
     toggleSplitHorizon(false);
     setSharedFieldsDisabled(false);
-    switchDns(document.getElementById('dns_provider').value);
     switchAcme(document.getElementById('acme_server').value);
     if (notice) notice.style.display = 'none';
     return;
@@ -4116,17 +4343,10 @@ function applyCertProfile(value) {
   var acmeSel = rawAcme.indexOf('http') === 0 ? 'custom' : rawAcme;
   document.getElementById('acme_server').value = acmeSel;
   document.getElementById('acme_server_url').value = acmeSel === 'custom' ? rawAcme : '';
-  var creds = p.dns_credentials || {};
-  document.getElementById('EAB_KID').value = creds.EAB_KID || '';
-  document.getElementById('EAB_HMAC_KEY').value = creds.EAB_HMAC_KEY || '';
-  var dnsProv = p.dns_provider || 'cloudflare';
-  document.getElementById('dns_provider').value = dnsProv;
-  document.querySelectorAll('.dns-section input').forEach(function(el) { el.value = ''; });
-  Object.keys(creds).forEach(function(k) {
-    if (k === 'EAB_KID' || k === 'EAB_HMAC_KEY') return;
-    var el = document.querySelector('.dns-section [name="' + k + '"]');
-    if (el) el.value = creds[k];
-  });
+  document.getElementById('EAB_KID').value = p.eab_kid || '';
+  document.getElementById('EAB_HMAC_KEY').value = p.eab_hmac_key || '';
+  var credSel2 = document.getElementById('dns_credential_id');
+  if (credSel2) credSel2.value = p.dns_credential_id || '';
   var types = (p.cert_types || []).slice();
   if (types.indexOf('ecc') !== -1) types.push('https_ecc');
   if (types.indexOf('rsa') !== -1) { types.push('radius'); types.push('radsec'); }
@@ -4137,7 +4357,6 @@ function applyCertProfile(value) {
   document.getElementById('split_horizon_dns').checked = !!p.split_horizon_dns;
   document.querySelector('[name="split_horizon_resolvers"]').value = (p.split_horizon_resolvers || []).join(', ');
   toggleSplitHorizon(!!p.split_horizon_dns);
-  switchDns(dnsProv);
   switchAcme(acmeSel);
   setSharedFieldsDisabled(true);
   if (notice) {
@@ -4170,7 +4389,6 @@ function suggestCertId() {
   checkCertIdConflict(idInput.value);
 }
 (function() {
-  switchDns(document.getElementById('dns_provider').value);
   switchAcme(document.getElementById('acme_server').value);
   switchTargetType(document.getElementById('target_type').value);
   updateConfigureHelper();
@@ -5599,6 +5817,26 @@ class Handler(BaseHTTPRequestHandler):
                 _profile_form_page(profile_id, members[0], username=username)
             )
 
+        if path == "/settings/dns-credentials":
+            qs    = parse_qs(urlparse(self.path).query)
+            ftype = qs.get("ft", [""])[0]
+            fmsg  = qs.get("fm", [""])[0]
+            return self._serve_html(_dns_credential_list_page(username, ftype, fmsg))
+
+        if path == "/settings/dns-credentials/new":
+            return self._serve_html(
+                _dns_credential_form_page("", {}, username=username)
+            )
+
+        if path.startswith("/settings/dns-credentials/edit/"):
+            cred_id = path[len("/settings/dns-credentials/edit/"):].strip("/")
+            credential = get_dns_credential(cred_id)
+            if credential is None:
+                return self._redirect("/settings/dns-credentials?ft=err&fm=DNS+Credential+not+found")
+            return self._serve_html(
+                _dns_credential_form_page(cred_id, credential, username=username)
+            )
+
         if path == "/settings/traefik":
             return self._serve_html(
                 _traefik_page(get_traefik_config(), username=username)
@@ -5694,6 +5932,16 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_profile_rename(profile_id)
         elif path.startswith("/settings/profiles/edit/"):
             self._handle_profile_edit(path[len("/settings/profiles/edit/"):].strip("/"))
+        elif path == "/settings/dns-credentials/new":
+            self._handle_dns_credential_add()
+        elif path.startswith("/settings/dns-credentials/") and path.endswith("/delete"):
+            cred_id = path[len("/settings/dns-credentials/"):-len("/delete")].strip("/")
+            self._handle_dns_credential_delete(cred_id)
+        elif path.startswith("/settings/dns-credentials/") and path.endswith("/rename"):
+            cred_id = path[len("/settings/dns-credentials/"):-len("/rename")].strip("/")
+            self._handle_dns_credential_rename(cred_id)
+        elif path.startswith("/settings/dns-credentials/edit/"):
+            self._handle_dns_credential_edit(path[len("/settings/dns-credentials/edit/"):].strip("/"))
         elif path.startswith("/settings/run/"):
             self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
         elif path.startswith("/settings/upload/"):
@@ -5974,7 +6222,7 @@ class Handler(BaseHTTPRequestHandler):
         if not username:
             return self._redirect("/login")
         f      = self._parse_form()
-        fields = _parse_shared_acme_fields(f)
+        fields = _parse_identity_fields(f)
         try:
             n = update_certificate_profile(profile_id, fields)
             _log.info("settings: '%s' updated certificate profile '%s' (%d target(s))",
@@ -6020,6 +6268,75 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(f"/settings/profiles?ft=ok&fm={n}+target(s)+detached.")
         else:
             self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
+
+    def _handle_dns_credential_add(self):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f       = self._parse_form()
+        cred_id = f.get("dns_credential_id", "").strip()
+        fields  = _parse_dns_credential_fields(f)
+        try:
+            add_dns_credential(cred_id, fields["dns_provider"], fields["dns_credentials"])
+            _log.info("settings: '%s' created DNS credential '%s'", username, cred_id)
+            self._redirect(f"/settings/dns-credentials/edit/{cred_id}?ft=ok&fm=DNS+Credential+created.")
+        except Exception as e:
+            _log.error("settings: DNS credential add '%s' failed: %s\n%s",
+                       cred_id, e, traceback.format_exc())
+            self._serve_html(
+                _dns_credential_form_page(cred_id, fields, str(e), username=username)
+            )
+
+    def _handle_dns_credential_edit(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f      = self._parse_form()
+        fields = _parse_dns_credential_fields(f)
+        try:
+            update_dns_credential(cred_id, fields)
+            n = len(dns_credential_owner_ids(cred_id))
+            _log.info("settings: '%s' updated DNS credential '%s' (%d profile(s))",
+                      username, cred_id, n)
+            self._redirect(f"/settings/dns-credentials?ft=ok&fm=DNS+Credential+updated.")
+        except Exception as e:
+            _log.error("settings: DNS credential edit '%s' failed: %s\n%s",
+                       cred_id, e, traceback.format_exc())
+            self._serve_html(
+                _dns_credential_form_page(cred_id, fields, str(e), username=username)
+            )
+
+    def _handle_dns_credential_rename(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f      = self._parse_form()
+        new_id = f.get("new_id", "").strip()
+        try:
+            rename_dns_credential(cred_id, new_id)
+            _log.info("settings: '%s' renamed DNS credential '%s' -> '%s'",
+                      username, cred_id, new_id)
+            self._redirect(f"/settings/dns-credentials/edit/{new_id or cred_id}?ft=ok&fm=DNS+Credential+renamed.")
+        except Exception as e:
+            _log.error("settings: DNS credential rename '%s' -> '%s' failed: %s\n%s",
+                       cred_id, new_id, e, traceback.format_exc())
+            credential = get_dns_credential(cred_id) or {}
+            self._serve_html(
+                _dns_credential_form_page(cred_id, credential, str(e), username=username)
+            )
+
+    def _handle_dns_credential_delete(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        existed = get_dns_credential(cred_id) is not None
+        n = delete_dns_credential(cred_id)
+        if existed:
+            _log.info("settings: '%s' deleted DNS credential '%s' (%d profile(s) detached)",
+                      username, cred_id, n)
+            self._redirect(f"/settings/dns-credentials?ft=ok&fm=DNS+Credential+deleted.")
+        else:
+            self._redirect("/settings/dns-credentials?ft=err&fm=DNS+Credential+not+found")
 
     def _handle_settings_run(self, server_id: str):
         username = self._get_session_user()

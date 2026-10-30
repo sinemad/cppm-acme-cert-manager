@@ -89,6 +89,17 @@ if [[ "$BACKFILL_COUNT" -gt 0 ]] 2>/dev/null; then
     log "  Assigned certificate profile IDs to $BACKFILL_COUNT existing server(s)."
 fi
 
+# ── Extract embedded DNS credentials into the reusable DNS Credential store ──
+DNS_CRED_MIGRATE_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import migrate_dns_credentials_from_servers
+print(migrate_dns_credentials_from_servers())
+" 2>/dev/null || echo "0")
+if [[ "$DNS_CRED_MIGRATE_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Extracted DNS credentials into dns_credentials.json for $DNS_CRED_MIGRATE_COUNT existing server(s)."
+fi
+
 # ── Load server IDs from servers.json ─────────────────────────────────────────
 SERVER_IDS=$(python3 -c "
 import sys
