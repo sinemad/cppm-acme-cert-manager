@@ -24,6 +24,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Profile ID across every target that shares it, and moves the on-disk
   certificate directory to match, so already-issued certificates and Lego
   account state are kept rather than triggering a fresh issuance.
+- Linux SSH target's Private Key field (web and CLI) now shows inline
+  best-practice guidance to generate a dedicated deploy keypair rather than
+  reusing a personal SSH key, with the `ssh-keygen` command and account
+  scoping steps.
 - Linux SSH target: a new `linux_ssh` target type that deploys issued
   certificates to any Linux server over SSH (Apache, nginx, Frigate, Docker
   containers, etc.) and runs a configurable reload command — no agent
@@ -47,6 +51,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - `openssh-client` and `sshpass` added to the container image for the Linux
   SSH target's SSH/SCP/password-auth support.
+- Linux SSH target's suggested `remote_cert_dir` (form placeholder, CLI hint,
+  docs, Test Connection's remediation commands) changed from
+  `/etc/ssl/cppm-acme` to `/opt/acme-deploy/certs` — `/etc` is conventionally
+  root-owned host config, not a location a low-privilege unattended deploy
+  account should write to. Apache/nginx config directives accept any
+  readable path, so this doesn't require a code change; docs note an
+  optional one-time symlink into `/etc/ssl/...` for sites that want certs
+  discoverable at the conventional path.
+- Suggested deploy-key filename, SSH key comment, and sudoers rule name
+  (web, CLI, docs) renamed from `cppm-deploy-key`/`cppm-acme-*` to
+  `acme-deploy-key`/`acme-deploy` — these are example names written onto
+  *target* Linux servers, and `cppm` is ClearPass-specific, not meaningful
+  for non-ClearPass targets (Frigate, generic Docker, etc.) or in light of
+  an eventual project rename. The container/CLI command names
+  (`cppm-acme-cert-manager`, `cppm-servers`) are unchanged for now — that's
+  a separate, larger rename tracked for later.
 
 ## [2.2.0] - 2026-10-19
 

@@ -3902,6 +3902,20 @@ def _settings_form_page(server: dict = None, error: str = "",
         <textarea name="ssh_private_key" id="ssh_private_key" rows="4" style="font-family:monospace;font-size:0.78rem"
                   placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
                   autocomplete="off">{fv('ssh_private_key')}</textarea>
+        <details style="margin:0.5rem 0 0">
+          <summary style="cursor:pointer;font-size:0.78rem;color:var(--muted)">Best practice: use a dedicated deploy key, not your personal SSH key</summary>
+          <div class="hint" style="margin-top:0.5rem;line-height:1.5">
+            Generate a key just for this tool, so a leaked <code>servers.json</code> can't be
+            used to reach anything else:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"</pre>
+            Create a low-privilege account on the target (not root), add only
+            <code>acme-deploy-key.pub</code> to its <code>authorized_keys</code>, and scope it
+            to just the certificate directory above — plus a narrow <code>sudoers</code> rule
+            below if the reload command needs elevation. Paste the private half
+            (<code>acme-deploy-key</code>, no passphrase — this runs unattended) into the field
+            above.
+          </div>
+        </details>
       </div>
       <div class="field">
         <label>Password <span class="hint">(fallback — only used if no private key is set)</span></label>
@@ -3910,7 +3924,7 @@ def _settings_form_page(server: dict = None, error: str = "",
       <div class="field">
         <label>Remote Certificate Directory</label>
         <input type="text" name="remote_cert_dir" id="remote_cert_dir" value="{fv('remote_cert_dir')}"
-               placeholder="/etc/ssl/cppm-acme" oninput="updateConfigureHelper()">
+               placeholder="/opt/acme-deploy/certs" oninput="updateConfigureHelper()">
         <div class="hint">The certificate will be written here as <code>fullchain.pem</code> and <code>privkey.pem</code>.</div>
       </div>
       <details style="margin:0.75rem 0">
@@ -3986,7 +4000,7 @@ function updateConfigureHelper() {
   var svcEl = document.getElementById('configure_helper_service');
   var dirEl = document.getElementById('remote_cert_dir');
   if (!svcEl || !dirEl) return;
-  var dir = dirEl.value || '/etc/ssl/cppm-acme';
+  var dir = dirEl.value || '/opt/acme-deploy/certs';
   var cfg = CONFIGURE_HELPER_SNIPPETS[svcEl.value];
   if (!cfg) return;
   document.getElementById('configure_helper_snippet').textContent = cfg.snippet.split('{{DIR}}').join(dir);

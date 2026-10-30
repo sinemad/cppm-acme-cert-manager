@@ -68,26 +68,33 @@ button in the form (or the CLI's "Test this connection now" prompt). It:
 On failure it reports the specific problem and a copy-pasteable fix, e.g.:
 
 ```bash
-sudo mkdir -p /etc/ssl/cppm-acme
-sudo chown deploy:deploy /etc/ssl/cppm-acme
-sudo chmod 750 /etc/ssl/cppm-acme
+sudo mkdir -p /opt/acme-deploy/certs
+sudo chown deploy:deploy /opt/acme-deploy/certs
+sudo chmod 750 /opt/acme-deploy/certs
 ```
 
 or, if the reload command needs a password:
 
 ```bash
-echo 'deploy ALL=(root) NOPASSWD: systemctl reload nginx' | sudo tee /etc/sudoers.d/cppm-acme-deploy
+echo 'deploy ALL=(root) NOPASSWD: systemctl reload nginx' | sudo tee /etc/sudoers.d/acme-deploy
 ```
 
 ## Target-side setup examples
 
-All examples assume `remote_cert_dir` is `/etc/ssl/cppm-acme`.
+All examples assume `remote_cert_dir` is `/opt/acme-deploy/certs`, owned by the
+dedicated deploy account. This path is fully up to you (any directory the
+deploy account can write to works) — `/opt/<app>` or `/var/lib/<app>` is used
+here rather than `/etc` because `/etc` is conventionally root-owned host
+configuration, not a location a low-privilege, unattended service account
+should have write access to. Apache and nginx don't require certs to live
+under `/etc/ssl` — their config directives accept any absolute path the
+worker process can read.
 
 ### Apache (2.4.8+)
 
 ```apache
-SSLCertificateFile      /etc/ssl/cppm-acme/fullchain.pem
-SSLCertificateKeyFile   /etc/ssl/cppm-acme/privkey.pem
+SSLCertificateFile      /opt/acme-deploy/certs/fullchain.pem
+SSLCertificateKeyFile   /opt/acme-deploy/certs/privkey.pem
 ```
 
 Reload command: `sudo systemctl reload apache2`
@@ -95,12 +102,27 @@ Reload command: `sudo systemctl reload apache2`
 ### nginx
 
 ```nginx
-ssl_certificate      /etc/ssl/cppm-acme/fullchain.pem;
-ssl_certificate_key  /etc/ssl/cppm-acme/privkey.pem;
+ssl_certificate      /opt/acme-deploy/certs/fullchain.pem;
+ssl_certificate_key  /opt/acme-deploy/certs/privkey.pem;
 ```
 
 Reload command: `sudo systemctl reload nginx` (nginx re-reads cert files on
 reload without dropping connections).
+
+**Optional — if other tooling on the box expects certs under the
+conventional `/etc/ssl` path** (expiry monitors, config management, other
+admins' muscle memory), symlink into it once, at setup time:
+
+```bash
+sudo ln -s /opt/acme-deploy/certs/fullchain.pem /etc/ssl/certs/myapp-fullchain.pem
+sudo ln -s /opt/acme-deploy/certs/privkey.pem   /etc/ssl/private/myapp-privkey.pem
+```
+
+then point Apache/nginx at the `/etc/ssl/...` symlink paths instead. This
+only needs to be done once — this tool's atomic `.new`-then-`mv` deploy keeps
+overwriting the real file at the stable `/opt/acme-deploy/certs/...` path on
+every renewal, so the symlink never goes stale and never needs to be
+recreated.
 
 ### Frigate (docker-compose)
 
@@ -108,7 +130,7 @@ reload without dropping connections).
 services:
   frigate:
     volumes:
-      - /etc/ssl/cppm-acme:/etc/ssl/cppm-acme:ro
+      - /opt/acme-deploy/certs:/opt/acme-deploy/certs:ro
 ```
 
 The container only reads the files, so the atomic `mv` on deploy is usually
@@ -134,3 +156,22 @@ key and password are stored in `/data/certs/servers.json` in plaintext,
 `chmod 600`, never committed to the repo. This is the same trust boundary
 already used for every other credential this tool manages — protect that
 file (and the host it lives on) accordingly.
+
+**Use a dedicated deploy key, not your personal SSH key.** Generate one just
+for this tool:
+
+```bash
+ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"
+```
+
+(no passphrase — the key is used unattended). Add only
+`acme-deploy-key.pub` to a low-privilege account's `authorized_keys` on the
+target, not `root` or your own account, and scope that account to just the
+certificate directory (plus a narrow `sudoers` rule if the reload command
+needs elevation — see [Test Connection](#test-connection) above). Paste the
+private half into the Private Key field. This way, if `servers.json` or a
+backup of it ever leaks, the exposure is limited to "can write certs to one
+directory and run one reload command on one host" instead of every system
+that trusts your personal key. The web UI's Add/Edit Server form and the
+CLI's `add`/`edit` flow both surface this same guidance inline next to the
+Private Key field.

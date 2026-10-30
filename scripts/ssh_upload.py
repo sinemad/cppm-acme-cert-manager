@@ -268,7 +268,7 @@ def test_ssh_target(entry: dict) -> dict:
                                 f"stall waiting for sudo input.",
                     "remediation": [
                         f"On {host}, add a sudoers rule scoped to just this command:",
-                        f"echo '{sudoers_line}' | sudo tee /etc/sudoers.d/cppm-acme-{user}",
+                        f"echo '{sudoers_line}' | sudo tee /etc/sudoers.d/acme-deploy-{user}",
                     ],
                 }
 

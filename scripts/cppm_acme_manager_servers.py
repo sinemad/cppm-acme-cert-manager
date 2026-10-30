@@ -250,6 +250,12 @@ def _collect_ssh_server(s: dict) -> dict:
     tc["ssh_port"] = _prompt("Port", str(tc.get("ssh_port", "22") or "22"))
     tc["ssh_user"] = _prompt("SSH User", tc.get("ssh_user", ""), required=True)
     print("  Provide a private key (recommended) or a password. Enter to keep current / skip.")
+    print("  Best practice: generate a key just for this tool rather than reusing your")
+    print("  personal SSH key, so a leaked servers.json can't reach anything else:")
+    print('    ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"')
+    print("  Add only acme-deploy-key.pub to a low-privilege account's authorized_keys on")
+    print("  the target, scoped to the certificate directory (+ a narrow sudoers rule if")
+    print("  the reload command needs elevation), then paste the private half below.")
     tc["ssh_private_key"] = _prompt("Private Key (paste, Ctrl-D on empty line to end)",
                                     tc.get("ssh_private_key", ""), secret=True,
                                     hint="leave blank to use a password instead")
@@ -260,7 +266,7 @@ def _collect_ssh_server(s: dict) -> dict:
         return _collect_ssh_server(s)
     tc["remote_cert_dir"] = _prompt("Remote Cert Directory", tc.get("remote_cert_dir", ""),
                                     required=True,
-                                    hint="e.g. /etc/ssl/cppm-acme — holds fullchain.pem/privkey.pem")
+                                    hint="e.g. /opt/acme-deploy/certs — holds fullchain.pem/privkey.pem")
     tc["reload_command"] = _prompt("Reload Command", tc.get("reload_command", ""),
                                    hint="e.g. sudo systemctl reload nginx — optional")
     s["target_config"] = tc
