@@ -61,6 +61,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   credential field prompts, previously missing, are now included.
 
 ### Fixed
+- Linux SSH target: `build_server_status()` (the dashboard overview, the
+  per-server detail page's `/api/status/<id>`, and the digest builder) read
+  `server.get("ssh_host", ...)` etc. directly off the raw `servers.json`
+  entry, but Linux SSH fields live nested under `target_config` and are
+  only flattened onto the entry by `resolve_target_fields()` — which this
+  function never called. So every Linux SSH field it exposed (host
+  included) was silently empty no matter what the UI-side code did with
+  it. It now resolves the entry first.
 - Linux SSH target: the dashboard overview, per-server detail page, and their
   live-refresh paths all read the host to display from `cppm_host` only, so
   a `linux_ssh` server's card/page showed a blank hostname and its status

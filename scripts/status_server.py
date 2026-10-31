@@ -358,6 +358,7 @@ def build_log_bundle(server: dict) -> bytes:
 
 def build_server_status(server: dict) -> dict:
     """Build the full status dict for a single server configuration entry."""
+    server   = _resolve_target_fields(server)
     tz       = _tz()
     domain   = server.get("domain", "")
     cert_dir = server_cert_dir(server)
