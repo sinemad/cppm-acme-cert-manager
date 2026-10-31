@@ -367,6 +367,7 @@ def build_server_status(server: dict) -> dict:
         "label":           server.get("label", domain),
         "target_type":     server.get("target_type", "clearpass"),
         "cppm_host":       server.get("cppm_host", ""),
+        "ssh_host":        server.get("ssh_host", ""),
         "dns_provider":    dns_credential.get("dns_provider", ""),
         "acme_server":     server.get("acme_server", ""),
         "domain":          domain,
@@ -3057,7 +3058,7 @@ def _overview_page(username: str = "") -> str:
 <div class="card" style="padding:0;overflow:hidden">
   <table class="overview-table">
     <thead><tr>
-      <th>ClearPass Server</th>
+      <th>Server</th>
       <th>DNS &amp; ACME Provider</th>
       <th>Certificate Services</th>
       <th>Next Renewal Check</th>
@@ -4651,7 +4652,8 @@ def _overview_rows(servers: list) -> str:
     rows = []
     for s in servers:
         sid  = _esc(str(s.get("id", "")))
-        host = _esc(s.get("cppm_host", ""))
+        is_linux_ssh = s.get("target_type") == "linux_ssh"
+        host = _esc(s.get("ssh_host", "") if is_linux_ssh else s.get("cppm_host", ""))
         dns  = _esc(_DNS_DISPLAY.get(s.get("dns_provider", ""), s.get("dns_provider", "")))
         _acme_raw = s.get("acme_server", "")
         acme = _esc(_ACME_DISPLAY.get(_acme_raw, "Custom CA" if _acme_raw.startswith("http") else _acme_raw))
@@ -4662,7 +4664,7 @@ def _overview_rows(servers: list) -> str:
         def _dot(kind: str) -> str:
             return (f'<span id="ov-{_esc(raw_sid)}-{kind}" class="sdot checking"'
                     f' title="checking…" style="margin-right:0.2rem"></span>')
-        if s.get("target_type") == "linux_ssh":
+        if is_linux_ssh:
             dot_items = (("ssh", "SSH"), ("dns", "DNS/ACME"))
         else:
             dot_items = (("cppm", "CPPM"), ("dns", "DNS/ACME"), ("cb", "Callback"))
@@ -4681,7 +4683,7 @@ def _overview_rows(servers: list) -> str:
         rows.append(
             f'<tr class="server-row" onclick="window.location.href=\'/server/{sid}\'">'
             f'<td>'
-            f'<div class="srv-label">{_esc(s.get("label", "") or s.get("cppm_host", ""))}</div>'
+            f'<div class="srv-label">{_esc(s.get("label", "") or host)}</div>'
             f'<div class="srv-host">{host}</div>'
             f'{dots}</td>'
             f'<td>'
@@ -5115,9 +5117,10 @@ function renderRow(s){
     +(tgts.indexOf('https_rsa')>=0?renderMiniCert(rsa,'HTTPS(RSA)'):'')
     +(tgts.indexOf('radsec')>=0?renderMiniCert(rsa,'RadSec'):'')
     +(tgts.indexOf('radius')>=0?renderMiniCert(rsa,'RADIUS'):'');
+  var host=s.target_type==='linux_ssh'?(s.ssh_host||''):(s.cppm_host||'');
   return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
-    +'<td><div class="srv-label">'+esc(s.label||s.cppm_host)+'</div>'
-    +'<div class="srv-host">'+esc(s.cppm_host)+'</div>'
+    +'<td><div class="srv-label">'+esc(s.label||host)+'</div>'
+    +'<div class="srv-host">'+esc(host)+'</div>'
     +renderDots(sid,s.target_type)+'</td>'
     +'<td>'+esc(dnsLabel(s.dns_provider))
     +'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">'+esc(acmeLabel(s.acme_server))+'</div></td>'
@@ -5228,7 +5231,7 @@ _DETAIL_BODY = """
     <div class="log-tabs" id="log-tabs">
       <button class="log-tab active" data-tab="activity" onclick="switchLogTab(this,'activity')">Activity Log</button>
       <button class="log-tab" data-tab="renewal" id="log-tab-renewal" onclick="switchLogTab(this,'renewal')">ACME Renewal</button>
-      <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">ClearPass Upload</button>
+      <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">Upload</button>
     </div>
     <span class="log-count" id="log-count"></span>
     <a class="btn btn-ghost" id="log-download-btn" style="font-size:0.72rem;padding:0.2rem 0.6rem;display:none" href="#" download>&#8681; Download Logs</a>
@@ -5331,11 +5334,15 @@ function renderInfoCards(data, health){
     +'<div class="row"><span class="lbl">Schedule</span><span class="val">'+esc(sc.schedule||'—')+'</span></div>'
     +'<div class="row"><span class="lbl">Renews at</span><span class="val">'+esc(sc.threshold||'—')+'</span></div>'
     +'</div></div>';
+  var isLinuxSsh=data.target_type==='linux_ssh';
+  var targetRow=isLinuxSsh
+    ?'<div class="row"><span class="lbl">Host</span><span class="val">'+sdot('d-dot-cppm',sh.ssh)+esc(data.ssh_host)+'</span></div>'
+    :'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>';
   var cfg='<div class="card"><div class="card-title">Configuration</div><div class="meta">'
     +'<div class="row"><span class="lbl">Domain</span><span class="val">'+esc(data.domain)+'</span></div>'
     +'<div class="row"><span class="lbl">DNS</span><span class="val">'+sdot('d-dot-dns',sh.dns)+esc(dnsLabel(data.dns_provider))+'</span></div>'
     +'<div class="row"><span class="lbl">CA</span><span class="val">'+esc(caLabel(data.acme_server))+'</span></div>'
-    +'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>'
+    +targetRow
     +(data.callback_host
       ?'<div class="row"><span class="lbl">Callback</span><span class="val">'+sdot('d-dot-cb',sh.callback)+'http://'+esc(data.callback_host)+':'+esc(data.callback_port)+'/'+'</span></div>'
       :'')
@@ -5369,6 +5376,7 @@ function renderLog(activity){
 function render(data){
   _statusData=data;
   document.getElementById('hdr-domain').textContent=data.domain||'—';
+  document.getElementById('log-tab-upload').textContent=data.target_type==='linux_ssh'?'Linux Upload':'ClearPass Upload';
   document.getElementById('last-updated').textContent='Updated '+new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   var ecc=(data.certs&&data.certs.ecc)||{exists:false};
   var rsa=(data.certs&&data.certs.rsa)||{exists:false};
@@ -5421,7 +5429,8 @@ async function loadHealth(){
       var ce=document.getElementById('d-dot-cppm');
       var de=document.getElementById('d-dot-dns');
       var cbe=document.getElementById('d-dot-cb');
-      if(ce&&sh.cppm)    applyDot(ce,sh.cppm);
+      var targetCheck=(_statusData&&_statusData.target_type==='linux_ssh')?sh.ssh:sh.cppm;
+      if(ce&&targetCheck) applyDot(ce,targetCheck);
       if(de&&sh.dns)     applyDot(de,sh.dns);
       if(cbe&&sh.callback) applyDot(cbe,sh.callback);
       ok=true;

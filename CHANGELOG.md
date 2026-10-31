@@ -61,6 +61,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   credential field prompts, previously missing, are now included.
 
 ### Fixed
+- Linux SSH target: the dashboard overview, per-server detail page, and their
+  live-refresh paths all read the host to display from `cppm_host` only, so
+  a `linux_ssh` server's card/page showed a blank hostname and its status
+  dot never updated after the first page load (the refresh loop only ever
+  looked at the ClearPass health check, not the SSH one). Both now resolve
+  `ssh_host` for `linux_ssh` targets. Also renamed the dashboard's "ClearPass
+  Server" column header to "Server" and the per-server "ClearPass Upload"
+  log tab to read "Linux Upload" for `linux_ssh` targets, matching the
+  earlier Settings-page rename.
 - Linux SSH target: the connection smoke test (dashboard health check and
   "Test Connection" button) named its remote probe file using only the
   server process's PID, which is constant for the lifetime of the
