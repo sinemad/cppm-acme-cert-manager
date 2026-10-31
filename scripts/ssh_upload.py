@@ -20,6 +20,8 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -185,7 +187,13 @@ def test_ssh_target(entry: dict) -> dict:
         return pin_error
 
     with _temp_key_file(private_key) as key_path:
-        probe_name = f"{_PROBE_PREFIX}{os.getpid()}"
+        # status_server.py is a long-running process, so os.getpid() alone is
+        # constant across every health-check tick for a given server — two
+        # overlapping calls (a background poll racing a manual Test
+        # Connection click) would share one probe filename and could delete
+        # each other's file between write and read. Add a per-call unique
+        # suffix so concurrent calls never collide.
+        probe_name = f"{_PROBE_PREFIX}{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}"
         remote_probe = f"{remote_dir.rstrip('/')}/{probe_name}"
         script = (
             f"test -d {shlex.quote(remote_dir)} || echo __NODIR__ && "

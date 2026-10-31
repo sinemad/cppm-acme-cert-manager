@@ -61,6 +61,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   credential field prompts, previously missing, are now included.
 
 ### Fixed
+- Linux SSH target: the connection smoke test (dashboard health check and
+  "Test Connection" button) named its remote probe file using only the
+  server process's PID, which is constant for the lifetime of the
+  long-running web process. Two overlapping checks for the same server
+  (e.g. a background health-check poll racing a manual Test Connection
+  click) shared one filename, so one call's cleanup could delete the probe
+  file between another call's write and read, producing an intermittent,
+  bogus "cannot read back" failure with no actual permission problem. The
+  probe filename is now unique per call.
 - Linux SSH target: a pasted private key with CRLF line endings or trailing
   per-line whitespace (common when copy/pasting through a browser textarea,
   especially from Windows) could fail to load with a misleading
