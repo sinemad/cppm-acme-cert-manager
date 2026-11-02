@@ -222,7 +222,7 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 
 All server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
 
-1. On the empty dashboard, choose **ClearPass Policy Manager** or **Linux server (SSH)**. (Or click **Servers → + Add Server** and set **Target Type**.)
+1. The empty dashboard shows a short checklist: add a DNS credential (optional here, it can also be created inline), then choose **ClearPass Policy Manager** or **Linux server (SSH)**. The ACME email and CA are prefilled from your most recently added server. (Or click **Servers → + Add Server** and set **Target Type**.)
 2. Fill in all sections. The target-specific section depends on the type:
 
 | Section | Fields |

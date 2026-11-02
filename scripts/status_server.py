@@ -4645,13 +4645,42 @@ def _cluster_overview_row(s: dict) -> str:
             f'</td></tr>')
 
 
+def _last_used_acme_defaults() -> dict:
+    """ACME email/CA from the most recently added server, to prefill a new one."""
+    for entry in reversed(load_servers()):
+        r = _resolve_target_fields(entry)
+        if r.get("acme_email"):
+            return {"acme_email": r["acme_email"],
+                    "acme_server": r.get("acme_server") or "letsencrypt"}
+    return {}
+
+
 def _get_started_html() -> str:
-    """Empty-state chooser shown when no servers exist: pick a deploy target."""
+    """Empty-state checklist shown when no servers exist."""
+    try:
+        has_dns = bool(list_dns_credentials())
+    except Exception:
+        has_dns = False
+
+    def step(num, done, title, blurb, body=""):
+        mark = "&#10003;" if done else str(num)
+        color = "var(--ok, #4ade80)" if done else "var(--accent)"
+        return (
+            f'<div style="display:flex;gap:0.9rem;margin-bottom:1.4rem">'
+            f'<div style="flex:0 0 1.8rem;height:1.8rem;border-radius:50%;'
+            f'border:1px solid {color};color:{color};display:flex;align-items:center;'
+            f'justify-content:center;font-size:0.85rem">{mark}</div>'
+            f'<div style="flex:1;min-width:0">'
+            f'<div style="font-weight:600;margin-bottom:0.2rem">{title}</div>'
+            f'<div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.6rem">{blurb}</div>'
+            f'{body}</div></div>'
+        )
+
     def card(target, title, blurb, needs):
         items = "".join(f"<li>{_esc(n)}</li>" for n in needs)
         return (
             f'<a href="/settings/add?target_type={target}" class="btn btn-primary" '
-            f'style="display:block;text-align:left;padding:1rem 1.1rem;flex:1 1 260px;'
+            f'style="display:block;text-align:left;padding:1rem 1.1rem;flex:1 1 240px;'
             f'white-space:normal;text-decoration:none">'
             f'<strong style="display:block;margin-bottom:0.25rem">{_esc(title)}</strong>'
             f'<span style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem">'
@@ -4660,25 +4689,34 @@ def _get_started_html() -> str:
             f'<ul style="margin:0.25rem 0 0 1.1rem;padding:0;font-size:0.78rem;color:var(--muted)">'
             f'{items}</ul></a>'
         )
-    return (
-        '<div style="padding:2rem 1.5rem">'
-        '<div style="font-size:1rem;font-weight:600;margin-bottom:0.25rem">'
-        'What do you want to deploy certificates to?</div>'
-        '<div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.1rem">'
-        'Pick a target to add your first server. You can add more of either type later.</div>'
+
+    dns_body = (
+        '' if has_dns else
+        '<a href="/settings/dns-credentials/new" class="btn btn-primary">'
+        '&#43; Add DNS credential</a>'
+    )
+    cards = (
         '<div style="display:flex;flex-wrap:wrap;gap:1rem">'
         + card("clearpass", "ClearPass Policy Manager",
                "Upload HTTPS, RADIUS and RadSec certificates through the ClearPass API.",
                ["A ClearPass API client (client_credentials)",
-                "A hostname this container can reach for the PKCS12 callback"])
+                "A host address ClearPass can reach for the PKCS12 callback"])
         + card("linux_ssh", "Linux server (SSH)",
                "Copy a certificate and key to a Linux host and reload the service (e.g. Frigate).",
                ["An SSH user with write access to the target directory",
                 "A key or password for that user"])
         + '</div>'
-        '<div style="font-size:0.78rem;color:var(--subtle);margin-top:1rem">'
-        'Either way you will also need a DNS provider credential and an ACME email.</div>'
-        '</div>'
+    )
+    return (
+        '<div style="padding:2rem 1.5rem">'
+        '<div style="font-size:1rem;font-weight:600;margin-bottom:1.2rem">Get started</div>'
+        + step(1, has_dns, "Add a DNS credential",
+               "The DNS-01 challenge needs API access to your DNS provider. One credential can "
+               "be reused by every server. (You can also create it inline in step 2.)", dns_body)
+        + step(2, False, "Add your first server",
+               "Choose what to deploy certificates to. You can add more servers of either type later.",
+               cards)
+        + '</div>'
     )
 
 
@@ -5893,6 +5931,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/settings/add":
             blank = _default_server_from_env()
+            blank.update(_last_used_acme_defaults())
             wanted = parse_qs(urlparse(self.path).query).get("target_type", [""])[0]
             if wanted in ("clearpass", "linux_ssh"):
                 blank["target_type"] = wanted

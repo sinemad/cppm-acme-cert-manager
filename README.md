@@ -374,8 +374,10 @@ domain, and ACME settings — is entered here and stored in `servers.json`.
 
 #### Web UI method
 
-1. On the empty dashboard, choose **ClearPass Policy Manager** or
-   **Linux server (SSH)**. (Or go to **Servers → + Add Server** and set
+1. The empty dashboard shows a short checklist: add a DNS credential (optional
+   here, it can also be created inline), then choose **ClearPass Policy
+   Manager** or **Linux server (SSH)**. The ACME email and CA are prefilled
+   from your most recently added server. (Or go to **Servers → + Add Server** and set
    **Target Type**.)
 2. Fill in all sections and click **Add Server**.
 
