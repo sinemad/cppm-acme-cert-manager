@@ -1,14 +1,15 @@
-# ClearPass ACME Certificate Manager
+# ACME Certificate Manager for ClearPass and Linux
 
 [![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Automated TLS certificate issuance and renewal for **Aruba ClearPass Policy Manager (CPPM)**
-using [Lego](https://github.com/go-acme/lego) and a DNS-01 challenge.
+and for **Linux servers over SSH** (Apache, nginx, Frigate, or anything that reads a
+cert/key pair from disk), using [Lego](https://github.com/go-acme/lego) and a DNS-01 challenge.
 Everything runs in a self-contained Alpine Linux Docker container with persistent storage
 on the host.
 
-Two certificates are issued and maintained simultaneously:
+For **ClearPass** targets, up to four certificate roles are issued and maintained (Linux SSH targets always receive a single ECC certificate; see [docs/10](docs/10-linux-ssh-target.md)):
 
 | Certificate target | Algorithm | CPPM Service | Purpose |
 |---|---|---|---|
@@ -99,9 +100,10 @@ no clone or install required:
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Host OS | Any Linux with Docker support (Ubuntu 22.04 LTS recommended) |
 | DNS provider | Domain managed by a supported DNS provider (see below) |
-| CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13) |
-| Network | Container needs outbound HTTPS to your DNS provider API and CPPM |
-| LAN IP | A host IP that CPPM can route to (required for cert upload callback) |
+| Network | Container needs outbound HTTPS to your DNS provider API and ACME CA, plus network access to each deployment target |
+| *ClearPass targets only:* CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13) |
+| *ClearPass targets only:* LAN IP | A host IP that CPPM can route to (required for cert upload callback) |
+| *Linux SSH targets only:* SSH access | A user on each target that can write the certificate directory (see [docs/10](docs/10-linux-ssh-target.md)) |
 
 ---
 
@@ -265,9 +267,12 @@ cd cppm-acme-cert-manager
 chmod +x setup.sh && ./setup.sh
 ```
 
-`setup.sh` verifies Docker, creates `/opt/cppm-certs`, and copies
+`setup.sh` verifies Docker, creates `/opt/cppm-certs`, copies
 `docker-compose.override.yml.example` to `docker-compose.override.yml` if it
-does not already exist.
+does not already exist, and (in a terminal) asks which targets you will use and
+your timezone. Skip the prompts with flags, e.g.
+`./setup.sh --targets clearpass --tz America/Chicago`
+(`--targets` is `clearpass`, `linux_ssh` or `both`).
 
 The Compose service uses Cloudflare and Google public DNS resolvers for reliable
 DNS-01 zone discovery. If your network blocks those resolvers, override the
@@ -277,9 +282,10 @@ from your Docker host.
 ### 3. Configure local overrides (optional)
 
 `docker-compose.override.yml` controls **container-level behaviour only** —
-timezone, ports, and operational flags. ClearPass credentials, DNS provider,
+timezone, ports, and operational flags. Server credentials, DNS provider,
 domain, and ACME settings are configured through the web UI after the container
-starts.
+starts. Override sections marked *[ClearPass only]* can be ignored for Linux-only
+deployments.
 
 ```bash
 nano docker-compose.override.yml
@@ -299,7 +305,11 @@ environment:
 > which host port to forward). See the comments inside the override file for the
 > step-by-step checklist.
 
-### 4. Create the ClearPass API client
+### 4. Prepare your deployment target
+
+Do the part for the target you chose in `setup.sh` (both if you use both).
+
+#### ClearPass: create the API client
 
 1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
 2. Configure:
@@ -317,6 +327,12 @@ environment:
 > **Minimum custom Operator Profile permissions:**
 > Administration → Operator Logins → Operator Profiles → Add
 > Enable **Allow → All → Certificate Management**
+
+#### Linux server: prepare the SSH account
+
+Create a dedicated user on the target, authorize a key generated just for this
+tool, and make sure the user can write the certificate directory and run your
+reload command. See [docs/10-linux-ssh-target.md](docs/10-linux-ssh-target.md).
 
 ### 5. Build and start
 
@@ -351,20 +367,23 @@ waits — this is expected:
 docker exec -it cppm-acme-cert-manager cppm-users add admin
 ```
 
-### 7. Add your ClearPass server
+### 7. Add your first server
 
-All per-server configuration — ClearPass host, API credentials, DNS provider,
+All per-server configuration — target host and credentials, DNS provider,
 domain, and ACME settings — is entered here and stored in `servers.json`.
 
 #### Web UI method
 
-1. Navigate to **Servers → + Add Server**.
+1. On the empty dashboard, choose **ClearPass Policy Manager** or
+   **Linux server (SSH)**. (Or go to **Servers → + Add Server** and set
+   **Target Type**.)
 2. Fill in all sections and click **Add Server**.
 
 | Section | Fields |
 |---|---|
 | **Identity** | Friendly label (e.g. `Production ClearPass`), and a Certificate Profile — reuse an existing profile from the dropdown or create a new one (see [Shared Certificates Across ClearPass Targets](#shared-certificates-across-clearpass-targets)) |
-| **ClearPass** | Host/IP, Cluster mode, Client ID, Client Secret, Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **ClearPass** *(ClearPass type)* | Host/IP, Cluster mode, Client ID, Client Secret, Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **Linux server** *(SSH type)* | Host/IP, Port, SSH user, private key (or password), remote cert directory, optional reload command — see [docs/10](docs/10-linux-ssh-target.md) |
 | **Domain & ACME** | Domain, up to 10 SAN DNS names, ACME email, Certificate Authority, Certificate Types (HTTPS(ECC)/HTTPS(RSA)/RADIUS/RadSec) |
 | **DNS Provider** | Provider selector + credentials (see table below) |
 

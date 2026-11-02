@@ -2052,7 +2052,7 @@ def _help_index_page(username: str = "") -> str:
   <div class="card" style="margin-bottom:1.25rem">
     <div class="card-title">Reference Guides</div>
     <p style="font-size:0.82rem;color:var(--muted);margin-bottom:1rem">
-      Complete documentation for ClearPass ACME Certificate Manager.
+      Complete documentation for ACME Certificate Manager.
       Select a topic to read it inline.
     </p>
     {grid}
@@ -2397,7 +2397,7 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
         right = '<a href="/login" class="nav-link">Sign In</a><a href="/help" class="nav-link">Help</a>'
 
     return f"""<nav class="nav">
-  <span class="nav-brand">ClearPass ACME Certificate Manager</span>
+  <span class="nav-brand">ACME Certificate Manager</span>
   <div class="nav-links">{right}</div>
 </nav>"""
 
@@ -2413,14 +2413,14 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_esc(title)} — ClearPass ACME Certificate Manager</title>
+<title>{_esc(title)} — ACME Certificate Manager</title>
 <style>{_CSS}</style>
 </head>
 <body>
 {nav}
 {body}
 <footer style="text-align:center;padding:1.5rem 1rem;font-size:0.68rem;color:var(--subtle)">
-  ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
+  ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
 </footer>
 <script>
 (function(){{
@@ -2447,7 +2447,7 @@ def _login_page(error: str = "", username_val: str = "") -> str:
     return _base("Sign In", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <h1 class="auth-title">Sign In</h1>
     {err_html}
     <form method="POST" action="/login">
@@ -2473,7 +2473,7 @@ def _setup_page(error: str = "") -> str:
     return _base("First-Time Setup", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <h1 class="auth-title">First-Time Setup</h1>
     <p class="auth-desc">No admin users are configured yet. Create the initial
     administrator account to secure access to this interface.</p>
@@ -2886,7 +2886,7 @@ function loadTraefikLog() {
         content = f"""
 <div class="auth-wrap">
   <div class="auth-card" style="max-width:660px;width:100%">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.75rem">
       <h1 class="auth-title" style="margin-bottom:0">Configure HTTPS (Step 1 of 2)</h1>
       <a href="/setup?step=admin" style="font-size:0.78rem;color:var(--subtle)">Skip →</a>
@@ -3098,10 +3098,7 @@ def _settings_list_page(servers: list, username: str,
         flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
 
     if not servers:
-        rows = ('<tr><td colspan="5"><div class="empty">'
-                'No servers configured yet.&nbsp; '
-                '<a href="/settings/add" style="color:var(--accent)">Add the first server</a>.'
-                '</div></td></tr>')
+        rows = f'<tr><td colspan="5">{_get_started_html()}</td></tr>'
     else:
         rows = ""
         for s in servers:
@@ -4648,11 +4645,46 @@ def _cluster_overview_row(s: dict) -> str:
             f'</td></tr>')
 
 
+def _get_started_html() -> str:
+    """Empty-state chooser shown when no servers exist: pick a deploy target."""
+    def card(target, title, blurb, needs):
+        items = "".join(f"<li>{_esc(n)}</li>" for n in needs)
+        return (
+            f'<a href="/settings/add?target_type={target}" class="btn btn-primary" '
+            f'style="display:block;text-align:left;padding:1rem 1.1rem;flex:1 1 260px;'
+            f'white-space:normal;text-decoration:none">'
+            f'<strong style="display:block;margin-bottom:0.25rem">{_esc(title)}</strong>'
+            f'<span style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem">'
+            f'{_esc(blurb)}</span>'
+            f'<span style="font-size:0.75rem;color:var(--subtle)">You will need:</span>'
+            f'<ul style="margin:0.25rem 0 0 1.1rem;padding:0;font-size:0.78rem;color:var(--muted)">'
+            f'{items}</ul></a>'
+        )
+    return (
+        '<div style="padding:2rem 1.5rem">'
+        '<div style="font-size:1rem;font-weight:600;margin-bottom:0.25rem">'
+        'What do you want to deploy certificates to?</div>'
+        '<div style="font-size:0.82rem;color:var(--muted);margin-bottom:1.1rem">'
+        'Pick a target to add your first server. You can add more of either type later.</div>'
+        '<div style="display:flex;flex-wrap:wrap;gap:1rem">'
+        + card("clearpass", "ClearPass Policy Manager",
+               "Upload HTTPS, RADIUS and RadSec certificates through the ClearPass API.",
+               ["A ClearPass API client (client_credentials)",
+                "A hostname this container can reach for the PKCS12 callback"])
+        + card("linux_ssh", "Linux server (SSH)",
+               "Copy a certificate and key to a Linux host and reload the service (e.g. Frigate).",
+               ["An SSH user with write access to the target directory",
+                "A key or password for that user"])
+        + '</div>'
+        '<div style="font-size:0.78rem;color:var(--subtle);margin-top:1rem">'
+        'Either way you will also need a DNS provider credential and an ACME email.</div>'
+        '</div>'
+    )
+
+
 def _overview_rows(servers: list) -> str:
     if not servers:
-        return (f'<tr><td colspan="{_OVERVIEW_COLSPAN}"><div class="empty">No servers configured. '
-                '<a href="/settings/add" style="color:var(--accent)">Add a server</a>.'
-                '</div></td></tr>')
+        return f'<tr><td colspan="{_OVERVIEW_COLSPAN}">{_get_started_html()}</td></tr>'
     rows = []
     for s in servers:
         sid  = _esc(str(s.get("id", "")))
@@ -5687,7 +5719,7 @@ class Handler(BaseHTTPRequestHandler):
             if flash_ok:
                 html = _base("Sign In", f"""
 <div class="auth-wrap"><div class="auth-card">
-  <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+  <div class="auth-logo">ACME Certificate Manager</div>
   <h1 class="auth-title">Sign In</h1>
   <div class="flash flash-ok">{_esc(flash_ok)}</div>
   <form method="POST" action="/login">
@@ -5860,7 +5892,11 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/settings/add":
-            return self._serve_html(_settings_form_page(username=username))
+            blank = _default_server_from_env()
+            wanted = parse_qs(urlparse(self.path).query).get("target_type", [""])[0]
+            if wanted in ("clearpass", "linux_ssh"):
+                blank["target_type"] = wanted
+            return self._serve_html(_settings_form_page(blank, username=username))
 
         if path.startswith("/settings/edit/"):
             server_id = path[len("/settings/edit/"):].strip("/")

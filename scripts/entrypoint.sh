@@ -44,7 +44,8 @@ err()  { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
 die()  { err "$*"; status_write "FAILED" "STARTUP" "$*"; exit 1; }
 
 LEGO_VER=$("$LEGO_BIN" --version 2>&1 | head -1 || echo "lego (version unknown)")
-log "=== ClearPass Certificate Manager v2.0 ==="
+APP_VERSION=$(cat /opt/cppm/VERSION 2>/dev/null || echo "unknown")
+log "=== ACME Certificate Manager v${APP_VERSION} ==="
 log "lego    : $LEGO_VER"
 status_write "INFO" "STARTUP" "Container started – lego=${LEGO_VER}"
 

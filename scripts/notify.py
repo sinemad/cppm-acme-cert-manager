@@ -88,7 +88,7 @@ def _send_slack(channel: dict, server_label: str, event: str,
             "color":    color,
             "title":    title,
             "text":     message,
-            "footer":   "ClearPass ACME Certificate Manager",
+            "footer":   "ACME Certificate Manager",
             "ts":       int(datetime.datetime.now().timestamp()),
         }],
     })
@@ -104,7 +104,7 @@ def _send_discord(channel: dict, server_label: str, event: str,
             "title":       title,
             "description": message,
             "color":       color,
-            "footer":      {"text": "ClearPass ACME Certificate Manager"},
+            "footer":      {"text": "ACME Certificate Manager"},
             "timestamp":   datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }],
     })
@@ -178,7 +178,7 @@ def _send_email(channel: dict, server_label: str, event: str,
 
     icon    = _STATUS_ICON.get(status, "")
     subject = f"{icon} [CPPM ACME] [{server_label}] {_EVENT_LABEL.get(event, event)}"
-    body    = (f"ClearPass ACME Certificate Manager\n"
+    body    = (f"ACME Certificate Manager\n"
                f"{'─' * 48}\n"
                f"Server : {server_label}\n"
                f"Event  : {_EVENT_LABEL.get(event, event)}\n"
@@ -290,7 +290,7 @@ def send_test(server_id: str, channel_id: str) -> tuple[bool, str]:
 
     try:
         sender(ch, server_label, "upload_success",
-               "This is a test notification from ClearPass ACME Certificate Manager.", "ok")
+               "This is a test notification from ACME Certificate Manager.", "ok")
         return True, "Test notification sent successfully."
     except Exception as exc:
         return False, f"Send failed: {exc}"

@@ -9,8 +9,11 @@ Run these steps once on the host before the container is ever started.
 | Docker Engine ≥ 24.x | With Compose v2 plugin (`docker compose`) |
 | Linux host | Ubuntu 22.04 LTS recommended |
 | DNS provider | Domain managed by a supported provider (Cloudflare, Porkbun, Route53, DigitalOcean, GoDaddy, Infoblox, RFC 2136, or any Lego-supported provider) |
-| CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13, SDK valid for all) |
 | Outbound HTTPS | Container needs access to your DNS provider's API and your ACME CA |
+| *ClearPass targets only:* CPPM version | 6.9.x through 6.12.x (confirmed on 6.11.13, SDK valid for all) |
+| *Linux SSH targets only:* SSH access | An SSH user on each target that can write the certificate directory (see [Linux SSH target](10-linux-ssh-target.md)) |
+
+You can deploy to ClearPass, to Linux servers, or both from the same container.
 
 ---
 
@@ -36,19 +39,25 @@ cd /opt/cppm-acme-cert-manager
 chmod +x setup.sh && ./setup.sh
 ```
 
-`setup.sh` does three things:
+`setup.sh` does four things:
 - Verifies Docker and the Compose plugin are present
 - Creates `/opt/cppm-certs` (the persistent storage directory)
 - Copies `docker-compose.override.yml.example` to `docker-compose.override.yml` if it does not already exist
+- Asks which targets you plan to use (ClearPass, Linux SSH, or both) and your timezone, then prints the matching next steps
+
+Run with flags to skip the prompts, for example
+`./setup.sh --targets linux_ssh --tz America/Chicago`. Without a terminal the
+script never prompts and defaults to `--targets both` with the template's timezone.
 
 ---
 
 ## Step 3 – Configure local overrides (optional)
 
 `docker-compose.override.yml` controls **container-level behaviour only** —
-timezone, ports, and operational flags. ClearPass server credentials, DNS
-provider, domain, and ACME settings are all configured through the web UI
-after the container starts.
+timezone, ports, and operational flags. Server credentials, DNS provider,
+domain, and ACME settings are all configured through the web UI after the
+container starts. Sections of the override file marked *[ClearPass only]* can
+be ignored if you deploy only to Linux servers.
 
 Docker Compose automatically merges `docker-compose.override.yml` with
 `docker-compose.yml` — no flags or extra commands needed. Only uncomment and
@@ -119,7 +128,12 @@ if you're already seeing this failure.
 
 ---
 
-## Step 4 – Create the ClearPass API client
+## Step 4 – Prepare your deployment target
+
+Do the part that matches the target you chose in `setup.sh`; do both if you
+use both.
+
+### Deploying to ClearPass: create the API client
 
 1. CPPM Admin UI → **Administration → API Services → API Clients → Add**
 2. Configure:
@@ -137,6 +151,13 @@ if you're already seeing this failure.
 > **Minimum permissions for a custom Operator Profile:**
 > Administration → Operator Logins → Operator Profiles → Add
 > Enable **Allow → All → Certificate Management**
+
+### Deploying to a Linux server: prepare the SSH account
+
+On each target, create a dedicated user for this tool, authorize a key generated
+just for it, and make sure that user can write the certificate directory and run
+your reload command. Full details, including host key verification and Frigate
+examples, are in [Linux SSH target](10-linux-ssh-target.md).
 
 ---
 
@@ -197,22 +218,22 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 
 ---
 
-## Step 8 – Add your ClearPass server
+## Step 8 – Add your first server
 
-All ClearPass server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
+All server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
 
-1. Click **Servers** in the navigation bar.
-2. Click **+ Add Server**.
-3. Fill in all sections:
+1. On the empty dashboard, choose **ClearPass Policy Manager** or **Linux server (SSH)**. (Or click **Servers → + Add Server** and set **Target Type**.)
+2. Fill in all sections. The target-specific section depends on the type:
 
 | Section | Fields |
 |---|---|
 | **Identity** | Friendly label (e.g. `Production ClearPass`) |
-| **ClearPass** | Host/IP, Client ID, Client Secret (from Step 3), Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **ClearPass** *(ClearPass type)* | Host/IP, Client ID, Client Secret (from Step 4), Cert Passphrase, Callback Host, Callback Port, Verify SSL |
+| **Linux server** *(SSH type)* | Host/IP, Port, SSH user, private key (or password), remote cert directory, optional reload command — see [Linux SSH target](10-linux-ssh-target.md) |
 | **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority (Let's Encrypt / ZeroSSL / Custom) |
 | **DNS Provider** | Provider selector + credentials (see below) |
 
-4. Click **Add Server** to save.
+3. Click **Add Server** to save.
 
 The configuration is stored in `/opt/cppm-certs/servers.json` (chmod 600).
 
