@@ -22,8 +22,8 @@
 - [ ] CI gate: real staging-CA issuance on `LEGO_VERSION` bumps – deferred until DNS-PERSIST-01 is stable (no DNS credential in CI secrets).
 - [ ] Phase 3: generalize beyond ClearPass (New Central NAC target per `NEW_CENTRAL_NAC_TODO.md`: first resolve open API questions, then add `"new_central"` to `_DEPLOY_SCRIPTS`).
 - [ ] Audit remaining code for raw `servers.json` reads of nested Linux-SSH fields that bypass `resolve_target_fields()`.
-- [ ] Remove temporary "nothing to migrate" log line in `_migrate_legacy_storage()` (`TODO`) once fleet confirmed off v4 storage.
-- [ ] Verify ZeroSSL RSA intermediate CN (currently unverified; do not guess).
+- [ ] Remove temporary "nothing to migrate" log line in `_migrate_legacy_storage()` (`TODO`) once fleet confirmed off v4 storage. **Long-term / blocked:** most installs are still on v4; only the maintainer is on v5.x (dev branch). Keep the line and its test until v5 has shipped and been widely adopted.
+- [x] ~~Verify ZeroSSL RSA intermediate CN~~ — **Dropped by design.** Chains are always taken from ACME (Lego), never pinned or tabulated, so no code depends on the CN; the chain-drift check learns CNs at runtime. ZeroSSL deployed a new serverAuth-only intermediate on 2026-04-01 and ACME clients receive it automatically. Do not research or hard-code intermediate CNs.
 
 ## State of the System
 - **Completed:**
