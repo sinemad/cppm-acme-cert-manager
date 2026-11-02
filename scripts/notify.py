@@ -224,13 +224,13 @@ def send_notification(server_id: str, event: str, message: str,
 
     Returns a list of error strings (empty on full success).
     """
-    from config_utils import get_server, get_server_notifications
+    from config_utils import get_server, get_server_notifications, server_display_name
 
     server = get_server(server_id)
     if not server:
         return [f"server {server_id!r} not found"]
 
-    server_label = server.get("label") or server.get("cppm_host", server_id)
+    server_label = server_display_name(server, server_id)
     notif_cfg    = get_server_notifications(server_id)
     channels     = notif_cfg.get("channels") or []
 
@@ -269,13 +269,13 @@ def send_notification(server_id: str, event: str, message: str,
 
 def send_test(server_id: str, channel_id: str) -> tuple[bool, str]:
     """Send a test notification to a single channel. Returns (ok, message)."""
-    from config_utils import get_server, get_server_notifications
+    from config_utils import get_server, get_server_notifications, server_display_name
 
     server = get_server(server_id)
     if not server:
         return False, f"Server {server_id!r} not found"
 
-    server_label = server.get("label") or server.get("cppm_host", server_id)
+    server_label = server_display_name(server, server_id)
     notif_cfg    = get_server_notifications(server_id)
     channels     = notif_cfg.get("channels") or []
 

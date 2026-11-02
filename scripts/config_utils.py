@@ -106,6 +106,18 @@ def _resolve_target_fields(entry: dict) -> dict:
     return resolved
 
 
+def server_host(entry: dict) -> str:
+    """Return the target's hostname: ssh_host for linux_ssh, else cppm_host."""
+    r = _resolve_target_fields(entry)
+    key = "ssh_host" if r.get("target_type") == "linux_ssh" else "cppm_host"
+    return str(r.get(key) or "")
+
+
+def server_display_name(entry: dict, default: str = "") -> str:
+    """Return the entry's label, falling back to its host, then default."""
+    return str(entry.get("label") or server_host(entry) or default)
+
+
 # Public alias — other modules (status_server.py, cppm_acme_manager_servers.py)
 # need the same flattening to read a server entry regardless of target_type.
 resolve_target_fields = _resolve_target_fields

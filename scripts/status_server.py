@@ -58,6 +58,7 @@ from config_utils import (
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
     acme_dns_resolvers, resolve_target_fields as _resolve_target_fields,
+    server_display_name, server_host,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -1501,7 +1502,7 @@ def _check_expiry_warnings() -> None:
                 days = d if days is None else min(days, d)
 
         if days is not None and days <= threshold:
-            srv_label = s.get("label") or s.get("cppm_host", sid)
+            srv_label = server_display_name(s, sid)
             msg       = (f"[{srv_label}] Certificate for {s.get('domain', '?')} expires in "
                          f"{days} day(s). Renewal runs automatically at ≤30 days, "
                          f"but manual action may be needed.")
@@ -3106,7 +3107,9 @@ def _settings_list_page(servers: list, username: str,
         for s in servers:
             sid    = _esc(str(s.get("id", "")))
             label  = _esc(s.get("label", ""))
-            host   = _esc(s.get("cppm_host", ""))
+            rs     = _resolve_target_fields(s)
+            host   = _esc(rs.get("ssh_host", "") if rs.get("target_type") == "linux_ssh"
+                          else rs.get("cppm_host", ""))
             domain = _esc(s.get("domain", ""))
             prov   = _esc((get_dns_credential(s.get("dns_credential_id", "")) or {}).get("dns_provider", ""))
             acme   = _esc(s.get("acme_server", "letsencrypt"))
@@ -4786,7 +4789,7 @@ def _notifications_page(server_id: str, username: str,
     if flash_msg:
         flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
 
-    label     = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label     = _esc(srv.get("label") or server_host(srv))
     sid       = _esc(server_id)
     notif_cfg = srv.get("notifications") or {}
     channels  = notif_cfg.get("channels") or []
@@ -4878,7 +4881,7 @@ def _notification_form_page(server_id: str, channel: dict = None,
 
     is_edit  = bool(channel and channel.get("id"))
     sid      = _esc(server_id)
-    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label    = _esc(srv.get("label") or server_host(srv))
     ch       = channel or {}
     cid      = _esc(str(ch.get("id", "")))
     action   = (f"/settings/notifications/{sid}/edit/{cid}" if is_edit
@@ -5014,7 +5017,7 @@ def _notification_threshold_page(server_id: str, error: str = "",
     if not srv:
         return _settings_list_page(load_servers(), username, "err", "Server not found")
     sid      = _esc(server_id)
-    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label    = _esc(srv.get("label") or server_host(srv))
     notif    = srv.get("notifications") or {}
     threshold = int(notif.get("expiry_warning_days") or 14)
     err_html  = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
@@ -5806,7 +5809,7 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         import re
                         slug = re.sub(r"[^\w.-]", "_",
-                                       str(srv.get("cppm_host") or srv.get("label") or log_server_id))
+                                       str(server_host(srv) or srv.get("label") or log_server_id))
                         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
                         data = build_log_bundle(srv)
                         return self._serve_bytes(
