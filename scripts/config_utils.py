@@ -113,6 +113,37 @@ def server_host(entry: dict) -> str:
     return str(r.get(key) or "")
 
 
+_MAX_SERVICES = 20
+_MAX_SERVICE_LEN = 40
+
+
+def parse_services(raw) -> list:
+    """Normalize a comma/newline-separated string (or list) into a clean service list.
+
+    Linux SSH entries only: the names are purely informational labels for what
+    consumes the certificate (e.g. "Apache", "Frigate"); they never affect
+    deployment. Blanks and case-insensitive duplicates are dropped.
+    """
+    if isinstance(raw, str):
+        raw = re.split(r"[,\n]", raw)
+    out: list = []
+    seen: set = set()
+    for item in raw or []:
+        name = " ".join(str(item).split())[:_MAX_SERVICE_LEN]
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out[:_MAX_SERVICES]
+
+
+def server_services(entry: dict) -> list:
+    """Return the informational service list for a linux_ssh entry ([] otherwise)."""
+    r = _resolve_target_fields(entry)
+    if r.get("target_type") != "linux_ssh":
+        return []
+    return parse_services(r.get("services"))
+
+
 def server_display_name(entry: dict, default: str = "") -> str:
     """Return the entry's label, falling back to its host, then default."""
     return str(entry.get("label") or server_host(entry) or default)
@@ -243,32 +274,54 @@ def validate_server(entry: dict) -> None:
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
+def _dup_key(resolved: dict) -> tuple:
+    """Return the uniqueness key for an entry, or () when it has no host yet.
+
+    ClearPass: one appliance per cppm_host. Linux SSH: a host may carry several
+    services, so the key is (ssh_host, ssh_port, remote_cert_dir) -- two entries
+    only collide when they would write the same files on the same host.
+    """
+    if str(resolved.get("target_type", "clearpass") or "clearpass") == "linux_ssh":
+        host = str(resolved.get("ssh_host", "")).strip().lower()
+        if not host:
+            return ()
+        port = str(resolved.get("ssh_port") or "22").strip()
+        remote_dir = str(resolved.get("remote_cert_dir", "")).strip().rstrip("/") or "/"
+        return ("linux_ssh", host, port, remote_dir)
+    host = str(resolved.get("cppm_host", "")).strip().lower()
+    return ("clearpass", host) if host else ()
+
+
 def _check_duplicate_host(entry: dict, exclude_id: str = None) -> None:
     """Raise ValueError if another entry already targets the same host.
 
-    Clearpass entries are deduped on cppm_host, linux_ssh entries on ssh_host
-    — each target_type's uniqueness key is a property of its own fields, so
-    an empty host of one type never collides with an empty host of another.
+    See _dup_key: clearpass dedupes on cppm_host, linux_ssh on host + port +
+    remote directory, so one Linux host can serve several services (same
+    certificate via a chained reload_command, or different certificates in
+    different directories).
     """
     resolved = _resolve_target_fields(entry)
-    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
-    host_field = "ssh_host" if target_type == "linux_ssh" else "cppm_host"
-    host = str(resolved.get(host_field, "")).strip().lower()
-    if not host:
+    key = _dup_key(resolved)
+    if not key:
         return
     for s in load_servers():
         if s.get("id") == exclude_id:
             continue
         s = _resolve_target_fields(s)
-        other_type = str(s.get("target_type", "clearpass") or "clearpass")
-        if other_type != target_type:
+        if _dup_key(s) != key:
             continue
-        if s.get(host_field, "").strip().lower() == host:
-            label = s.get("label") or s.get(host_field, "")
+        label = s.get("label") or server_host(s)
+        if key[0] == "linux_ssh":
             raise ValueError(
-                f"A server entry for '{s.get(host_field, '')}' already exists "
-                f"('{label}'). Each {_FIELD_LABELS.get(host_field, host_field)} must be unique."
+                f"'{label}' already deploys to {s.get('remote_cert_dir', '')} on "
+                f"{s.get('ssh_host', '')}. Use a different Remote Certificate Directory "
+                "for a separate certificate, or add the extra service to that entry's "
+                "reload command."
             )
+        raise ValueError(
+            f"A server entry for '{s.get('cppm_host', '')}' already exists "
+            f"('{label}'). Each {_FIELD_LABELS['cppm_host']} must be unique."
+        )
 
 
 # The cert-identity fields a certificate profile shares across every target

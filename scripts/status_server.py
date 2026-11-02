@@ -58,7 +58,7 @@ from config_utils import (
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
     acme_dns_resolvers, resolve_target_fields as _resolve_target_fields,
-    server_display_name, server_host,
+    server_display_name, server_host, server_services, parse_services,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -370,6 +370,7 @@ def build_server_status(server: dict) -> dict:
         "target_type":     server.get("target_type", "clearpass"),
         "cppm_host":       server.get("cppm_host", ""),
         "ssh_host":        server.get("ssh_host", ""),
+        "services":        server_services(server),
         "dns_provider":    dns_credential.get("dns_provider", ""),
         "acme_server":     server.get("acme_server", ""),
         "domain":          domain,
@@ -1716,6 +1717,7 @@ def _parse_ssh_server_form(f: dict) -> dict:
             "ssh_user":         f.get("ssh_user", "").strip(),
             "remote_cert_dir":  f.get("remote_cert_dir", "").strip(),
             "reload_command":  f.get("reload_command", "").strip(),
+            "services":        parse_services(f.get("services", "")),
             "ssh_private_key": f.get("ssh_private_key", ""),
             "ssh_password":    f.get("ssh_password", ""),
         },
@@ -2280,6 +2282,8 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .server-row{cursor:pointer;transition:background .12s}
 .server-row:hover td{background:rgba(255,255,255,.022)}
 .srv-label{font-weight:600;font-size:0.85rem;margin-bottom:0.18rem}
+.svc-tags{display:flex;flex-wrap:wrap;gap:0.25rem;margin-top:0.3rem}
+.svc-tag{font-size:0.65rem;padding:0.05rem 0.4rem;border:1px solid var(--border2,var(--border));border-radius:999px;color:var(--muted);white-space:nowrap}
 .srv-host{font-family:monospace;font-size:0.75rem;color:var(--muted);display:flex;align-items:center;gap:0.3rem}
 .mini-cert{border-left:3px solid var(--subtle);padding:0.22rem 0.4rem;border-radius:0 0.3rem 0.3rem 0;display:inline-block;min-width:70px}
 .mini-cert.ok{border-left-color:var(--ok)}.mini-cert.warn{border-left-color:var(--warn)}.mini-cert.danger{border-left-color:var(--danger)}.mini-cert.none{border-left-color:var(--subtle)}
@@ -3107,6 +3111,7 @@ def _settings_list_page(servers: list, username: str,
             rs     = _resolve_target_fields(s)
             host   = _esc(rs.get("ssh_host", "") if rs.get("target_type") == "linux_ssh"
                           else rs.get("cppm_host", ""))
+            host  += _svc_tags_html(server_services(rs))
             domain = _esc(s.get("domain", ""))
             prov   = _esc((get_dns_credential(s.get("dns_credential_id", "")) or {}).get("dns_provider", ""))
             acme   = _esc(s.get("acme_server", "letsencrypt"))
@@ -4223,6 +4228,14 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
           <button type="button" class="btn btn-ghost" onclick="useConfigureHelperReload()">Use this</button>
         </div>
       </details>
+      <div class="field">
+        <label>Services <span class="hint">(optional — what uses this certificate; shown in the server list, does not affect deployment)</span></label>
+        <input type="text" name="services" id="services" value="{_esc(", ".join(s.get("services") or []))}"
+               placeholder="Apache, Frigate" autocomplete="off" maxlength="400">
+        <div class="svc-tags" style="margin-top:0.4rem">
+          {"".join(f'<button type="button" class="svc-tag" style="cursor:pointer;background:none" onclick="addService(this.textContent)">{n}</button>' for n in ("Apache", "nginx", "Frigate", "Home Assistant", "Grafana", "Docker"))}
+        </div>
+      </div>
       <div class="field" style="margin-bottom:0">
         <label>Reload Command <span class="hint">(run on the target over the same SSH connection after deploy)</span></label>
         <input type="text" name="reload_command" id="reload_command" value="{fv('reload_command')}"
@@ -4299,6 +4312,12 @@ function updateConfigureHelper() {
 function useConfigureHelperReload() {
   var reload = document.getElementById('configure_helper_reload').textContent;
   if (reload) document.getElementById('reload_command').value = reload;
+}
+function addService(name) {
+  var el = document.getElementById('services');
+  var cur = el.value.split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+  if (cur.map(function(x) { return x.toLowerCase(); }).indexOf(name.toLowerCase()) < 0) cur.push(name);
+  el.value = cur.join(', ');
 }
 function runSshTest() {
   var fields = ['ssh_host', 'ssh_port', 'ssh_user', 'ssh_private_key', 'ssh_password', 'remote_cert_dir', 'reload_command'];
@@ -4720,6 +4739,15 @@ def _get_started_html() -> str:
     )
 
 
+def _svc_tags_html(services) -> str:
+    """Render the informational service tags of a Linux SSH entry ('' if none)."""
+    if not services:
+        return ""
+    return ('<div class="svc-tags">'
+            + "".join(f'<span class="svc-tag">{_esc(str(n))}</span>' for n in services)
+            + '</div>')
+
+
 def _overview_rows(servers: list) -> str:
     if not servers:
         return f'<tr><td colspan="{_OVERVIEW_COLSPAN}">{_get_started_html()}</td></tr>'
@@ -4759,6 +4787,7 @@ def _overview_rows(servers: list) -> str:
             f'<td>'
             f'<div class="srv-label">{_esc(s.get("label", "") or host)}</div>'
             f'<div class="srv-host">{host}</div>'
+            f'{_svc_tags_html(s.get("services"))}'
             f'{dots}</td>'
             f'<td>'
             f'{dns}'
@@ -5135,6 +5164,10 @@ function svcBadge(name,status){
   var c=status==='installed'?'badge-ok':'badge-none';
   return'<span class="badge '+c+'">'+esc(name)+' &middot; '+esc(status)+'</span>';
 }
+function svcTags(list){
+  if(!list||!list.length)return'';
+  return'<div class="svc-tags">'+list.map(function(n){return'<span class="svc-tag">'+esc(n)+'</span>';}).join('')+'</div>';
+}
 function renderClusterRow(s){
   if(!s.cluster_mode)return'';
   var nodes=s.cluster_nodes||[];
@@ -5195,6 +5228,7 @@ function renderRow(s){
   return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
     +'<td><div class="srv-label">'+esc(s.label||host)+'</div>'
     +'<div class="srv-host">'+esc(host)+'</div>'
+    +svcTags(s.services)
     +renderDots(sid,s.target_type)+'</td>'
     +'<td>'+esc(dnsLabel(s.dns_provider))
     +'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">'+esc(acmeLabel(s.acme_server))+'</div></td>'
@@ -5411,6 +5445,7 @@ function renderInfoCards(data, health){
   var isLinuxSsh=data.target_type==='linux_ssh';
   var targetRow=isLinuxSsh
     ?'<div class="row"><span class="lbl">Host</span><span class="val">'+sdot('d-dot-cppm',sh.ssh)+esc(data.ssh_host)+'</span></div>'
+      +((data.services&&data.services.length)?'<div class="row"><span class="lbl">Services</span><span class="val">'+data.services.map(esc).join(', ')+'</span></div>':'')
     :'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>';
   var cfg='<div class="card"><div class="card-title">Configuration</div><div class="meta">'
     +'<div class="row"><span class="lbl">Domain</span><span class="val">'+esc(data.domain)+'</span></div>'

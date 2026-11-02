@@ -34,7 +34,23 @@ In the web UI, **Add Server** → set **Target Type** to **Linux Server
 | Private Key | Pasted PEM — primary auth method |
 | Password | Fallback, only needed if no key is set |
 | Remote Cert Directory | Must already exist on the target, owned/writable by the SSH user |
+| Services | Optional labels (e.g. `Apache, Frigate`) shown in the server list; informational only, never affects deployment |
 | Reload Command | Optional — run on the target after each successful deploy |
+
+## Multiple services on one host
+
+A Linux host can have more than one entry. Two entries conflict only if they
+share the same Host, Port **and** Remote Cert Directory (they would overwrite
+each other's `fullchain.pem`/`privkey.pem`).
+
+- **Same certificate, several services** (e.g. Apache and Frigate both serving
+  `app.example.com`): use **one** entry and chain the services in the reload
+  command, e.g. `sudo systemctl reload apache2 && sudo docker restart frigate`.
+- **Different certificates** (e.g. `frigate.example.com` and `www.example.com`,
+  or a multi-homed host with a name per interface): add **one entry per
+  certificate**, each with its own Certificate ID and its own Remote Cert
+  Directory (e.g. `/etc/ssl/frigate` and `/etc/ssl/apache`). Host keys are
+  pinned per host and port, so entries on the same host share one pin.
 
 ## Host key verification (TOFU)
 
