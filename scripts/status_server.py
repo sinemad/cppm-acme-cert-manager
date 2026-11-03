@@ -368,6 +368,7 @@ def build_server_status(server: dict) -> dict:
         "id":              server.get("id", ""),
         "label":           server.get("label", domain),
         "target_type":     server.get("target_type", "clearpass"),
+        "host":            server_host(server),
         "cppm_host":       server.get("cppm_host", ""),
         "ssh_host":        server.get("ssh_host", ""),
         "services":        server_services(server),
@@ -3109,8 +3110,7 @@ def _settings_list_page(servers: list, username: str,
             sid    = _esc(str(s.get("id", "")))
             label  = _esc(s.get("label", ""))
             rs     = _resolve_target_fields(s)
-            host   = _esc(rs.get("ssh_host", "") if rs.get("target_type") == "linux_ssh"
-                          else rs.get("cppm_host", ""))
+            host   = _esc(server_host(rs))
             host  += _svc_tags_html(server_services(rs))
             domain = _esc(s.get("domain", ""))
             prov   = _esc((get_dns_credential(s.get("dns_credential_id", "")) or {}).get("dns_provider", ""))
@@ -4755,7 +4755,7 @@ def _overview_rows(servers: list) -> str:
     for s in servers:
         sid  = _esc(str(s.get("id", "")))
         is_linux_ssh = s.get("target_type") == "linux_ssh"
-        host = _esc(s.get("ssh_host", "") if is_linux_ssh else s.get("cppm_host", ""))
+        host = _esc(s.get("host", ""))
         dns  = _esc(_DNS_DISPLAY.get(s.get("dns_provider", ""), s.get("dns_provider", "")))
         _acme_raw = s.get("acme_server", "")
         acme = _esc(_ACME_DISPLAY.get(_acme_raw, "Custom CA" if _acme_raw.startswith("http") else _acme_raw))
@@ -5224,7 +5224,7 @@ function renderRow(s){
     +(tgts.indexOf('https_rsa')>=0?renderMiniCert(rsa,'HTTPS(RSA)'):'')
     +(tgts.indexOf('radsec')>=0?renderMiniCert(rsa,'RadSec'):'')
     +(tgts.indexOf('radius')>=0?renderMiniCert(rsa,'RADIUS'):'');
-  var host=s.target_type==='linux_ssh'?(s.ssh_host||''):(s.cppm_host||'');
+  var host=s.host||'';
   return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
     +'<td><div class="srv-label">'+esc(s.label||host)+'</div>'
     +'<div class="srv-host">'+esc(host)+'</div>'

@@ -15,13 +15,14 @@
   - `scripts/dns_utils.py`, `auth_utils.py`, `notify.py`, `cppm_acme_manager_{servers,users}.py`
   - `tests/` (pytest, `pythonpath = scripts`), `docs/01–10*.md`, `tools/screenshot_docs.py` (Playwright)
 - **Local-only planning docs (gitignored, not synced):** `LINUX_SSH_TARGET_PLAN.md`, `NEW_CENTRAL_NAC_TODO.md`.
+- **Note:** `tests/` is gitignored (`.gitignore` line 1), so test edits never appear in `git status`.
 - **Git:** branch `lego-v5-migration`, main branch `main`.
 
 ## Current Active Objectives
 - [ ] Phase 2: DNS-PERSIST-01 (real IETF draft challenge type) – blocked on a supported CA shipping stable support; keep scaffolding only. Re-check the draft before touching `dns_persist01.py`: https://ietf-wg-acme.github.io/draft-ietf-acme-dns-persist/draft-ietf-acme-dns-persist.html
 - [ ] CI gate: real staging-CA issuance on `LEGO_VERSION` bumps – deferred until DNS-PERSIST-01 is stable (no DNS credential in CI secrets).
 - [ ] Phase 3: generalize beyond ClearPass (New Central NAC target per `NEW_CENTRAL_NAC_TODO.md`: first resolve open API questions, then add `"new_central"` to `_DEPLOY_SCRIPTS`).
-- [ ] Audit remaining code for raw `servers.json` reads of nested Linux-SSH fields that bypass `resolve_target_fields()`.
+- [x] ~~Audit raw `servers.json` reads of nested Linux-SSH fields~~ — **Done 2026-11-02: no bypasses found.** Optional follow-up: replace the hand-rolled `ssh_host`/`cppm_host` branches (`status_server.py` Servers page, overview rows, overview JS) with `server_host()` / a `host` field from `build_server_status`, before adding the New Central target.
 - [ ] Remove temporary "nothing to migrate" log line in `_migrate_legacy_storage()` (`TODO`) once fleet confirmed off v4 storage. **Long-term / blocked:** most installs are still on v4; only the maintainer is on v5.x (dev branch). Keep the line and its test until v5 has shipped and been widely adopted.
 - [x] ~~Verify ZeroSSL RSA intermediate CN~~ — **Dropped by design.** Chains are always taken from ACME (Lego), never pinned or tabulated, so no code depends on the CN; the chain-drift check learns CNs at runtime. ZeroSSL deployed a new serverAuth-only intermediate on 2026-04-01 and ACME clients receive it automatically. Do not research or hard-code intermediate CNs.
 
@@ -32,6 +33,8 @@
   - Buypass removed entirely (dead ACME service).
   - Linux SSH target working end-to-end with Frigate (key normalization, probe-collision race fix, target-aware UI, hostname display fix, Frigate TLS docs).
   - DNS-PERSIST-01 scaffolding + `docs/09-dns-persist-01-draft.md` tracking doc.
+  - Multiple Linux services per host (2026-11-02, uncommitted at handoff): `_dup_key()`/`_check_duplicate_host()` — linux_ssh uniqueness is (`ssh_host`, `ssh_port`, `remote_cert_dir`), ClearPass still `cppm_host` only. Same cert + several services = one entry with a chained `reload_command`; different certs = one entry per cert, each with its own `certificate_id` and directory. Addresses are compared as typed (two IPs of one box are not detected as the same host). Documented in `docs/10-linux-ssh-target.md`.
+  - Informational Linux-only `services` list (`target_config.services`, `parse_services()`/`server_services()` in `config_utils.py`, tags via `_svc_tags_html()`/`svcTags()` in `status_server.py`); display-only, never affects deploy. Possible later step: structured services (systemd/docker/custom) that generate `reload_command` and report per-service results.
 - **Blockers/Bugs:**
   - DNS-PERSIST-01: no supported CA has stable production support (Let's Encrypt staging implements draft 00, lacks `accounturi`; Boulder #8708). Record format already changed once (plain URI → hash).
   - Editing `scripts/*.py` does not affect a running container; rebuild and force-recreate (see commands).
