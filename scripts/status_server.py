@@ -4005,7 +4005,7 @@ def _settings_form_page(server: dict = None, error: str = "",
       </div>'''
     elif other_profiles:
         profile_options = "".join(
-            f'<option value="{_esc(pid)}">{_esc(pid)} &mdash; {_esc(p.get("label") or p.get("domain") or p.get("cppm_host") or p.get("ssh_host", ""))}</option>'
+            f'<option value="{_esc(pid)}">{_esc(pid)} &mdash; {_esc(p.get("label") or p.get("domain") or server_host(p))}</option>'
             for p in other_profiles
             for pid in [str(p.get("certificate_id", "")).strip()]
         )
@@ -5444,9 +5444,9 @@ function renderInfoCards(data, health){
     +'</div></div>';
   var isLinuxSsh=data.target_type==='linux_ssh';
   var targetRow=isLinuxSsh
-    ?'<div class="row"><span class="lbl">Host</span><span class="val">'+sdot('d-dot-cppm',sh.ssh)+esc(data.ssh_host)+'</span></div>'
+    ?'<div class="row"><span class="lbl">Host</span><span class="val">'+sdot('d-dot-cppm',sh.ssh)+esc(data.host)+'</span></div>'
       +((data.services&&data.services.length)?'<div class="row"><span class="lbl">Services</span><span class="val">'+data.services.map(esc).join(', ')+'</span></div>':'')
-    :'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>';
+    :'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.host)+'</span></div>';
   var cfg='<div class="card"><div class="card-title">Configuration</div><div class="meta">'
     +'<div class="row"><span class="lbl">Domain</span><span class="val">'+esc(data.domain)+'</span></div>'
     +'<div class="row"><span class="lbl">DNS</span><span class="val">'+sdot('d-dot-dns',sh.dns)+esc(dnsLabel(data.dns_provider))+'</span></div>'
