@@ -30,7 +30,7 @@ These fields are stored once per profile and applied to every member:
 - Domain and extra SANs
 - ACME contact email and certificate authority (including EAB credentials for ZeroSSL)
 - The DNS Credential to use for the DNS-01 challenge
-- Certificate types (ClearPass only; Linux SSH targets always receive the ECC certificate)
+- Certificate types (the ClearPass slots: HTTPS ECC, HTTPS RSA, RADIUS, RadSec). Linux SSH targets choose ECC or RSA on their own form; a profile issues the union of what its members need.
 - Split-horizon DNS settings and resolvers
 
 Everything else — host, port, API client or SSH credentials, remote directory,

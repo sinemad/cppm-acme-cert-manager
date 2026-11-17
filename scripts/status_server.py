@@ -58,6 +58,7 @@ from config_utils import (
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
     acme_dns_resolvers, resolve_target_fields as _resolve_target_fields,
+    TARGET_TYPES, linux_key_type,
     server_display_name, server_host, server_services, parse_services,
 )
 
@@ -1573,8 +1574,7 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
 # today; this is the plug-in point future target types (New Central, Mist,
 # a generic Linux target, ...) register their own deploy script against.
 _DEPLOY_SCRIPTS = {
-    "clearpass": Path("/opt/cppm/clearpass_deploy_hook.sh"),
-    "linux_ssh": Path("/opt/cppm/linux_ssh_deploy_hook.sh"),
+    t: Path("/opt/cppm") / spec["deploy_script"] for t, spec in TARGET_TYPES.items()
 }
 
 
@@ -1721,6 +1721,7 @@ def _parse_ssh_server_form(f: dict) -> dict:
             "services":        parse_services(f.get("services", "")),
             "ssh_private_key": f.get("ssh_private_key", ""),
             "ssh_password":    f.get("ssh_password", ""),
+            "ssh_key_type":    linux_key_type({"ssh_key_type": f.get("ssh_key_type", "")}),
         },
     }
 
@@ -1777,6 +1778,7 @@ def _default_server_from_env() -> dict:
         "reload_command":       "",
         "ssh_private_key":      "",
         "ssh_password":         "",
+        "ssh_key_type":         "ecc",
     }
 
 
@@ -3242,7 +3244,8 @@ document.addEventListener('click', function(ev) {
                  nav_user=username, active="settings", show_nav=True)
 
 
-def _identity_fields_html(values: dict, disabled: bool = False) -> str:
+def _identity_fields_html(values: dict, disabled: bool = False,
+                          show_cert_types: bool = True) -> str:
     """Render the ACME Provider + Advanced (split-horizon) cards.
 
     This is exactly the cert-identity field set a certificate profile shares
@@ -3256,6 +3259,10 @@ def _identity_fields_html(values: dict, disabled: bool = False) -> str:
     per-server edit form when this target shares a profile with another
     target, so a shared value can't be silently clobbered by editing it here
     instead of on the profile (see _settings_form_page).
+
+    show_cert_types=False swaps the ClearPass certificate-type checkboxes for a
+    note; used on the profile editor when every member is a Linux target (a
+    Linux server picks ECC or RSA on its own form, not on the profile).
     """
     s = values
 
@@ -3281,6 +3288,41 @@ def _identity_fields_html(values: dict, disabled: bool = False) -> str:
            placeholder="alt{i}.{fv('domain')}"></div>'''
       for i in range(1, 11)
     )
+
+    if show_cert_types:
+        cert_types_html = f'''      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
+        <label>Certificate Types</label>
+        <div class="hint">Linux servers deploy one certificate. Choose ECC or RSA under <strong>Key Type</strong> in the Linux settings.</div>
+      </div>
+      <div class="field cert-types-field" style="margin-bottom:0">
+        <label>Certificate Types <span class="hint">(ClearPass targets; Linux servers choose ECC or RSA on their own form)</span></label>
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+             <input type="checkbox" name="issue_https_ecc" class="cert-shared" value="true"{chk_https_ecc}
+                 style="width:auto;margin:0">
+             HTTPS (ECC) <span class="hint">— Web UI and API</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+             <input type="checkbox" name="issue_https_rsa" class="cert-shared" value="true"{chk_https_rsa}
+                 style="width:auto;margin:0">
+             HTTPS (RSA) <span class="hint">— Web UI and API</span>
+           </label>
+           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+             <input type="checkbox" name="issue_radius" class="cert-shared" value="true"{chk_radius}
+               style="width:auto;margin:0">
+             RADIUS <span class="hint">— 802.1X / EAP</span>
+           </label>
+           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+             <input type="checkbox" name="issue_radsec" class="cert-shared" value="true"{chk_radsec}
+               style="width:auto;margin:0">
+             RadSec <span class="hint">— RADIUS over TLS</span>
+        </label>
+      </div>
+'''
+    else:
+        cert_types_html = '''<div class="field" style="margin-bottom:0">
+        <label>Certificate Types</label>
+        <div class="hint">Every target on this profile is a Linux server. Each server chooses ECC or RSA under <strong>Key Type</strong> on its own form.</div>
+      </div>'''
 
     html = f'''
     <div class="card" style="margin-bottom:1rem">
@@ -3339,33 +3381,7 @@ def _identity_fields_html(values: dict, disabled: bool = False) -> str:
                  autocomplete="off">
         </div>
       </div>
-      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
-        <label>Certificate Types</label>
-        <div class="hint">Linux server targets always receive the ECC certificate.</div>
-      </div>
-      <div class="field cert-types-field" style="margin-bottom:0">
-        <label>Certificate Types</label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_ecc" class="cert-shared" value="true"{chk_https_ecc}
-                 style="width:auto;margin:0">
-             HTTPS (ECC) <span class="hint">— Web UI and API</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_rsa" class="cert-shared" value="true"{chk_https_rsa}
-                 style="width:auto;margin:0">
-             HTTPS (RSA) <span class="hint">— Web UI and API</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radius" class="cert-shared" value="true"{chk_radius}
-               style="width:auto;margin:0">
-             RADIUS <span class="hint">— 802.1X / EAP</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radsec" class="cert-shared" value="true"{chk_radsec}
-               style="width:auto;margin:0">
-             RadSec <span class="hint">— RADIUS over TLS</span>
-        </label>
-      </div>
+      {cert_types_html}
       <details style="margin-top:1rem"{" open" if split_on else ""}>
         <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
         <div class="field" style="margin:0.75rem 0 0">
@@ -3735,6 +3751,8 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
         for m in members
     )
 
+    show_cert_types = not members or any(
+        m.get("target_type", "clearpass") != "linux_ssh" for m in members)
     save_confirm = (
         f"return confirm('Save changes to this profile? It updates all {len(members)} target(s) that share it.')"
         if members else "return true"
@@ -3769,7 +3787,7 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
   </div>
   <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}"
         onsubmit="{save_confirm}">
-    {_identity_fields_html(values)}
+    {_identity_fields_html(values, show_cert_types=show_cert_types)}
     {_dns_credential_select_html(values.get("dns_credential_id", ""))}
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
       <a href="/settings/profiles" class="btn btn-ghost">Cancel</a>
@@ -4298,6 +4316,14 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
         <input type="password" name="ssh_password" value="{fv('ssh_password')}" autocomplete="new-password">
       </div>
       <div class="field">
+        <label>Key Type</label>
+        <select name="ssh_key_type">
+          <option value="ecc"{sel(fv('ssh_key_type') or 'ecc', 'ecc')}>ECC (recommended)</option>
+          <option value="rsa"{sel(fv('ssh_key_type') or 'ecc', 'rsa')}>RSA</option>
+        </select>
+        <div class="hint">Which certificate this server receives. Choose RSA for software that needs it (e.g. some FreeRADIUS/EAP clients).</div>
+      </div>
+      <div class="field">
         <label>Remote Certificate Directory</label>
         <input type="text" name="remote_cert_dir" id="remote_cert_dir" value="{fv('remote_cert_dir')}"
                placeholder="e.g. /opt/acme-deploy/certs" oninput="updateConfigureHelper()">
@@ -4361,8 +4387,8 @@ function switchTargetType(val) {
       inp.disabled = !active;
     });
   });
-  // Cert types only apply to ClearPass; Linux SSH targets always get the ECC
-  // cert. Hide (don't disable) the checkboxes so their values still post.
+  // Cert-type checkboxes only apply to ClearPass; Linux picks ECC or RSA via Key Type.
+  Hide (don't disable) the checkboxes so their values still post.
   var isLinux = (val === 'linux_ssh');
   document.querySelectorAll('.cert-types-field').forEach(function(el) {
     el.style.display = isLinux ? 'none' : '';

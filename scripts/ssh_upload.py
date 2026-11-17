@@ -291,9 +291,9 @@ def test_ssh_target(entry: dict) -> dict:
 def deploy_to_ssh_target(env: dict) -> int:
     """Push fullchain/privkey to the remote host and run reload_command.
 
-    Reads SERVER_CERT_DIR/<domain>.ecc.fullchain.cer + .ecc.key (linux_ssh
-    targets always deploy the ECC cert — see LINUX_SSH_TARGET_PLAN.md).
-    Returns a process-style exit code (0 = success) for the deploy hook.
+    The deploy hook picks the files (<domain>.ecc.* or <domain>.rsa.*,
+    per the target's SSH_KEY_TYPE) and passes them as LOCAL_FULLCHAIN and
+    LOCAL_PRIVKEY. Returns a process-style exit code (0 = success) for the deploy hook.
     """
     import sys
 

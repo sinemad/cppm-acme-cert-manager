@@ -18,8 +18,11 @@ already there.
   Either is accepted by `validate_server()` — at least one is required.
 - **Reload**: an optional shell command run on the target immediately after
   a successful deploy (e.g. `sudo systemctl reload nginx`).
-- **Cert type**: Linux SSH targets always issue and deploy the **ECC**
-  certificate only, matching the single fullchain/privkey layout.
+- **Key type**: each Linux target receives **one** certificate, either **ECC**
+  (default) or **RSA**, chosen with the **Key Type** field. The ClearPass-only
+  slots (HTTPS ECC/RSA, RADIUS, RadSec) don't apply. Pick RSA for software that
+  needs it, such as FreeRADIUS with older EAP clients. The deployed files are
+  always named `fullchain.pem` and `privkey.pem` regardless of key type.
 
 ## Adding a target
 
@@ -35,6 +38,7 @@ In the web UI, **Add Server** → set **Target Type** to **Linux Server
 | SSH User | The account the private key/password authenticates as |
 | Private Key | Pasted PEM — primary auth method |
 | Password | Fallback, only needed if no key is set |
+| Key Type | ECC (default) or RSA: which certificate this server receives |
 | Remote Cert Directory | Must already exist on the target, owned/writable by the SSH user |
 | Services | Optional labels (e.g. `Apache, Frigate`) shown in the server list; informational only, never affects deployment |
 | Reload Command | Optional — run on the target after each successful deploy |

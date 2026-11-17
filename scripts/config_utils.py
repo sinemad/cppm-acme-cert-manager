@@ -36,10 +36,80 @@ _REQUIRED = {"label", "certificate_id", "cppm_host", "cppm_client_id", "cppm_cli
 # separately below since _REQUIRED_BY_TYPE only expresses "must be non-blank".
 _REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert_dir"}
 
-# Required fields per target_type. "clearpass" is the only implemented type
-# today; this map is the seam future target types (New Central, Mist, a
-# generic Linux target, ...) hang their own required fields off of.
-_REQUIRED_BY_TYPE = {"clearpass": _REQUIRED, "linux_ssh": _REQUIRED_SSH}
+# ── Target type registry ──────────────────────────────────────────────────────
+#
+# One entry per deploy target type. Everything that used to branch on
+# `target_type == "linux_ssh"` (required fields, host field, deploy script,
+# which key types a target consumes) reads from here, so a new type (New
+# Central NAC, Juniper Access Assurance, ...) is one entry plus its deploy
+# script instead of edits scattered across the code base.
+#
+#   label          shown in the UI
+#   host_field     the entry field holding the target's address
+#   required       fields that must be non-blank (validate_server)
+#   deploy_script  script under /opt/cppm that pushes issued certs
+#   deploy_mode    how certs reach the target ("api_upload", "file_pair", ...)
+#   key_types      key types the type can consume; a type with more than one
+#                  lets the user choose via `key_type_field`
+#   key_type_field entry field holding that choice (None = fixed by cert_types)
+#   consumes       callable(entry) -> set of {"ecc", "rsa"} this target uses
+#
+# "ecc"/"rsa" are the two key types the pipeline can issue (ISSUE_ECC/ISSUE_RSA).
+
+KEY_TYPES = ("ecc", "rsa")
+
+
+def _clearpass_consumes(entry: dict) -> set:
+    targets = set(certificate_targets(entry))
+    out = set()
+    if "https_ecc" in targets:
+        out.add("ecc")
+    if targets & {"https_rsa", "radius", "radsec"}:
+        out.add("rsa")
+    return out
+
+
+def linux_key_type(entry: dict) -> str:
+    """The key type a linux_ssh entry deploys: "ecc" (default) or "rsa"."""
+    value = str(_resolve_target_fields(entry).get("ssh_key_type", "") or "").strip().lower()
+    return value if value in KEY_TYPES else "ecc"
+
+
+def _linux_consumes(entry: dict) -> set:
+    return {linux_key_type(entry)}
+
+
+TARGET_TYPES = {
+    "clearpass": {
+        "label": "ClearPass",
+        "host_field": "cppm_host",
+        "required": _REQUIRED,
+        "deploy_script": "clearpass_deploy_hook.sh",
+        "deploy_mode": "api_upload",
+        "key_types": ("ecc", "rsa"),
+        "key_type_field": None,
+        "consumes": _clearpass_consumes,
+    },
+    "linux_ssh": {
+        "label": "Linux Server (SSH)",
+        "host_field": "ssh_host",
+        "required": _REQUIRED_SSH,
+        "deploy_script": "linux_ssh_deploy_hook.sh",
+        "deploy_mode": "file_pair",
+        "key_types": ("ecc", "rsa"),
+        "key_type_field": "ssh_key_type",
+        "consumes": _linux_consumes,
+    },
+}
+
+
+def target_spec(target_type: str) -> dict:
+    """Registry entry for a target type; ClearPass for unknown/blank types."""
+    return TARGET_TYPES.get(str(target_type or "clearpass"), TARGET_TYPES["clearpass"])
+
+
+# Back-compat view of the registry's required fields.
+_REQUIRED_BY_TYPE = {t: spec["required"] for t, spec in TARGET_TYPES.items()}
 
 # ACME / DNS fields are optional as a group. All blank = ClearPass-only
 # monitoring (warning, not an error). Partly filled or invalid = error, because
@@ -205,10 +275,9 @@ def _resolve_target_fields(entry: dict) -> dict:
 
 
 def server_host(entry: dict) -> str:
-    """Return the target's hostname: ssh_host for linux_ssh, else cppm_host."""
+    """Return the target's address, read from its type's host field."""
     r = _resolve_target_fields(entry)
-    key = "ssh_host" if r.get("target_type") == "linux_ssh" else "cppm_host"
-    return str(r.get(key) or "")
+    return str(r.get(target_spec(r.get("target_type"))["host_field"]) or "")
 
 
 _MAX_SERVICES = 20
@@ -340,7 +409,7 @@ def validate_server(entry: dict) -> None:
     """Raises ValueError on missing or invalid fields."""
     resolved = _resolve_target_fields(entry)
     target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
-    required = _REQUIRED_BY_TYPE.get(target_type, _REQUIRED)
+    required = target_spec(target_type)["required"]
     for field in required:
         if not str(resolved.get(field, "")).strip():
             label = _FIELD_LABELS.get(field, field)
@@ -349,6 +418,9 @@ def validate_server(entry: dict) -> None:
         if not str(resolved.get("ssh_private_key", "")).strip() \
                 and not str(resolved.get("ssh_password", "")).strip():
             raise ValueError("Either a private key or a password is required.")
+        key_type = str(resolved.get("ssh_key_type", "") or "").strip().lower()
+        if key_type and key_type not in KEY_TYPES:
+            raise ValueError("Key type must be 'ecc' or 'rsa'.")
     if le_dns_configured(resolved):
         problems = le_dns_problems(resolved)
         if problems:
@@ -731,10 +803,7 @@ def server_cert_dir(server: dict) -> Path:
 def _legacy_host(server: dict) -> str:
     """Return the target-type-appropriate host used as a fallback directory key."""
     resolved = _resolve_target_fields(server)
-    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
-    if target_type == "linux_ssh":
-        return str(resolved.get("ssh_host", ""))
-    return str(resolved.get("cppm_host", ""))
+    return str(resolved.get(target_spec(resolved.get("target_type"))["host_field"], ""))
 
 
 def certificate_id(server: dict) -> str:
@@ -1308,6 +1377,22 @@ def migrate_dns_credentials_from_servers() -> int:
 
 # ── Shell environment export ───────────────────────────────────────────────────
 
+def target_key_types(entry: dict) -> set:
+    """Key types ("ecc"/"rsa") this one target consumes, per its type."""
+    r = _resolve_target_fields(entry)
+    return set(target_spec(r.get("target_type"))["consumes"](r))
+
+
+def profile_key_types(entry: dict) -> set:
+    """Key types the entry's whole certificate profile must issue: the union
+    of what every member consumes (the entry itself when it has no peers)."""
+    members = certificate_members(certificate_id(entry)) or [entry]
+    out: set = set()
+    for m in members:
+        out |= target_key_types(m)
+    return out
+
+
 def get_server_env_dict(server_id: str) -> Optional[dict]:
     """Return the per-server environment as a plain Python dict.
 
@@ -1322,7 +1407,8 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
     dns_provider = str(credential.get("dns_provider", ""))
     creds = credential.get("dns_credentials") or {}
     target_type = str(s.get("target_type", "clearpass") or "clearpass")
-    is_ssh = target_type == "linux_ssh"
+    own_types = target_spec(target_type)["consumes"](s)
+    issue_types = profile_key_types(s) or own_types or {"ecc"}
     env: dict[str, str] = {
         "CERTIFICATE_ID":       certificate_id(s),
         "TARGET_TYPE":          target_type,
@@ -1341,11 +1427,13 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        # Linux SSH targets always issue (and deploy) the ECC cert only —
-        # matches the fixed fullchain.pem/privkey.pem layout. ClearPass
-        # entries keep deriving flags from the selected cert_types.
-        "ISSUE_ECC":            "true" if (is_ssh or "https_ecc" in certificate_targets(s)) else "false",
-        "ISSUE_RSA":            "false" if is_ssh else ("true" if any(t in certificate_targets(s) for t in ("https_rsa", "radius", "radsec")) else "false"),
+        # ISSUE_* is what the whole certificate profile needs issued (union
+        # over its members); CONSUME_* is what this target itself deploys.
+        "ISSUE_ECC":            "true" if "ecc" in issue_types else "false",
+        "ISSUE_RSA":            "true" if "rsa" in issue_types else "false",
+        "CONSUME_ECC":          "true" if "ecc" in own_types else "false",
+        "CONSUME_RSA":          "true" if "rsa" in own_types else "false",
+        "SSH_KEY_TYPE":         linux_key_type(s),
         "UPLOAD_HTTPS_ECC":     "true" if "https_ecc" in certificate_targets(s) else "false",
         "UPLOAD_HTTPS_RSA":     "true" if "https_rsa" in certificate_targets(s) else "false",
         "UPLOAD_RADIUS":        "true" if "radius" in certificate_targets(s) else "false",

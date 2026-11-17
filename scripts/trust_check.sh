@@ -113,13 +113,13 @@ if output:
     TRUST_EXIT=0
     # Build args based on which cert types are enabled for this server
     TRUST_ARGS=(--only-trust-check)
-    [[ "${ISSUE_ECC:-true}" == "true" ]] && TRUST_ARGS+=(
+    [[ "${CONSUME_ECC:-${ISSUE_ECC:-true}}" == "true" ]] && TRUST_ARGS+=(
         --https-ecc-cert  "${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
         --https-ecc-key   "${CERT_DIR}/${DOMAIN_FILE}.ecc.key"
         --https-fullchain "${CERT_DIR}/${DOMAIN_FILE}.ecc.fullchain.cer"
         --https-ca        "${CERT_DIR}/${DOMAIN_FILE}.ecc.ca.cer"
     )
-    [[ "${ISSUE_RSA:-true}" == "true" ]] && TRUST_ARGS+=(
+    [[ "${CONSUME_RSA:-${ISSUE_RSA:-true}}" == "true" ]] && TRUST_ARGS+=(
         --radius-cert      "${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
         --radius-key       "${CERT_DIR}/${DOMAIN_FILE}.rsa.key"
         --radius-fullchain "${CERT_DIR}/${DOMAIN_FILE}.rsa.fullchain.cer"

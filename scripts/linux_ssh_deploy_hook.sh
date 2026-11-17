@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # linux_ssh_deploy_hook.sh – Called after successful issuance/renewal
-#                  Pushes the ECC fullchain/key to a Linux SSH target and
+#                  Pushes the fullchain/key (ECC by default, or RSA when the
+#                  target's SSH_KEY_TYPE is rsa) to a Linux SSH target and
 #                  runs its configured reload command.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -25,8 +26,11 @@ log "=== Deploy Hook (Linux SSH) ==="
 log "  Target : ${SSH_HOST}"
 log "  Domain : ${DOMAIN}"
 
-LOCAL_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.ecc.fullchain.cer"
-LOCAL_PRIVKEY="${CERT_DIR}/${DOMAIN_FILE}.ecc.key"
+KEY_TYPE="${SSH_KEY_TYPE:-ecc}"
+[[ "$KEY_TYPE" == "rsa" ]] || KEY_TYPE="ecc"
+log "  Key    : ${KEY_TYPE^^}"
+LOCAL_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.${KEY_TYPE}.fullchain.cer"
+LOCAL_PRIVKEY="${CERT_DIR}/${DOMAIN_FILE}.${KEY_TYPE}.key"
 for f in "$LOCAL_FULLCHAIN" "$LOCAL_PRIVKEY"; do
     [[ -f "$f" ]] || { err "Required file not found: $f"; status_write "FAILED" "UPLOAD" "Cert file missing – ${f}"; exit 1; }
 done
