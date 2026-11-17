@@ -58,7 +58,7 @@ from config_utils import (
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
     acme_dns_resolvers, resolve_target_fields as _resolve_target_fields,
-    TARGET_TYPES, linux_key_type,
+    TARGET_TYPES, linux_key_type, cert_slot_keys,
     server_display_name, server_host, server_services, parse_services,
 )
 
@@ -1674,8 +1674,8 @@ def _parse_identity_fields(f: dict) -> dict:
         "acme_email":       f.get("acme_email", "").strip(),
         "acme_server":      acme_server or "letsencrypt",
         "dns_credential_id": f.get("dns_credential_id", "").strip(),
-        "cert_types": [t for t in ("https_ecc", "https_rsa", "radius", "radsec")
-                 if f.get(f"issue_{t}") == "true"] or ["https_ecc", "https_rsa", "radius", "radsec"],
+        "cert_types": [t for t in cert_slot_keys() if f.get(f"issue_{t}") == "true"]
+                      or list(cert_slot_keys("clearpass")),
         "split_horizon_dns": f.get("split_horizon_dns", "") == "true",
         "split_horizon_resolvers": [r for r in re.split(r"[,\s]+", f.get("split_horizon_resolvers", "")) if r],
     }
@@ -1768,7 +1768,7 @@ def _default_server_from_env() -> dict:
         "dns_credential_id":    "",
         "eab_kid":              "",
         "eab_hmac_key":         "",
-        "cert_types":           ["https_ecc", "https_rsa", "radius", "radsec"],
+        "cert_types":           list(cert_slot_keys("clearpass")),
         "split_horizon_dns":    False,
         "split_horizon_resolvers": [],
         "ssh_host":             "",
@@ -3273,11 +3273,12 @@ def _identity_fields_html(values: dict, disabled: bool = False,
     acme_is_custom = acme_srv_raw.startswith("http")
     acme_srv   = "custom" if acme_is_custom else acme_srv_raw
     acme_custom_url = _esc(acme_srv_raw) if acme_is_custom else ""
-    cert_types = s.get("cert_types") or ["https_ecc", "https_rsa", "radius", "radsec"]
-    chk_https_ecc = " checked" if "https_ecc" in cert_types or "ecc" in cert_types else ""
-    chk_https_rsa = " checked" if "https_rsa" in cert_types else ""
-    chk_radius = " checked" if "radius" in cert_types or "rsa" in cert_types else ""
-    chk_radsec = " checked" if "radsec" in cert_types or "rsa" in cert_types else ""
+    cert_types = s.get("cert_types") or list(cert_slot_keys("clearpass"))
+    selected_slots = set(cert_types)
+    if "ecc" in selected_slots:
+        selected_slots.add("https_ecc")
+    if "rsa" in selected_slots:
+        selected_slots.update(("radius", "radsec"))
     split_on = bool(s.get("split_horizon_dns"))
     chk_split = " checked" if split_on else ""
     split_resolvers = _esc(", ".join(s.get("split_horizon_resolvers") or []))
@@ -3289,6 +3290,14 @@ def _identity_fields_html(values: dict, disabled: bool = False,
       for i in range(1, 11)
     )
 
+    slot_boxes = "".join(
+        f'''<label class="cert-slot" data-slot="{k}" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+          <input type="checkbox" name="issue_{k}" class="cert-shared" value="true"{" checked" if k in selected_slots else ""}
+                 style="width:auto;margin:0">
+          {_esc(lbl)} <span class="hint">— {_esc(hint)}</span>
+        </label>'''
+        for spec in TARGET_TYPES.values() for k, lbl, hint in spec["cert_slots"]
+    )
     if show_cert_types:
         cert_types_html = f'''      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
         <label>Certificate Types</label>
@@ -3296,26 +3305,7 @@ def _identity_fields_html(values: dict, disabled: bool = False,
       </div>
       <div class="field cert-types-field" style="margin-bottom:0">
         <label>Certificate Types <span class="hint">(ClearPass targets; Linux servers choose ECC or RSA on their own form)</span></label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_ecc" class="cert-shared" value="true"{chk_https_ecc}
-                 style="width:auto;margin:0">
-             HTTPS (ECC) <span class="hint">— Web UI and API</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_rsa" class="cert-shared" value="true"{chk_https_rsa}
-                 style="width:auto;margin:0">
-             HTTPS (RSA) <span class="hint">— Web UI and API</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radius" class="cert-shared" value="true"{chk_radius}
-               style="width:auto;margin:0">
-             RADIUS <span class="hint">— 802.1X / EAP</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radsec" class="cert-shared" value="true"{chk_radsec}
-               style="width:auto;margin:0">
-             RadSec <span class="hint">— RADIUS over TLS</span>
-        </label>
+        {slot_boxes}
       </div>
 '''
     else:
@@ -3752,7 +3742,7 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
     )
 
     show_cert_types = not members or any(
-        m.get("target_type", "clearpass") != "linux_ssh" for m in members)
+        cert_slot_keys(m.get("target_type", "clearpass")) for m in members)
     save_confirm = (
         f"return confirm('Save changes to this profile? It updates all {len(members)} target(s) that share it.')"
         if members else "return true"
@@ -4082,8 +4072,12 @@ def _settings_form_page(server: dict = None, error: str = "",
         }
         for p in other_profiles
     }).replace("</", "<\\/")
+    cert_slots_json = json.dumps(
+        {t: list(cert_slot_keys(t)) for t in TARGET_TYPES}).replace("</", "<\\/")
+    all_slots_json = json.dumps(list(cert_slot_keys())).replace("</", "<\\/")
     cert_profiles_script = (
         f'<script>window.CERT_PROFILES = {profiles_json};'
+        f'var CERT_SLOTS = {cert_slots_json}; var ALL_CERT_SLOTS = {all_slots_json};'
         f'window.CERT_ID_AUTOSUGGEST = {"false" if is_edit else "true"};</script>'
     )
     if not is_edit:
@@ -4336,6 +4330,7 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
             <option value="apache">Apache</option>
             <option value="nginx">nginx</option>
             <option value="frigate">Frigate (Docker)</option>
+            <option value="freeradius">FreeRADIUS</option>
             <option value="docker">Generic Docker container</option>
           </select>
         </div>
@@ -4387,14 +4382,19 @@ function switchTargetType(val) {
       inp.disabled = !active;
     });
   });
-  // Cert-type checkboxes only apply to ClearPass; Linux picks ECC or RSA via Key Type.
-  Hide (don't disable) the checkboxes so their values still post.
-  var isLinux = (val === 'linux_ssh');
+  // Cert-type checkboxes come from the registry (CERT_SLOTS): show only the
+  // slots this type offers, and disable the rest so they don't post.
+  var slots = CERT_SLOTS[val] || [];
+  document.querySelectorAll('.cert-slot').forEach(function(el) {
+    var on = slots.indexOf(el.getAttribute('data-slot')) !== -1;
+    el.style.display = on ? 'flex' : 'none';
+    el.querySelector('input').disabled = !on;
+  });
   document.querySelectorAll('.cert-types-field').forEach(function(el) {
-    el.style.display = isLinux ? 'none' : '';
+    el.style.display = slots.length ? '' : 'none';
   });
   document.querySelectorAll('.cert-types-linux-note').forEach(function(el) {
-    el.style.display = isLinux ? '' : 'none';
+    el.style.display = slots.length ? 'none' : '';
   });
 }
 var CONFIGURE_HELPER_SNIPPETS = {
@@ -4420,6 +4420,19 @@ var CONFIGURE_HELPER_SNIPPETS = {
       + '# itself. The reload command below is only a fallback if you want a\\n'
       + '# renewal to take effect immediately instead of within a minute.',
     reload: 'docker restart frigate'
+  },
+  freeradius: {
+    // One cert/key pair serves both 802.1X (EAP) and RadSec. Set Key Type to
+    // RSA for the widest supplicant compatibility (ECC works if clients allow).
+    snippet: '# mods-available/eap  (tls-config tls-common { ... })\\n'
+      + 'certificate_file = {{DIR}}/fullchain.pem\\n'
+      + 'private_key_file = {{DIR}}/privkey.pem\\n'
+      + '#\\n'
+      + '# The same pair works for RadSec (sites-available/tls).\\n'
+      + '# The freeradius service user must be able to read privkey.pem, e.g. make\\n'
+      + '# the deploy account a member of the freerad group and chmod 750 the directory.\\n'
+      + '# FreeRADIUS loads certs at start, so use a restart, not a reload.',
+    reload: 'sudo systemctl restart freeradius'
   },
   docker: {
     snippet: '# Bind-mount the directory read-only into the container:\\n#   -v {{DIR}}:{{DIR}}:ro\\n# Then reload or restart the container to pick up the new files.',
@@ -4517,8 +4530,8 @@ function applyCertProfile(value) {
     document.getElementById('acme_server_url').value = '';
     var credSel = document.getElementById('dns_credential_id');
     if (credSel) credSel.value = '';
-    ['issue_https_ecc', 'issue_https_rsa', 'issue_radius', 'issue_radsec'].forEach(function(name) {
-      var el = document.querySelector('[name="' + name + '"]');
+    ALL_CERT_SLOTS.forEach(function(slot) {
+      var el = document.querySelector('[name="issue_' + slot + '"]');
       if (el) el.checked = true;
     });
     document.getElementById('split_horizon_dns').checked = false;
@@ -4550,7 +4563,7 @@ function applyCertProfile(value) {
   var types = (p.cert_types || []).slice();
   if (types.indexOf('ecc') !== -1) types.push('https_ecc');
   if (types.indexOf('rsa') !== -1) { types.push('radius'); types.push('radsec'); }
-  ['https_ecc', 'https_rsa', 'radius', 'radsec'].forEach(function(t) {
+  ALL_CERT_SLOTS.forEach(function(t) {
     var el = document.querySelector('[name="issue_' + t + '"]');
     if (el) el.checked = types.indexOf(t) !== -1;
   });

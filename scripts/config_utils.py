@@ -52,11 +52,21 @@ _REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert
 #   key_types      key types the type can consume; a type with more than one
 #                  lets the user choose via `key_type_field`
 #   key_type_field entry field holding that choice (None = fixed by cert_types)
+#   cert_slots     (key, label, hint) tuples: the per-profile certificate
+#                  checkboxes this type offers (stored in `cert_types`). Empty
+#                  for a type with no slots (Linux picks one key type instead).
 #   consumes       callable(entry) -> set of {"ecc", "rsa"} this target uses
 #
 # "ecc"/"rsa" are the two key types the pipeline can issue (ISSUE_ECC/ISSUE_RSA).
 
 KEY_TYPES = ("ecc", "rsa")
+
+_CLEARPASS_CERT_SLOTS = (
+    ("https_ecc", "HTTPS (ECC)", "Web UI and API"),
+    ("https_rsa", "HTTPS (RSA)", "Web UI and API"),
+    ("radius",    "RADIUS",      "802.1X / EAP"),
+    ("radsec",    "RadSec",      "RADIUS over TLS"),
+)
 
 
 def _clearpass_consumes(entry: dict) -> set:
@@ -88,6 +98,7 @@ TARGET_TYPES = {
         "deploy_mode": "api_upload",
         "key_types": ("ecc", "rsa"),
         "key_type_field": None,
+        "cert_slots": _CLEARPASS_CERT_SLOTS,
         "consumes": _clearpass_consumes,
     },
     "linux_ssh": {
@@ -98,6 +109,7 @@ TARGET_TYPES = {
         "deploy_mode": "file_pair",
         "key_types": ("ecc", "rsa"),
         "key_type_field": "ssh_key_type",
+        "cert_slots": (),
         "consumes": _linux_consumes,
     },
 }
@@ -106,6 +118,19 @@ TARGET_TYPES = {
 def target_spec(target_type: str) -> dict:
     """Registry entry for a target type; ClearPass for unknown/blank types."""
     return TARGET_TYPES.get(str(target_type or "clearpass"), TARGET_TYPES["clearpass"])
+
+
+def cert_slot_keys(target_type: str = None) -> tuple:
+    """Slot keys one target type offers, or (with no argument) the ordered
+    union across every registered type."""
+    if target_type is not None:
+        return tuple(k for k, _l, _h in target_spec(target_type)["cert_slots"])
+    out = []
+    for spec in TARGET_TYPES.values():
+        for k, _l, _h in spec["cert_slots"]:
+            if k not in out:
+                out.append(k)
+    return tuple(out)
 
 
 # Back-compat view of the registry's required fields.
@@ -329,7 +354,7 @@ def certificate_targets(entry: dict) -> list[str]:
         targets.add("https_ecc")
     if "rsa" in targets:
         targets.update(("radius", "radsec"))
-    return [t for t in ("https_ecc", "https_rsa", "radius", "radsec") if t in targets]
+    return [t for t in cert_slot_keys("clearpass") if t in targets]
 
 
 def san_dns_names(entry: dict) -> list[str]:
@@ -437,8 +462,7 @@ def validate_server(entry: dict) -> None:
         except (ValueError, TypeError):
             raise ValueError("Callback port must be a number between 1 and 65535.")
         cert_types = certificate_targets(resolved)
-        valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
-        if not any(t in cert_types for t in valid_types):
+        if not any(t in cert_types for t in cert_slot_keys(target_type)):
             raise ValueError("At least one ClearPass certificate target must be selected.")
 
 

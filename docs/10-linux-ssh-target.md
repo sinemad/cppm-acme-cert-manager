@@ -186,6 +186,31 @@ immediately rather than within a minute — restart is safe for *this*
 purpose since the mount itself isn't changing between renewals, only the
 files under it.
 
+### FreeRADIUS
+
+FreeRADIUS has no web UI, so one certificate serves both 802.1X (EAP) and
+RadSec. That is why Linux targets don't offer separate RADIUS/RadSec slots:
+set **Key Type** to **RSA** (widest supplicant compatibility; ECC also works
+if your clients support it) and point FreeRADIUS at the deployed pair, in
+`mods-available/eap` under `tls-config tls-common`:
+
+```
+certificate_file = /opt/acme-deploy/certs/fullchain.pem
+private_key_file = /opt/acme-deploy/certs/privkey.pem
+```
+
+The same files work for RadSec (`sites-available/tls`). The `freeradius`
+service user (`freerad` on Debian/Ubuntu, `radiusd` on RHEL) must be able to
+read `privkey.pem`: make the deploy account a member of that group and
+`chmod 750` the directory. FreeRADIUS loads certificates at start, so use a
+restart rather than a reload:
+
+Reload command: `sudo systemctl restart freeradius` (`radiusd` on RHEL)
+
+Need different certificates for 802.1X and RadSec? Add two entries, each with
+its own Certificate ID and Remote Cert Directory (see
+[Multiple services on one host](#multiple-services-on-one-host)).
+
 ### Generic Docker container
 
 Bind-mount the same host directory read-only into the container at whatever
