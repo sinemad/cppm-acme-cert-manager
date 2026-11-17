@@ -13,6 +13,14 @@ import json
 import os
 import re
 import shlex
+import shutil
+import tempfile
+import threading
+import functools
+try:
+    import fcntl
+except ImportError:  # non-POSIX dev machines: in-process lock only
+    fcntl = None
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -68,6 +76,93 @@ _FIELD_LABELS = {
 }
 
 
+# ── Locking and atomic writes ─────────────────────────────────────────────────
+#
+# servers.json, profiles.json and dns_credentials.json are edited by
+# read-modify-write cycles from several threads (the web UI is a
+# ThreadingHTTPServer) and several processes (web UI, cppm-servers CLI,
+# startup migrations). Every public function that changes them is wrapped in
+# _locked(): an in-process RLock plus an flock on a lock file beside
+# servers.json, held for the whole cycle so concurrent edits queue instead of
+# overwriting each other and both files change together. Files are replaced
+# atomically so a crash mid-write can't leave a truncated file (which the
+# loaders would read as "no servers").
+
+_LOCK = threading.RLock()
+_lock_depth = 0
+_lock_fd = None
+
+
+def _lock_path() -> Path:
+    return SERVERS_FILE.parent / ".config.lock"
+
+
+class _config_lock:
+    """Re-entrant (thread and process) lock around config read-modify-write."""
+
+    def __enter__(self):
+        global _lock_depth, _lock_fd
+        _LOCK.acquire()
+        try:
+            if _lock_depth == 0 and fcntl is not None:
+                path = _lock_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except Exception:
+                    os.close(fd)
+                    raise
+                _lock_fd = fd
+            _lock_depth += 1
+        except Exception:
+            _LOCK.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        global _lock_depth, _lock_fd
+        try:
+            _lock_depth -= 1
+            if _lock_depth == 0 and _lock_fd is not None:
+                try:
+                    fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(_lock_fd)
+                    _lock_fd = None
+        finally:
+            _LOCK.release()
+        return False
+
+
+def _locked(fn):
+    """Run fn inside _config_lock()."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _config_lock():
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    """Write text to path via a same-directory temp file and os.replace()."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ── Read / write ──────────────────────────────────────────────────────────────
 
 def load_servers() -> list:
@@ -76,7 +171,10 @@ def load_servers() -> list:
         return []
     try:
         data = json.loads(SERVERS_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        profiles = load_profiles()
+        return [_hydrate(s, profiles) for s in data] if profiles else data
     except Exception:
         return []
 
@@ -340,6 +438,129 @@ _SHARED_PROFILE_FIELDS = (
 )
 
 
+# ── Certificate Profile store ─────────────────────────────────────────────────
+#
+# The shared fields above live in profiles.json (keyed by certificate_id), next
+# to servers.json, instead of being copied onto every member. The split is
+# transparent to callers: load_servers() merges a member's profile over the
+# entry ("hydration"), and _write() splits the shared fields back out. Anything
+# that reads or edits entries through config_utils therefore keeps seeing the
+# same flat entries it always did.
+#
+# A profile exists while at least one server references it. TODO(profiles-B):
+# once the UI can create standalone profiles, stop pruning member-less
+# profiles in _split_profiles() and have issuance skip them.
+
+def _profiles_file() -> Path:
+    # Resolved at call time so tests (and SERVERS_FILE overrides) redirect it.
+    return SERVERS_FILE.parent / "profiles.json"
+
+
+def load_profiles() -> dict:
+    """Return {certificate_id: {shared fields}}. {} on a missing or corrupt file."""
+    path = _profiles_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_profiles(profiles: dict) -> None:
+    path = _profiles_file()
+    if not profiles:
+        path.unlink(missing_ok=True)
+        return
+    _atomic_write(path, json.dumps(profiles, indent=2))
+
+
+def _copy_value(value):
+    return list(value) if isinstance(value, list) else value
+
+
+def _hydrate(entry: dict, profiles: dict) -> dict:
+    """Return entry with its profile's shared fields merged over it."""
+    pid = str(entry.get("certificate_id", "")).strip()
+    profile = profiles.get(pid) if pid else None
+    if not profile:
+        return entry
+    merged = dict(entry)
+    for field in _SHARED_PROFILE_FIELDS:
+        if field in profile:
+            merged[field] = _copy_value(profile[field])
+    return merged
+
+
+def _split_profiles(servers: list) -> tuple:
+    """Pure inverse of hydration: return (entries without shared fields, profiles).
+
+    - A profile already in the store is updated from any member whose shared
+      value differs (that is an edit made through that entry).
+    - A profile not yet stored is defined by its first member. Later members
+      that disagree are ignored (only the first member's values were ever used
+      to issue the certificate) and a warning names the fields.
+    - Entries with no certificate_id keep their shared fields inline.
+    - Profiles with no member are dropped (see the TODO above).
+    """
+    stored = load_profiles()
+    profiles = {pid: {k: _copy_value(v) for k, v in p.items()}
+                for pid, p in stored.items() if isinstance(p, dict)}
+    used: set = set()
+    out: list = []
+    for entry in servers:
+        pid = str(entry.get("certificate_id", "")).strip()
+        if not pid:
+            out.append(entry)
+            continue
+        used.add(pid)
+        shared = {k: _copy_value(entry[k]) for k in _SHARED_PROFILE_FIELDS if k in entry}
+        if pid not in profiles:
+            profiles[pid] = shared
+        elif pid in stored:
+            profiles[pid].update(shared)
+        else:
+            differing = [k for k, v in shared.items() if profiles[pid].get(k) != v]
+            if differing:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Profile '%s': '%s' differs from the profile's first member in %s; "
+                    "using the first member's values.",
+                    pid, entry.get("label") or entry.get("id"), ", ".join(differing))
+        out.append({k: v for k, v in entry.items() if k not in _SHARED_PROFILE_FIELDS})
+    return out, {pid: p for pid, p in profiles.items() if pid in used}
+
+
+@_locked
+def migrate_profiles_from_servers() -> int:
+    """One-time, idempotent startup migration: move shared ACME/DNS fields out
+    of servers.json into profiles.json. Returns the number of profiles created.
+
+    Backs servers.json up to servers.json.pre-profiles before the first rewrite
+    (an older image cannot read the split layout). Run at container start,
+    after migrate_dns_credentials_from_servers().
+    """
+    if not SERVERS_FILE.exists():
+        return 0
+    try:
+        raw = json.loads(SERVERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(raw, list):
+        return 0
+    old_profiles = load_profiles()
+    out, profiles = _split_profiles(load_servers())
+    if out == raw and profiles == old_profiles:
+        return 0
+    backup = SERVERS_FILE.with_name(SERVERS_FILE.name + ".pre-profiles")
+    if not backup.exists():
+        shutil.copy2(SERVERS_FILE, backup)
+    _write_profiles(profiles)
+    _write(out)
+    return len(set(profiles) - set(old_profiles))
+
+
 def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
     """Fill shared ACME fields from an existing explicit certificate profile."""
     profile_id = str(entry.get("certificate_id", "")).strip()
@@ -359,6 +580,7 @@ def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
     return entry
 
 
+@_locked
 def add_server(entry: dict) -> str:
     """Validate, check for duplicate host, and append. Returns the assigned server ID."""
     entry = _inherit_certificate_profile(dict(entry))
@@ -372,6 +594,7 @@ def add_server(entry: dict) -> str:
     return entry["id"]
 
 
+@_locked
 def update_server(server_id: str, entry: dict) -> bool:
     """Replace the existing entry with the given ID. Returns True if found."""
     entry = _inherit_certificate_profile(dict(entry), exclude_id=server_id)
@@ -388,6 +611,7 @@ def update_server(server_id: str, entry: dict) -> bool:
     return False
 
 
+@_locked
 def delete_server(server_id: str) -> bool:
     """Remove the entry with the given ID. Returns True if found."""
     servers = load_servers()
@@ -398,6 +622,7 @@ def delete_server(server_id: str) -> bool:
         _write(filtered)
     else:
         SERVERS_FILE.unlink(missing_ok=True)
+        _write_profiles({})
     return True
 
 
@@ -409,6 +634,7 @@ def _slugify_certificate_id(value: str, default: str = "certificate") -> str:
     return safe or default
 
 
+@_locked
 def migrate_from_env() -> Optional[str]:
     """
     One-time backwards-compatibility migration.
@@ -507,6 +733,7 @@ def certificate_members(profile_id: str) -> list[dict]:
     return [s for s in load_servers() if certificate_id(s) == profile_id]
 
 
+@_locked
 def backfill_certificate_ids() -> int:
     """Assign an explicit certificate_id to every entry that's missing one.
 
@@ -566,6 +793,7 @@ def list_profile_members(profile_id: str) -> list[dict]:
     ]
 
 
+@_locked
 def update_certificate_profile(profile_id: str, fields: dict) -> int:
     """Apply shared ACME/DNS fields to every entry sharing profile_id.
 
@@ -597,6 +825,7 @@ def update_certificate_profile(profile_id: str, fields: dict) -> int:
     return len(indices)
 
 
+@_locked
 def delete_certificate_profile(profile_id: str) -> int:
     """Detach every entry sharing profile_id (clears certificate_id on each).
 
@@ -623,6 +852,7 @@ _ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]+")
 _CERT_ID_PATTERN = _ID_PATTERN  # back-compat alias
 
 
+@_locked
 def rename_certificate_profile(old_id: str, new_id: str) -> int:
     """Rename a certificate profile's ID across every entry sharing it.
 
@@ -720,9 +950,7 @@ def load_dns_credentials() -> dict:
 
 
 def _write_dns_credentials(creds: dict) -> None:
-    DNS_CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DNS_CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
-    DNS_CREDENTIALS_FILE.chmod(0o600)
+    _atomic_write(DNS_CREDENTIALS_FILE, json.dumps(creds, indent=2))
 
 
 def list_dns_credentials() -> list[dict]:
@@ -773,6 +1001,7 @@ def _validate_dns_credential_fields(dns_provider: str, dns_credentials: dict) ->
         raise ValueError(f"DNS credentials for {provider} are incomplete: need {wanted}.")
 
 
+@_locked
 def add_dns_credential(dns_credential_id: str, dns_provider: str, dns_credentials: dict) -> str:
     """Create a new DNS Credential. Raises ValueError on invalid id/fields or collision."""
     dns_credential_id = str(dns_credential_id).strip()
@@ -792,6 +1021,7 @@ def add_dns_credential(dns_credential_id: str, dns_provider: str, dns_credential
     return dns_credential_id
 
 
+@_locked
 def update_dns_credential(dns_credential_id: str, fields: dict) -> None:
     """Update an existing DNS Credential's provider/credentials in place.
 
@@ -813,6 +1043,7 @@ def update_dns_credential(dns_credential_id: str, fields: dict) -> None:
     _write_dns_credentials(creds)
 
 
+@_locked
 def delete_dns_credential(dns_credential_id: str) -> int:
     """Delete a DNS Credential, detaching it (clears dns_credential_id) from
     every referencing server entry — same semantics as
@@ -840,6 +1071,7 @@ def delete_dns_credential(dns_credential_id: str) -> int:
     return detached
 
 
+@_locked
 def rename_dns_credential(old_id: str, new_id: str) -> int:
     """Rename a DNS Credential's ID, rewriting dns_credential_id on every
     referencing server entry. Simpler than rename_certificate_profile since
@@ -880,6 +1112,7 @@ def rename_dns_credential(old_id: str, new_id: str) -> int:
     return renamed
 
 
+@_locked
 def migrate_dns_credentials_from_servers() -> int:
     """One-time, idempotent startup migration: extract embedded dns_provider/
     dns_credentials fields out of servers.json entries into the DNS
@@ -1023,6 +1256,7 @@ def get_server_notifications(server_id: str) -> dict:
     return s.get("notifications") or {"expiry_warning_days": 14, "channels": []}
 
 
+@_locked
 def update_server_notifications(server_id: str, notifications: dict) -> bool:
     """Replace the notifications block for a server. Returns True if found."""
     servers = load_servers()
@@ -1229,6 +1463,8 @@ def get_traefik_log(lines: int = 150) -> list:
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _write(servers: list) -> None:
-    SERVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SERVERS_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
-    SERVERS_FILE.chmod(0o600)
+    entries, profiles = _split_profiles(servers)
+    if profiles != load_profiles():
+        _write_profiles(profiles)  # first: a crash between the two writes is harmless
+    servers = entries
+    _atomic_write(SERVERS_FILE, json.dumps(servers, indent=2))

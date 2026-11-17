@@ -101,6 +101,17 @@ if [[ "$DNS_CRED_MIGRATE_COUNT" -gt 0 ]] 2>/dev/null; then
     log "  Extracted DNS credentials into dns_credentials.json for $DNS_CRED_MIGRATE_COUNT existing server(s)."
 fi
 
+# ── Split shared ACME/DNS fields out into profiles.json ──────────────────────
+PROFILE_MIGRATE_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import migrate_profiles_from_servers
+print(migrate_profiles_from_servers())
+" 2>/dev/null || echo "0")
+if [[ "$PROFILE_MIGRATE_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Moved shared ACME/DNS settings of $PROFILE_MIGRATE_COUNT certificate profile(s) into profiles.json (backup: servers.json.pre-profiles)."
+fi
+
 # ── Load server IDs from servers.json ─────────────────────────────────────────
 SERVER_IDS=$(python3 -c "
 import sys
