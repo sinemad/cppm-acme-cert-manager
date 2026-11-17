@@ -309,14 +309,22 @@ def deploy_to_ssh_target(env: dict) -> int:
         print(f"ERROR: invalid SSH_PORT {env.get('SSH_PORT')!r}", file=sys.stderr)
         return 1
 
-    fullchain = env.get("LOCAL_FULLCHAIN", "")
-    privkey = env.get("LOCAL_PRIVKEY", "")
-    if not fullchain or not Path(fullchain).is_file():
-        print(f"ERROR: fullchain not found: {fullchain}", file=sys.stderr)
-        return 1
-    if not privkey or not Path(privkey).is_file():
-        print(f"ERROR: private key not found: {privkey}", file=sys.stderr)
-        return 1
+    # (local fullchain, local key, remote-name suffix). "both" deploys the ECC
+    # and RSA pairs side by side as *.ecc.pem / *.rsa.pem; a single type keeps
+    # the plain fullchain.pem / privkey.pem names.
+    pairs = [(env.get("LOCAL_FULLCHAIN", ""), env.get("LOCAL_PRIVKEY", ""), "")]
+    if (env.get("SSH_KEY_TYPE") or "").strip().lower() == "both":
+        pairs = [
+            (env.get("LOCAL_FULLCHAIN", ""), env.get("LOCAL_PRIVKEY", ""), ".ecc"),
+            (env.get("LOCAL_FULLCHAIN_RSA", ""), env.get("LOCAL_PRIVKEY_RSA", ""), ".rsa"),
+        ]
+    for fullchain, privkey, _sfx in pairs:
+        if not fullchain or not Path(fullchain).is_file():
+            print(f"ERROR: fullchain not found: {fullchain}", file=sys.stderr)
+            return 1
+        if not privkey or not Path(privkey).is_file():
+            print(f"ERROR: private key not found: {privkey}", file=sys.stderr)
+            return 1
 
     pin_error = _ensure_host_key_pinned(host, port)
     if pin_error:
@@ -324,26 +332,30 @@ def deploy_to_ssh_target(env: dict) -> int:
         return 1
 
     with _temp_key_file(private_key) as key_path:
-        remote_full_tmp = f"{remote_dir.rstrip('/')}/.fullchain.pem.new"
-        remote_key_tmp = f"{remote_dir.rstrip('/')}/.privkey.pem.new"
-        remote_full = f"{remote_dir.rstrip('/')}/fullchain.pem"
-        remote_key = f"{remote_dir.rstrip('/')}/privkey.pem"
-
-        for local_path, remote_tmp in ((fullchain, remote_full_tmp), (privkey, remote_key_tmp)):
-            try:
-                r = _scp_up(host, port, user, key_path, password, local_path, remote_tmp)
-            except subprocess.TimeoutExpired:
-                print(f"ERROR: scp to {host} timed out", file=sys.stderr)
-                return 1
-            if r.returncode != 0:
-                print(f"ERROR: scp {local_path} -> {host}:{remote_tmp} failed: {r.stderr}", file=sys.stderr)
-                return 1
-
-        move_cmd = (
-            f"chmod 600 {shlex.quote(remote_key_tmp)} && "
-            f"mv {shlex.quote(remote_full_tmp)} {shlex.quote(remote_full)} && "
-            f"mv {shlex.quote(remote_key_tmp)} {shlex.quote(remote_key)}"
-        )
+        base = remote_dir.rstrip('/')
+        moves = []
+        deployed = []
+        for fullchain, privkey, sfx in pairs:
+            remote_full_tmp = f"{base}/.fullchain{sfx}.pem.new"
+            remote_key_tmp = f"{base}/.privkey{sfx}.pem.new"
+            remote_full = f"{base}/fullchain{sfx}.pem"
+            remote_key = f"{base}/privkey{sfx}.pem"
+            for local_path, remote_tmp in ((fullchain, remote_full_tmp), (privkey, remote_key_tmp)):
+                try:
+                    r = _scp_up(host, port, user, key_path, password, local_path, remote_tmp)
+                except subprocess.TimeoutExpired:
+                    print(f"ERROR: scp to {host} timed out", file=sys.stderr)
+                    return 1
+                if r.returncode != 0:
+                    print(f"ERROR: scp {local_path} -> {host}:{remote_tmp} failed: {r.stderr}", file=sys.stderr)
+                    return 1
+            moves.append(
+                f"chmod 600 {shlex.quote(remote_key_tmp)} && "
+                f"mv {shlex.quote(remote_full_tmp)} {shlex.quote(remote_full)} && "
+                f"mv {shlex.quote(remote_key_tmp)} {shlex.quote(remote_key)}"
+            )
+            deployed.append(f"fullchain{sfx}.pem/privkey{sfx}.pem")
+        move_cmd = " && ".join(moves)
         try:
             r = _run_remote(host, port, user, key_path, password, move_cmd)
         except subprocess.TimeoutExpired:
@@ -352,7 +364,7 @@ def deploy_to_ssh_target(env: dict) -> int:
         if r.returncode != 0:
             print(f"ERROR: could not move cert files into place on {host}: {r.stderr}", file=sys.stderr)
             return 1
-        print(f"Deployed fullchain.pem/privkey.pem to {host}:{remote_dir}")
+        print(f"Deployed {', '.join(deployed)} to {host}:{remote_dir}")
 
         if reload_command:
             try:

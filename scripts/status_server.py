@@ -4314,8 +4314,9 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
         <select name="ssh_key_type">
           <option value="ecc"{sel(fv('ssh_key_type') or 'ecc', 'ecc')}>ECC (recommended)</option>
           <option value="rsa"{sel(fv('ssh_key_type') or 'ecc', 'rsa')}>RSA</option>
+          <option value="both"{sel(fv('ssh_key_type') or 'ecc', 'both')}>Both (ECC and RSA)</option>
         </select>
-        <div class="hint">Which certificate this server receives. Choose RSA for software that needs it (e.g. some FreeRADIUS/EAP clients).</div>
+        <div class="hint">Which certificate this server receives. ECC or RSA is written as <code>fullchain.pem</code>/<code>privkey.pem</code>. <strong>Both</strong> writes <code>fullchain.ecc.pem</code>, <code>privkey.ecc.pem</code>, <code>fullchain.rsa.pem</code> and <code>privkey.rsa.pem</code> (e.g. FreeRADIUS serving both kinds of client).</div>
       </div>
       <div class="field">
         <label>Remote Certificate Directory</label>
@@ -4423,7 +4424,7 @@ var CONFIGURE_HELPER_SNIPPETS = {
   },
   freeradius: {
     // One cert/key pair serves both 802.1X (EAP) and RadSec. Set Key Type to
-    // RSA for the widest supplicant compatibility (ECC works if clients allow).
+    // RSA for the widest supplicant compatibility, or Both for ECC + RSA files.
     snippet: '# mods-available/eap  (tls-config tls-common { ... })\\n'
       + 'certificate_file = {{DIR}}/fullchain.pem\\n'
       + 'private_key_file = {{DIR}}/privkey.pem\\n'

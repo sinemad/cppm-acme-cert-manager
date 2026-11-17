@@ -18,11 +18,14 @@ already there.
   Either is accepted by `validate_server()` — at least one is required.
 - **Reload**: an optional shell command run on the target immediately after
   a successful deploy (e.g. `sudo systemctl reload nginx`).
-- **Key type**: each Linux target receives **one** certificate, either **ECC**
-  (default) or **RSA**, chosen with the **Key Type** field. The ClearPass-only
-  slots (HTTPS ECC/RSA, RADIUS, RadSec) don't apply. Pick RSA for software that
-  needs it, such as FreeRADIUS with older EAP clients. The deployed files are
-  always named `fullchain.pem` and `privkey.pem` regardless of key type.
+- **Key type**: the **Key Type** field chooses what a Linux target receives:
+  **ECC** (default), **RSA**, or **Both**. The ClearPass-only slots (HTTPS
+  ECC/RSA, RADIUS, RadSec) don't apply. With ECC or RSA, one pair is written
+  as `fullchain.pem` and `privkey.pem`. With **Both**, four files are written:
+  `fullchain.ecc.pem`, `privkey.ecc.pem`, `fullchain.rsa.pem` and
+  `privkey.rsa.pem`, so software that can serve both (e.g. FreeRADIUS) can use
+  each. Switching an existing target between single and Both does not remove
+  files from the earlier layout.
 
 ## Adding a target
 
@@ -38,7 +41,7 @@ In the web UI, **Add Server** → set **Target Type** to **Linux Server
 | SSH User | The account the private key/password authenticates as |
 | Private Key | Pasted PEM — primary auth method |
 | Password | Fallback, only needed if no key is set |
-| Key Type | ECC (default) or RSA: which certificate this server receives |
+| Key Type | ECC (default), RSA or Both: which certificate(s) this server receives |
 | Remote Cert Directory | Must already exist on the target, owned/writable by the SSH user |
 | Services | Optional labels (e.g. `Apache, Frigate`) shown in the server list; informational only, never affects deployment |
 | Reload Command | Optional — run on the target after each successful deploy |
@@ -190,14 +193,19 @@ files under it.
 
 FreeRADIUS has no web UI, so one certificate serves both 802.1X (EAP) and
 RadSec. That is why Linux targets don't offer separate RADIUS/RadSec slots:
-set **Key Type** to **RSA** (widest supplicant compatibility; ECC also works
-if your clients support it) and point FreeRADIUS at the deployed pair, in
-`mods-available/eap` under `tls-config tls-common`:
+set **Key Type** to **RSA** (widest supplicant compatibility) or **ECC**, or
+**Both** to deploy the two pairs side by side. Point FreeRADIUS at the
+deployed pair, in `mods-available/eap` under `tls-config tls-common`:
 
 ```
 certificate_file = /opt/acme-deploy/certs/fullchain.pem
 private_key_file = /opt/acme-deploy/certs/privkey.pem
 ```
+
+With **Both**, the files are `fullchain.rsa.pem`/`privkey.rsa.pem` and
+`fullchain.ecc.pem`/`privkey.ecc.pem`. how to load both is up to your FreeRADIUS
+version: check its `tls-config` documentation for whether it accepts an RSA and
+an ECC certificate together, otherwise point separate listeners at each pair.
 
 The same files work for RadSec (`sites-available/tls`). The `freeradius`
 service user (`freerad` on Debian/Ubuntu, `radiusd` on RHEL) must be able to

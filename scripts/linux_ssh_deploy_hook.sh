@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # linux_ssh_deploy_hook.sh – Called after successful issuance/renewal
-#                  Pushes the fullchain/key (ECC by default, or RSA when the
-#                  target's SSH_KEY_TYPE is rsa) to a Linux SSH target and
+#                  Pushes the fullchain/key (ECC by default, RSA, or both
+#                  per the target's SSH_KEY_TYPE) to a Linux SSH target and
 #                  runs its configured reload command.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -27,11 +27,22 @@ log "  Target : ${SSH_HOST}"
 log "  Domain : ${DOMAIN}"
 
 KEY_TYPE="${SSH_KEY_TYPE:-ecc}"
-[[ "$KEY_TYPE" == "rsa" ]] || KEY_TYPE="ecc"
+[[ "$KEY_TYPE" == "rsa" || "$KEY_TYPE" == "both" ]] || KEY_TYPE="ecc"
 log "  Key    : ${KEY_TYPE^^}"
-LOCAL_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.${KEY_TYPE}.fullchain.cer"
-LOCAL_PRIVKEY="${CERT_DIR}/${DOMAIN_FILE}.${KEY_TYPE}.key"
-for f in "$LOCAL_FULLCHAIN" "$LOCAL_PRIVKEY"; do
+# "both" deploys the ECC pair (LOCAL_*) and the RSA pair (LOCAL_*_RSA); ssh_upload.py
+# gives them .ecc/.rsa-suffixed remote names. Single types keep fullchain.pem/privkey.pem.
+PRIMARY="$KEY_TYPE"; [[ "$KEY_TYPE" == "both" ]] && PRIMARY="ecc"
+LOCAL_FULLCHAIN="${CERT_DIR}/${DOMAIN_FILE}.${PRIMARY}.fullchain.cer"
+LOCAL_PRIVKEY="${CERT_DIR}/${DOMAIN_FILE}.${PRIMARY}.key"
+REQUIRED_FILES=("$LOCAL_FULLCHAIN" "$LOCAL_PRIVKEY")
+if [[ "$KEY_TYPE" == "both" ]]; then
+    LOCAL_FULLCHAIN_RSA="${CERT_DIR}/${DOMAIN_FILE}.rsa.fullchain.cer"
+    LOCAL_PRIVKEY_RSA="${CERT_DIR}/${DOMAIN_FILE}.rsa.key"
+    REQUIRED_FILES+=("$LOCAL_FULLCHAIN_RSA" "$LOCAL_PRIVKEY_RSA")
+    export LOCAL_FULLCHAIN_RSA LOCAL_PRIVKEY_RSA
+fi
+export SSH_KEY_TYPE="$KEY_TYPE"
+for f in "${REQUIRED_FILES[@]}"; do
     [[ -f "$f" ]] || { err "Required file not found: $f"; status_write "FAILED" "UPLOAD" "Cert file missing – ${f}"; exit 1; }
 done
 

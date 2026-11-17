@@ -60,6 +60,8 @@ _REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert
 # "ecc"/"rsa" are the two key types the pipeline can issue (ISSUE_ECC/ISSUE_RSA).
 
 KEY_TYPES = ("ecc", "rsa")
+# A Linux target may also deploy both certificates ("both").
+LINUX_KEY_CHOICES = ("ecc", "rsa", "both")
 
 _CLEARPASS_CERT_SLOTS = (
     ("https_ecc", "HTTPS (ECC)", "Web UI and API"),
@@ -80,13 +82,14 @@ def _clearpass_consumes(entry: dict) -> set:
 
 
 def linux_key_type(entry: dict) -> str:
-    """The key type a linux_ssh entry deploys: "ecc" (default) or "rsa"."""
+    """What a linux_ssh entry deploys: "ecc" (default), "rsa" or "both"."""
     value = str(_resolve_target_fields(entry).get("ssh_key_type", "") or "").strip().lower()
-    return value if value in KEY_TYPES else "ecc"
+    return value if value in LINUX_KEY_CHOICES else "ecc"
 
 
 def _linux_consumes(entry: dict) -> set:
-    return {linux_key_type(entry)}
+    choice = linux_key_type(entry)
+    return set(KEY_TYPES) if choice == "both" else {choice}
 
 
 TARGET_TYPES = {
@@ -444,8 +447,8 @@ def validate_server(entry: dict) -> None:
                 and not str(resolved.get("ssh_password", "")).strip():
             raise ValueError("Either a private key or a password is required.")
         key_type = str(resolved.get("ssh_key_type", "") or "").strip().lower()
-        if key_type and key_type not in KEY_TYPES:
-            raise ValueError("Key type must be 'ecc' or 'rsa'.")
+        if key_type and key_type not in LINUX_KEY_CHOICES:
+            raise ValueError("Key type must be 'ecc', 'rsa' or 'both'.")
     if le_dns_configured(resolved):
         problems = le_dns_problems(resolved)
         if problems:
