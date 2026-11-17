@@ -438,10 +438,14 @@ git pull
 
 ```bash
 docker compose down
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 docker compose logs -f
 ```
+
+Build with `--no-cache` on every update: it re-downloads Lego and the CA
+certificates and refreshes the Alpine base image and system packages, so each
+update also picks up security fixes without you tracking a separate schedule.
 
 Watch for `[INFO ] Startup complete`. This rebuilds the application code only
 — no certificates are reissued and no configuration changes, unless a

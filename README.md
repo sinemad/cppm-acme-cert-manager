@@ -465,10 +465,14 @@ No git experience needed — from the repository folder:
 cd /opt/cppm-acme-cert-manager
 git pull
 docker compose down
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 docker compose logs -f
 ```
+
+Build with `--no-cache` on every update. It makes each update also pick up
+Alpine security updates and the latest CA intermediates, so there is nothing
+extra to remember between releases.
 
 Certificates, server configuration (`servers.json`), admin accounts, and
 `docker-compose.override.yml` all live outside the repository and are never
@@ -1046,7 +1050,7 @@ docker exec -it cppm-acme-cert-manager cppm-servers edit <id>
 
 ```bash
 docker compose down
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 ```
 
