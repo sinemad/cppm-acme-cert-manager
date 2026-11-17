@@ -4320,7 +4320,7 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
           <option value="rsa"{sel(fv('ssh_key_type') or 'ecc', 'rsa')}>RSA</option>
           <option value="both"{sel(fv('ssh_key_type') or 'ecc', 'both')}>Both (ECC and RSA)</option>
         </select>
-        <div class="hint">The kind of certificate this server receives. ECC is the modern default; choose RSA for older software. <strong>Both</strong> deploys one of each, for services that can use either (e.g. FreeRADIUS).</div>
+        <div class="hint">The kind of certificate this server receives. ECC is the modern default; choose RSA for older software. <strong>Both</strong> deploys one of each, for services that can use either (e.g. FreeRADIUS). Check the documentation of the service you are configuring to confirm which key type it supports.</div>
       </div>
       <div class="field">
         <label>Remote Certificate Directory</label>

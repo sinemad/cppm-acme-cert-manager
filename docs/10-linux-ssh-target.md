@@ -24,7 +24,8 @@ already there.
   as `fullchain.pem` and `privkey.pem`. With **Both**, four files are written:
   `fullchain.ecc.pem`, `privkey.ecc.pem`, `fullchain.rsa.pem` and
   `privkey.rsa.pem`, so software that can serve both (e.g. FreeRADIUS) can use
-  each. Switching an existing target between single and Both does not remove
+  each. Check the documentation of the service you are configuring to confirm
+  which key type it supports. Switching an existing target between single and Both does not remove
   files from the earlier layout.
 
 ## Adding a target
