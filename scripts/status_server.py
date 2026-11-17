@@ -3762,7 +3762,7 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
       <div class="field" style="margin-bottom:0;flex:1;min-width:16rem">
         <label>Certificate Profile ID</label>
         <input type="text" name="certificate_id" value="{_esc(profile_id)}" required
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.\\-]+">
       </div>
       <button type="submit" class="btn btn-warn">Rename</button>
     </form>
@@ -3809,7 +3809,7 @@ def _profile_create_page(values: dict, err_html: str, username: str) -> str:
       <div class="field" style="margin-bottom:0">
         <label>Certificate Profile ID</label>
         <input type="text" name="certificate_id" value="{pid}" required
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.\\-]+">
         <p class="hint" style="margin:0.4rem 0 0">Letters, numbers, '.', '_' and '-'. It names the certificate directory on disk.</p>
       </div>
     </div>
@@ -4089,7 +4089,7 @@ window.addEventListener('DOMContentLoaded', function() {
       <div class="field">
         <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
         <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
                oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
         <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''
@@ -4110,7 +4110,7 @@ window.addEventListener('DOMContentLoaded', function() {
       <div class="field">
         <label>Certificate Profile ID</label>
         <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
                oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
         <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''
@@ -4119,7 +4119,7 @@ window.addEventListener('DOMContentLoaded', function() {
       <div class="field">
         <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
         <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+"
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
                oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
         <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
       </div>'''

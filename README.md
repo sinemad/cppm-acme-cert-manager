@@ -180,7 +180,7 @@ cppm-acme-cert-manager/
 │   └── status_server.log                     ← Web UI process log
 │
 ├── certificates/                             ← Shared ACME certificate profiles
-│   └── prod-arubasecurity/                   ← One ACME/Lego state per profile
+│   └── prod-myserver-example/                ← One ACME/Lego state per profile
 │       ├── <domain>.ecc.cer / .ecc.key / ...
 │       ├── <domain>.rsa.cer / .rsa.key / ...
 │       ├── lego-ecc/ and lego-rsa/
