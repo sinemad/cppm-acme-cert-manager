@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cppm_acme_manager_servers.py – CLI server management for the CPPM ACME cert manager.
+cppm_acme_manager_servers.py – CLI server management for ACME Certificate Manager.
 
 Manages the ClearPass server entries stored in /data/certs/servers.json.  Each
 entry maps a ClearPass Policy Manager host to its ACME certificate authority and

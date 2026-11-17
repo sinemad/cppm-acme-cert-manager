@@ -20,7 +20,7 @@ For **ClearPass** targets, up to four certificate roles are issued and maintaine
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│              ClearPass ACME Certificate Manager Flow                     │
+│                   ACME Certificate Manager Flow                          │
 │                                                                          │
 │  ┌──────────────┐  DNS-01  ┌─────────────────┐                           │
 │  │    Lego      │◄────────►│  DNS Provider   │                           │

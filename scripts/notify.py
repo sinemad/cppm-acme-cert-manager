@@ -301,7 +301,7 @@ def send_test(server_id: str, channel_id: str) -> tuple[bool, str]:
 def _main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
-    parser = argparse.ArgumentParser(description="Send CPPM ACME notifications")
+    parser = argparse.ArgumentParser(description="Send ACME Certificate Manager notifications")
     parser.add_argument("--server-id", required=True)
     parser.add_argument("--event",     required=True,
                         choices=list(_EVENT_LABEL.keys()))

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cppm_acme_manager_users.py – CLI user management for the CPPM ACME cert manager web UI.
+cppm_acme_manager_users.py – CLI user management for the ACME Certificate Manager web UI.
 
 Manages the admin accounts that control access to the web-based status and
 configuration interface.  Credentials are stored as bcrypt hashes in

@@ -454,7 +454,7 @@ specific release's notes say otherwise.
 ### 4. Confirm the new version is running
 
 Open the web dashboard at `http://<docker-host>:8080/` and check the version
-shown in the footer (`ClearPass ACME Certificate Manager v<version> · build
+shown in the footer (`ACME Certificate Manager v<version> · build
 <build>`), or from the command line:
 
 ```bash
