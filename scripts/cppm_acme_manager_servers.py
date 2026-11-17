@@ -302,7 +302,7 @@ def _collect_ssh_server(s: dict) -> dict:
         print("  Either a private key or a password is required.")
         return _collect_ssh_server(s)
     tc["ssh_key_type"] = _prompt_choice(
-        "Key Type (which certificate this server receives)",
+        "Certificate Key Type (which certificate this server receives)",
         {
             "ecc": "ECC  (fullchain.pem / privkey.pem)",
             "rsa": "RSA  (fullchain.pem / privkey.pem)",
@@ -549,7 +549,7 @@ def cmd_show(server_id: str) -> int:
         print(f"  SSH User:         {s.get('ssh_user', '')}")
         print(f"  Private Key:      {'(set)' if s.get('ssh_private_key') else '(empty)'}")
         print(f"  Password:         {'(set)' if s.get('ssh_password') else '(empty)'}")
-        print(f"  Key Type:         {linux_key_type(s).upper()}")
+        print(f"  Cert Key Type:    {linux_key_type(s).upper()}")
         print(f"  Remote Cert Dir:  {s.get('remote_cert_dir', '')}")
         print(f"  Reload Command:   {s.get('reload_command', '')}")
     else:

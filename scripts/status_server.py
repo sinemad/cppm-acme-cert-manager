@@ -3301,7 +3301,7 @@ def _identity_fields_html(values: dict, disabled: bool = False,
     if show_cert_types:
         cert_types_html = f'''      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
         <label>Certificate Types</label>
-        <div class="hint">Linux servers deploy one certificate. Choose ECC or RSA under <strong>Key Type</strong> in the Linux settings.</div>
+        <div class="hint">Linux servers deploy one certificate. Choose ECC or RSA under <strong>Certificate Key Type</strong> in the Linux settings.</div>
       </div>
       <div class="field cert-types-field" style="margin-bottom:0">
         <label>Certificate Types <span class="hint">(ClearPass targets; Linux servers choose ECC or RSA on their own form)</span></label>
@@ -3311,7 +3311,7 @@ def _identity_fields_html(values: dict, disabled: bool = False,
     else:
         cert_types_html = '''<div class="field" style="margin-bottom:0">
         <label>Certificate Types</label>
-        <div class="hint">Every target on this profile is a Linux server. Each server chooses ECC or RSA under <strong>Key Type</strong> on its own form.</div>
+        <div class="hint">Every target on this profile is a Linux server. Each server chooses ECC or RSA under <strong>Certificate Key Type</strong> on its own form.</div>
       </div>'''
 
     html = f'''
@@ -4314,19 +4314,19 @@ sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
         <input type="password" name="ssh_password" value="{fv('ssh_password')}" autocomplete="new-password">
       </div>
       <div class="field">
-        <label>Key Type</label>
+        <label>Certificate Key Type</label>
         <select name="ssh_key_type">
           <option value="ecc"{sel(fv('ssh_key_type') or 'ecc', 'ecc')}>ECC (recommended)</option>
           <option value="rsa"{sel(fv('ssh_key_type') or 'ecc', 'rsa')}>RSA</option>
           <option value="both"{sel(fv('ssh_key_type') or 'ecc', 'both')}>Both (ECC and RSA)</option>
         </select>
-        <div class="hint">Which certificate this server receives. ECC or RSA is written as <code>fullchain.pem</code>/<code>privkey.pem</code>. <strong>Both</strong> writes <code>fullchain.ecc.pem</code>, <code>privkey.ecc.pem</code>, <code>fullchain.rsa.pem</code> and <code>privkey.rsa.pem</code> (e.g. FreeRADIUS serving both kinds of client).</div>
+        <div class="hint">The kind of certificate this server receives. ECC is the modern default; choose RSA for older software. <strong>Both</strong> deploys one of each, for services that can use either (e.g. FreeRADIUS).</div>
       </div>
       <div class="field">
         <label>Remote Certificate Directory</label>
         <input type="text" name="remote_cert_dir" id="remote_cert_dir" value="{fv('remote_cert_dir')}"
                placeholder="e.g. /opt/acme-deploy/certs" oninput="updateConfigureHelper()">
-        <div class="hint">The certificate will be written here as <code>fullchain.pem</code> and <code>privkey.pem</code>.</div>
+        <div class="hint">Files are written here as <code>fullchain.pem</code> and <code>privkey.pem</code>. With <strong>Both</strong>, the names are <code>fullchain.ecc.pem</code>, <code>privkey.ecc.pem</code>, <code>fullchain.rsa.pem</code> and <code>privkey.rsa.pem</code>.</div>
       </div>
       <details style="margin:0.75rem 0">
         <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Show me how to configure...</summary>
@@ -4427,7 +4427,7 @@ var CONFIGURE_HELPER_SNIPPETS = {
     reload: 'docker restart frigate'
   },
   freeradius: {
-    // One cert/key pair serves both 802.1X (EAP) and RadSec. Set Key Type to
+    // One cert/key pair serves both 802.1X (EAP) and RadSec. Set Certificate Key Type to
     // RSA for the widest supplicant compatibility, or Both for ECC + RSA files.
     snippet: '# mods-available/eap  (tls-config tls-common { ... })\\n'
       + 'certificate_file = {{DIR}}/fullchain.pem\\n'

@@ -18,7 +18,7 @@ already there.
   Either is accepted by `validate_server()` — at least one is required.
 - **Reload**: an optional shell command run on the target immediately after
   a successful deploy (e.g. `sudo systemctl reload nginx`).
-- **Key type**: the **Key Type** field chooses what a Linux target receives:
+- **Key type**: the **Certificate Key Type** field chooses what a Linux target receives:
   **ECC** (default), **RSA**, or **Both**. The ClearPass-only slots (HTTPS
   ECC/RSA, RADIUS, RadSec) don't apply. With ECC or RSA, one pair is written
   as `fullchain.pem` and `privkey.pem`. With **Both**, four files are written:
@@ -31,7 +31,7 @@ already there.
 
 In the web UI, **Add Server** → set **Target Type** to **Linux Server
 (SSH)**. The CLI (`cppm-servers add`) offers the same choice, and
-prompts for the Key Type (ECC, RSA or Both) when you add or edit a Linux server.
+prompts for the Certificate Key Type (ECC, RSA or Both) when you add or edit a Linux server.
 
 ![Add Linux server form](ui-server-form-linux.png)
 
@@ -42,7 +42,7 @@ prompts for the Key Type (ECC, RSA or Both) when you add or edit a Linux server.
 | SSH User | The account the private key/password authenticates as |
 | Private Key | Pasted PEM — primary auth method |
 | Password | Fallback, only needed if no key is set |
-| Key Type | ECC (default), RSA or Both: which certificate(s) this server receives |
+| Certificate Key Type | ECC (default), RSA or Both: which certificate(s) this server receives |
 | Remote Cert Directory | Must already exist on the target, owned/writable by the SSH user |
 | Services | Optional labels (e.g. `Apache, Frigate`) shown in the server list; informational only, never affects deployment |
 | Reload Command | Optional — run on the target after each successful deploy |
@@ -194,7 +194,7 @@ files under it.
 
 FreeRADIUS has no web UI, so one certificate serves both 802.1X (EAP) and
 RadSec. That is why Linux targets don't offer separate RADIUS/RadSec slots:
-set **Key Type** to **RSA** (widest supplicant compatibility) or **ECC**, or
+set **Certificate Key Type** to **RSA** (widest supplicant compatibility) or **ECC**, or
 **Both** to deploy the two pairs side by side. Point FreeRADIUS at the
 deployed pair, in `mods-available/eap` under `tls-config tls-common`:
 
