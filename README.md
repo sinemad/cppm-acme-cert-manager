@@ -90,6 +90,7 @@ no clone or install required:
 | [Quick Reference](docs/07-quick-reference.md) | Copy-pasteable commands for day-to-day operations |
 | [Traefik](docs/08-traefik.md) | Running behind a Traefik reverse proxy with HTTPS |
 | [Linux SSH Target](docs/10-linux-ssh-target.md) | Deploying certs to Apache/nginx/Frigate/Docker over SSH, host-key pinning, the Test Connection smoke test |
+| [Certificate Profiles](docs/11-certificate-profiles.md) | The Profiles tab: sharing one certificate's ACME/DNS config across targets, and reusable DNS credentials |
 
 ---
 
@@ -199,12 +200,14 @@ cppm-acme-cert-manager/
     └── ...
 ```
 
-### Shared Certificates Across ClearPass Targets
+### Shared Certificates Across Targets
 
-Each ClearPass entry has a **Certificate Profile ID** in the web UI. Give
-multiple ClearPass entries the same profile ID to share one ACME certificate —
-useful when the same certificate needs to be installed on several independent
-ClearPass Policy Managers.
+Each server entry (ClearPass or Linux SSH) has a **Certificate Profile ID** in
+the web UI. Give multiple entries the same profile ID to share one ACME
+certificate — useful when the same certificate needs to be installed on several
+independent ClearPass Policy Managers, or on ClearPass and a Linux host. Shared
+profiles are managed from the **Profiles** page; see
+[docs/11](docs/11-certificate-profiles.md).
 
 When you open **+ Add Server** and at least one profile already exists, a
 **Certificate Profile** dropdown appears above the Certificate Profile ID field:
@@ -214,11 +217,11 @@ When you open **+ Add Server** and at least one profile already exists, a
   entered manually, same as before.
 - **Selecting an existing profile** — those same fields are auto-populated
   from the matching server entry and locked (read-only/greyed out), since
-  they're shared by every server on that profile. Only the ClearPass-specific
-  fields (Label, Host/IP, Cluster mode, Client ID/Secret, Callback Host/Port,
-  Verify SSL) need to be entered manually. To change a shared value later,
-  edit any existing server on that profile — the update applies to every
-  server sharing the profile ID the next time each is saved.
+  they're shared by every server on that profile. Only the target-specific
+  fields (for ClearPass: Label, Host/IP, Cluster mode, Client ID/Secret,
+  Callback Host/Port, Verify SSL) need to be entered manually. To change a
+  shared value later, use **Profiles → Edit** (or the link in the notice on a
+  member's edit form); the update applies to every server on the profile at once.
 
 The manager issues or renews ECC/RSA once per profile, then uploads the
 resulting certificate sequentially to every associated target.
@@ -379,19 +382,24 @@ domain, and ACME settings — is entered here and stored in `servers.json`.
    Manager** or **Linux server (SSH)**. The ACME email and CA are prefilled
    from your most recently added server. (Or go to **Servers → + Add Server** and set
    **Target Type**.)
+   ![Get started checklist](docs/ui-get-started.png)
 2. Fill in all sections and click **Add Server**.
 
 | Section | Fields |
 |---|---|
-| **Identity** | Friendly label (e.g. `Production ClearPass`), and a Certificate Profile — reuse an existing profile from the dropdown or create a new one (see [Shared Certificates Across ClearPass Targets](#shared-certificates-across-clearpass-targets)) |
+| **Identity** | Friendly label (e.g. `Production ClearPass`), and a Certificate Profile — reuse an existing profile from the dropdown or create a new one (see [Shared Certificates Across Targets](#shared-certificates-across-targets)) |
 | **ClearPass** *(ClearPass type)* | Host/IP, Cluster mode, Client ID, Client Secret, Cert Passphrase, Callback Host, Callback Port, Verify SSL |
 | **Linux server** *(SSH type)* | Host/IP, Port, SSH user, private key (or password), remote cert directory, optional reload command — see [docs/10](docs/10-linux-ssh-target.md) |
 | **Domain & ACME** | Domain, up to 10 SAN DNS names, ACME email, Certificate Authority, Certificate Types (HTTPS(ECC)/HTTPS(RSA)/RADIUS/RadSec) |
 | **DNS Provider** | Provider selector + credentials (see table below) |
 
+The Linux server form (choose **Target Type → Linux Server (SSH)**):
+
+![Add Linux server form](docs/ui-server-form-linux.png)
+
 > Domain, SAN DNS, ACME, DNS Provider, and Certificate Types are locked
 > (read-only) when reusing an existing Certificate Profile — see
-> [Shared Certificates Across ClearPass Targets](#shared-certificates-across-clearpass-targets).
+> [Shared Certificates Across Targets](#shared-certificates-across-targets).
 
 #### CLI method
 
@@ -576,7 +584,8 @@ http://<docker-host>:8080/
 |---|---|---|
 | **Dashboard** — multi-server overview table | `/` | No (public by default) |
 | **Server Detail** — per-server certificate status | `/server/<id>` | No (public by default) |
-| **Servers** — ClearPass server configuration | `/settings` | Yes |
+| **Servers** — ClearPass and Linux server configuration | `/settings` | Yes |
+| **Profiles** — shared certificate profiles and DNS credentials | `/settings/profiles` | Yes |
 | **Notifications** — alert channels (Slack, Discord, Teams, Webhook) | `/settings/notifications` | Yes |
 | **Traefik** — HTTPS reverse proxy configuration | `/settings/traefik` | Yes |
 | **Users** — admin account management | `/admin/users` | Yes |
@@ -642,6 +651,17 @@ and configure their ACME and DNS provider settings. Each entry covers:
 
 Each ClearPass host must be unique. Configurations are stored in
 `/opt/cppm-certs/servers.json` (chmod 600) and survive container rebuilds.
+
+### Profiles page — shared certificates and DNS credentials
+
+![Certificate Profiles](docs/ui-profiles.png)
+
+Targets that use the same **Certificate Profile ID** share one ACME/DNS
+configuration and one issued certificate. The **Profiles** page lists each
+profile with its members, and lets you edit the shared settings once for every
+member, rename a profile (issued certificates are kept), or detach its targets.
+A second tab, **DNS Credentials**, holds reusable DNS vendor accounts that
+profiles refer to by ID. See [docs/11](docs/11-certificate-profiles.md) for details.
 
 All Servers page operations are also available via the CLI:
 

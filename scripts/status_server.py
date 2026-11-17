@@ -3339,7 +3339,11 @@ def _identity_fields_html(values: dict, disabled: bool = False) -> str:
                  autocomplete="off">
         </div>
       </div>
-      <div class="field" style="margin-bottom:0">
+      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
+        <label>Certificate Types</label>
+        <div class="hint">Linux server targets always receive the ECC certificate.</div>
+      </div>
+      <div class="field cert-types-field" style="margin-bottom:0">
         <label>Certificate Types</label>
         <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
              <input type="checkbox" name="issue_https_ecc" class="cert-shared" value="true"{chk_https_ecc}
@@ -4037,13 +4041,15 @@ def _settings_form_page(server: dict = None, error: str = "",
     # Form body — f-string with all interpolated Python values.
     del_section = ""
     if is_edit:
+        removal_scope = (", or remove files already deployed to the host"
+                         if s.get("target_type") == "linux_ssh" else " on ClearPass")
         del_section = f"""
     <div class="card" style="margin-bottom:1rem;border-color:var(--danger)">
       <div class="form-section-title" style="color:var(--danger)">Remove Server</div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
         <p style="font-size:0.78rem;color:var(--muted);margin:0;max-width:32rem">
           Permanently remove this server's configuration. This does not revoke or delete
-          already-issued certificates on ClearPass.
+          already-issued certificates{removal_scope}.
         </p>
         <div>
           <button type="button" class="btn btn-danger" id="del-btn-{sid}"
@@ -4268,6 +4274,15 @@ function switchTargetType(val) {
     el.querySelectorAll('input, textarea, select').forEach(function(inp) {
       inp.disabled = !active;
     });
+  });
+  // Cert types only apply to ClearPass; Linux SSH targets always get the ECC
+  // cert. Hide (don't disable) the checkboxes so their values still post.
+  var isLinux = (val === 'linux_ssh');
+  document.querySelectorAll('.cert-types-field').forEach(function(el) {
+    el.style.display = isLinux ? 'none' : '';
+  });
+  document.querySelectorAll('.cert-types-linux-note').forEach(function(el) {
+    el.style.display = isLinux ? '' : 'none';
   });
 }
 var CONFIGURE_HELPER_SNIPPETS = {

@@ -218,8 +218,8 @@ def le_dns_problems(entry: dict) -> list[str]:
     if "@" not in email:
         problems.append("ACME Email must be an email address.")
     acme = str(entry.get("acme_server", "")).strip()
-    if acme not in ("letsencrypt", "zerossl") and not acme.startswith("https://"):
-        problems.append("ACME Server must be 'letsencrypt', 'zerossl', or an https:// URL.")
+    if acme not in ("letsencrypt", "letsencrypt_test", "zerossl") and not acme.startswith("https://"):
+        problems.append("ACME Server must be 'letsencrypt', 'letsencrypt_test', 'zerossl', or an https:// URL.")
 
     credential = get_dns_credential(dns_credential_id)
     if credential is None:

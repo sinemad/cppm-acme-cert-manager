@@ -26,6 +26,8 @@ already there.
 In the web UI, **Add Server** → set **Target Type** to **Linux Server
 (SSH)**. The CLI (`cppm-servers add`) offers the same choice.
 
+![Add Linux server form](ui-server-form-linux.png)
+
 | Field | Notes |
 |---|---|
 | Host / IP | The SSH server's address |
@@ -36,6 +38,10 @@ In the web UI, **Add Server** → set **Target Type** to **Linux Server
 | Remote Cert Directory | Must already exist on the target, owned/writable by the SSH user |
 | Services | Optional labels (e.g. `Apache, Frigate`) shown in the server list; informational only, never affects deployment |
 | Reload Command | Optional — run on the target after each successful deploy |
+
+An existing Linux entry, with its `Services` labels shown as tags in the Servers list:
+
+![Edit Linux server](ui-server-edit-linux.png)
 
 ## Multiple services on one host
 

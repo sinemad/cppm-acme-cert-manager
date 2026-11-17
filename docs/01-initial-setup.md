@@ -223,6 +223,7 @@ docker exec -it cppm-acme-cert-manager cppm-users add admin
 All server configuration — credentials, DNS provider, domain, and ACME settings — is entered through the web UI and stored in `servers.json`.
 
 1. The empty dashboard shows a short checklist: add a DNS credential (optional here, it can also be created inline), then choose **ClearPass Policy Manager** or **Linux server (SSH)**. The ACME email and CA are prefilled from your most recently added server. (Or click **Servers → + Add Server** and set **Target Type**.)
+   ![Get started checklist](ui-get-started.png)
 2. Fill in all sections. The target-specific section depends on the type:
 
 | Section | Fields |
@@ -233,7 +234,13 @@ All server configuration — credentials, DNS provider, domain, and ACME setting
 | **Domain & ACME** | Domain (e.g. `cppm.example.com`), ACME email, Certificate Authority (Let's Encrypt / ZeroSSL / Custom) |
 | **DNS Provider** | Provider selector + credentials (see below) |
 
+   The Linux server form (**Target Type → Linux Server (SSH)**):
+
+   ![Add Linux server form](ui-server-form-linux.png)
+
 3. Click **Add Server** to save.
+
+To use one certificate on several targets (for example a ClearPass publisher and subscriber, or ClearPass and a Linux host), give them the same **Certificate Profile ID**. They then share one ACME/DNS configuration, managed from the **Profiles** tab — see [Certificate Profiles](11-certificate-profiles.md).
 
 The configuration is stored in `/opt/cppm-certs/servers.json` (chmod 600).
 
