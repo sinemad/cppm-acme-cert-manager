@@ -31,7 +31,7 @@ _LEGO_BIN = "/usr/local/bin/lego"
 # because the current DNS-01 flow needs a real production DNS credential
 # (e.g. a Cloudflare zone-edit token), which isn't safe to put in CI secrets
 # -- DNS-PERSIST-01 would remove that need entirely once usable.
-_TESTED_LEGO_VERSION = "5.5.2"
+_TESTED_LEGO_VERSION = "5.6.0"
 
 _LEGO_VERSION_RE = re.compile(r"lego version (\S+)")
 

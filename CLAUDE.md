@@ -2,7 +2,7 @@
 
 ## Core Architecture & Tech Stack
 - **Purpose:** Dockerized ACME certificate manager. Issues/renews certs (Let's Encrypt, Let's Encrypt staging, ZeroSSL, or custom ACME directory URL) via DNS-01 and deploys them to HPE Aruba ClearPass (CPPM) servers and, via the `linux_ssh` target type, arbitrary Linux services (e.g. Frigate). Version `2.2.0` (`VERSION`).
-- **Stack:** Alpine 3.24 container, Python 3 (stdlib web UI, `cryptography` lib), POSIX shell, cron (`config/crontab`), Lego `5.5.2` (`ENV LEGO_VERSION` in `Dockerfile`). Optional Traefik overlay (`docker-compose.traefik.yml`, `.env.traefik.example`).
+- **Stack:** Alpine 3.24 container, Python 3 (stdlib web UI, `cryptography` lib), POSIX shell, cron (`config/crontab`), Lego `5.6.0` (`ENV LEGO_VERSION` in `Dockerfile`). Optional Traefik overlay (`docker-compose.traefik.yml`, `.env.traefik.example`).
 - **Layout:**
   - `scripts/acme_provider.py` – provider ABC + result types (`KeyTypeResult.chain_drift`, `IssueResult.chain_drift_detected`)
   - `scripts/lego_provider.py` – Lego v5 provider: `_lego_run_args`/`_lego_revoke_args`/`_lego_migrate_args`, `_TESTED_LEGO_VERSION` + `lego_version_warning()`, legacy-storage migration, `chain_drift_warning()` (growing-set TOFU baseline in `chain_baseline.json`)
@@ -22,7 +22,7 @@
 - [ ] Phase 2: DNS-PERSIST-01 (real IETF draft challenge type) – blocked on a supported CA shipping stable support; keep scaffolding only. Re-check the draft before touching `dns_persist01.py`: https://ietf-wg-acme.github.io/draft-ietf-acme-dns-persist/draft-ietf-acme-dns-persist.html
 - [ ] CI gate: real staging-CA issuance on `LEGO_VERSION` bumps – deferred until DNS-PERSIST-01 is stable (no DNS credential in CI secrets).
 - [ ] Phase 3: generalize beyond ClearPass (New Central NAC target per `NEW_CENTRAL_NAC_TODO.md`: first resolve open API questions, then add `"new_central"` to `_DEPLOY_SCRIPTS`).
-- [x] ~~Audit raw `servers.json` reads of nested Linux-SSH fields~~ — **Done 2026-11-02: no bypasses found.** Follow-up also done 2026-11-04: Servers page, overview, detail JS and the dropdown label now use `server_host()` / the `host` field from `build_server_status`. The detail row label/dot still branch per target type (needs a New Central branch later).
+- [x] ~~Audit raw `servers.json` reads of nested Linux-SSH fields~~ — **Done 2026-11-02: no bypasses found.** Follow-up also done, committed and tested 2026-11-04 (closed): Servers page, overview, detail JS and the dropdown label now use `server_host()` / the `host` field from `build_server_status`. The detail row label/dot still branch per target type (needs a New Central branch later).
 - [ ] Remove temporary "nothing to migrate" log line in `_migrate_legacy_storage()` (`TODO`) once fleet confirmed off v4 storage. **Long-term / blocked:** most installs are still on v4; only the maintainer is on v5.x (dev branch). Keep the line and its test until v5 has shipped and been widely adopted.
 - [x] ~~Verify ZeroSSL RSA intermediate CN~~ — **Dropped by design.** Chains are always taken from ACME (Lego), never pinned or tabulated, so no code depends on the CN; the chain-drift check learns CNs at runtime. ZeroSSL deployed a new serverAuth-only intermediate on 2026-04-01 and ACME clients receive it automatically. Do not research or hard-code intermediate CNs.
 
