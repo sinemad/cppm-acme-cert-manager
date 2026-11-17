@@ -44,7 +44,9 @@ _REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert
 # Central NAC, Juniper Access Assurance, ...) is one entry plus its deploy
 # script instead of edits scattered across the code base.
 #
-#   label          shown in the UI
+#   label          shown in the UI (Target Type dropdown, chooser cards)
+#   blurb          one-line description on the "Get started" chooser card
+#   needs          list of prerequisites shown on that card
 #   host_field     the entry field holding the target's address
 #   required       fields that must be non-blank (validate_server)
 #   deploy_script  script under /opt/cppm that pushes issued certs
@@ -94,7 +96,10 @@ def _linux_consumes(entry: dict) -> set:
 
 TARGET_TYPES = {
     "clearpass": {
-        "label": "ClearPass",
+        "label": "ClearPass Policy Manager",
+        "blurb": "Upload HTTPS, RADIUS and RadSec certificates through the ClearPass API.",
+        "needs": ("A ClearPass API client (client_credentials)",
+                  "A host address ClearPass can reach for the PKCS12 callback"),
         "host_field": "cppm_host",
         "required": _REQUIRED,
         "deploy_script": "clearpass_deploy_hook.sh",
@@ -106,6 +111,9 @@ TARGET_TYPES = {
     },
     "linux_ssh": {
         "label": "Linux Server (SSH)",
+        "blurb": "Copy a certificate and key to a Linux host and reload the service (e.g. Frigate, FreeRADIUS).",
+        "needs": ("An SSH user with write access to the target directory",
+                  "A key or password for that user"),
         "host_field": "ssh_host",
         "required": _REQUIRED_SSH,
         "deploy_script": "linux_ssh_deploy_hook.sh",

@@ -4023,6 +4023,11 @@ def _settings_form_page(server: dict = None, error: str = "",
         [m for m in list_profile_members(profile_id) if m.get("id") != s.get("id")]
         if is_edit and profile_id else []
     )
+    cur_type = s.get("target_type", "clearpass")
+    target_type_options = "".join(
+        f'<option value="{_esc(t)}"{sel(cur_type, t)}>{_esc(spec["label"])}</option>'
+        for t, spec in TARGET_TYPES.items()
+    )
     acme_dns_fields_html = (
         _identity_fields_html(s, disabled=bool(siblings))
         + _dns_credential_select_html(s.get("dns_credential_id", ""), disabled=bool(siblings))
@@ -4185,8 +4190,7 @@ window.addEventListener('DOMContentLoaded', function() {
       <div class="field">
         <label>Target Type</label>
         <select name="target_type" id="target_type" onchange="switchTargetType(this.value)">
-          <option value="clearpass"{sel(s.get('target_type', 'clearpass'), 'clearpass')}>ClearPass Policy Manager</option>
-          <option value="linux_ssh"{sel(s.get('target_type', 'clearpass'), 'linux_ssh')}>Linux Server (SSH)</option>
+          {target_type_options}
         </select>
       </div>
       {cert_profile_field_html}
@@ -4857,14 +4861,8 @@ def _get_started_html() -> str:
     )
     cards = (
         '<div style="display:flex;flex-wrap:wrap;gap:1rem">'
-        + card("clearpass", "ClearPass Policy Manager",
-               "Upload HTTPS, RADIUS and RadSec certificates through the ClearPass API.",
-               ["A ClearPass API client (client_credentials)",
-                "A host address ClearPass can reach for the PKCS12 callback"])
-        + card("linux_ssh", "Linux server (SSH)",
-               "Copy a certificate and key to a Linux host and reload the service (e.g. Frigate).",
-               ["An SSH user with write access to the target directory",
-                "A key or password for that user"])
+        + "".join(card(t, spec["label"], spec["blurb"], spec["needs"])
+                  for t, spec in TARGET_TYPES.items())
         + '</div>'
     )
     return (
@@ -6109,7 +6107,7 @@ class Handler(BaseHTTPRequestHandler):
             blank = _default_server_from_env()
             blank.update(_last_used_acme_defaults())
             wanted = parse_qs(urlparse(self.path).query).get("target_type", [""])[0]
-            if wanted in ("clearpass", "linux_ssh"):
+            if wanted in TARGET_TYPES:
                 blank["target_type"] = wanted
             return self._serve_html(_settings_form_page(blank, username=username))
 

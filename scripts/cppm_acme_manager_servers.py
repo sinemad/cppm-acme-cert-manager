@@ -53,6 +53,7 @@ sys.path.insert(0, "/opt/cppm")
 try:
     from config_utils import (
         SERVERS_FILE,
+        TARGET_TYPES,
         _slugify_certificate_id,
         acme_dns_resolvers,
         add_dns_credential,
@@ -104,10 +105,7 @@ _ACME_SERVERS = {
     "zerossl":          "ZeroSSL",
 }
 
-_TARGET_TYPES = {
-    "clearpass": "ClearPass Policy Manager",
-    "linux_ssh": "Linux Server (SSH)",
-}
+_TARGET_TYPES = {t: spec["label"] for t, spec in TARGET_TYPES.items()}
 
 # (env_key, display_label, is_secret, hint)
 _DNS_CRED_FIELDS = {
@@ -514,7 +512,7 @@ def cmd_list() -> int:
         dns  = _DNS_PROVIDERS.get(dns_provider, dns_provider or "—")
         acme = _ACME_SERVERS.get(s.get("acme_server",   ""), s.get("acme_server",   "—"))
         target_type = s.get("target_type", "clearpass") or "clearpass"
-        host = s.get("ssh_host", "") if target_type == "linux_ssh" else s.get("cppm_host", "")
+        host = s.get(TARGET_TYPES.get(target_type, TARGET_TYPES["clearpass"])["host_field"], "")
         print()
         print(f"  ID:       {s.get('id', '')}")
         print(f"  Label:    {s.get('label', '')}")
