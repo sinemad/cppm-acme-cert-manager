@@ -430,6 +430,101 @@ to a firewall silently dropping the traffic.
 
 ---
 
+## Lego v5 account migration failed, and automatic rollback also failed
+
+**Symptom:** `acme_renewal.log` contains a line like:
+
+```
+lego: automatic rollback of /data/certs/<domain>/lego-ecc FAILED (<error>) -- manual recovery needed from backup at /data/certs/<domain>/migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+**Cause:** On first use after upgrading to Lego v5, the tool auto-migrates
+pre-v5 (v4.19.0-layout) account storage in place. Before migrating, it backs
+up the `lego-ecc`/`lego-rsa` directory to a `.tar.gz` archive. If the `lego
+migrate` step itself fails, the tool restores that backup automatically. This
+message means **both** steps failed — the migration broke the directory
+*and* the automatic restore couldn't put it back — so it needs manual
+recovery. The directory is never left missing: if restore failed early, the
+original (broken) directory is still in place; if restore failed partway
+through, you'll find it renamed aside instead (see below).
+
+**This is non-fatal to certificate serving.** The existing certificate files
+on disk are untouched by this — only the *account* (the registration that
+proves ACME-account continuity) is at risk. Worst case, you lose account
+continuity and Lego registers a fresh ACME account on the next run, which is
+non-destructive.
+
+### Step 1 — find the backup and the forensic copy
+
+```bash
+ls -la /data/certs/<domain>/migration-backups/
+# lego-ecc-pre-v5-migrate-20261016T153000Z.tar.gz  (or lego-rsa-...)
+
+ls -la /data/certs/<domain>/ | grep failed-migration
+# lego-ecc.failed-migration-1760000000  (present only if restore got partway)
+```
+
+The `.failed-migration-<unix-timestamp>` directory, if present, is the
+partially-migrated state at the moment of failure — useful for understanding
+what went wrong, but don't restore from it directly.
+
+### Step 2 — check whether the backup archive is actually usable
+
+```bash
+tar -tzf /data/certs/<domain>/migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+- **Lists files cleanly** (you should see `lego-ecc/accounts/...keys/....key` and
+  `lego-ecc/certificates/...`): the archive is intact — go to Step 3.
+- **`tar: Unexpected EOF` / `not in gzip format` / similar:** the archive is
+  corrupted. Skip to Step 4.
+
+### Step 3 — restore the backup by hand
+
+```bash
+cd /data/certs/<domain>/
+
+# Move the broken directory out of the way instead of deleting it
+mv lego-ecc lego-ecc.broken-$(date +%s)
+
+# Extract the known-good backup in its place
+tar -xzf migration-backups/lego-ecc-pre-v5-migrate-<timestamp>.tar.gz
+```
+
+This recreates `lego-ecc/` with the original pre-v5 (v4) layout. The next
+issue/renew/revoke run will detect the legacy layout again and retry the
+migration automatically — no code change or manual migrate command needed.
+Once you've confirmed the restore worked, remove the `.broken-*` directory.
+
+### Step 4 — backup is unusable: accept a fresh ACME account
+
+If the archive is corrupted and no other copy exists, the pre-v5 account
+key can't be recovered. Remove the broken state so Lego starts clean:
+
+```bash
+cd /data/certs/<domain>/
+mv lego-ecc lego-ecc.broken-$(date +%s)   # keep for forensics, don't delete
+```
+
+On the next issue/renew/revoke run, Lego will register a brand-new ACME
+account and issue/renew the certificate under it. This does **not** affect
+the current certificate's validity or chain of trust — it only means the
+*account* history restarts. Nothing further to configure; this happens
+automatically once `lego-ecc`/`lego-rsa` no longer exists at that path.
+
+### Preventing this
+
+Since the automated backup lives on the same host/volume as the data it's
+protecting, it won't survive a full disk failure. For extra safety, copy the
+`migration-backups/` directory to separate storage before upgrading a
+production server to the v5 image:
+
+```bash
+cp -r /data/certs/<domain>/migration-backups/ /path/to/offsite/backup/
+```
+
+---
+
 ## Cluster node returns 403 Forbidden
 
 **Symptom:** The dashboard shows a cluster node with error
@@ -618,6 +713,48 @@ flags manually in the CPPM Admin UI.
 
 ---
 
+## `chain:` warning in `acme_renewal.log` — "new intermediate observed"
+
+**Symptom:** `acme_renewal.log` contains a line like:
+```
+[WARN ] chain: RSA cert from letsencrypt was signed by a new intermediate ('R12')
+        not previously seen for this CA/key-type -- recorded alongside the others
+        already known: ['E5', 'E6']. This may be benign CA round-robin or a real
+        chain rotation; check /data/certs/chain_baseline.json.
+```
+
+This is informational, not an error — issuance/renewal still succeeded. It
+means the CA handed out a signing intermediate whose Common Name hasn't been
+seen before for that ACME server/key-type combination. See
+[How It Works → Chain Drift Detection](02-how-it-works.md#chain-drift-detection)
+for the full mechanism; in short, a growing per-combo set of known CNs is
+kept in `/data/certs/chain_baseline.json`, and this warning fires only on a
+*new* CN once the set already has at least one entry — not on every renewal.
+
+Common, harmless causes:
+- The CA round-robins between several valid intermediates (expected —
+  subsequent renewals landing back on an already-known CN won't re-warn).
+- The CA retired an old intermediate generation and replaced it with a new
+  one (e.g. Let's Encrypt's R10–R14/E5–E9 transitions).
+- Lego's `--preferred-chain` silently fell back to a different default chain.
+
+No action is required — the new intermediate's CA cert is picked up
+automatically by the existing trust-list pre-flight. If the renewal that
+produced this warning actually issued a cert (`acme_cli.py renew` exited
+`3`, not `0`), `renew.sh` already forced an immediate, unconditional
+`clearpass_upload.py --only-trust-check` across every ClearPass target on
+the certificate profile in the same cycle — you don't need to wait for the
+weekly `trust_check.sh` run or run anything manually. If you want to verify
+the new intermediate actually landed in a target's trust list, check
+**Administration → Certificates → Trust List** on that ClearPass node, or
+re-run `trust_check.sh` manually (see [04-maintenance.md](04-maintenance.md)).
+
+A first-ever CN for a given combo (empty baseline) is logged at `INFO`, not
+`WARN`, and never produces this warning — that line exists purely so a
+future drift warning has something to name as "previously known."
+
+---
+
 ## HTTPS upload fails — `GET /api/cluster/server/this` returns error
 
 **Symptom:** `upload.log` shows an error fetching the server's own UUID.
@@ -669,7 +806,7 @@ ip route get <cppm-ip>
 After updating the override file, restart the container:
 ```bash
 docker compose down && docker compose up -d
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 ```
 
 ---
@@ -710,7 +847,7 @@ If mismatched, set `FORCE_RENEW: "true"` in `docker-compose.override.yml` and re
 
 ```bash
 # Force a re-run of the trust list pre-flight
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 tail -f /opt/cppm-certs/<cppm_host>/status.log
 ```
 

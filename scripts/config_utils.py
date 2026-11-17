@@ -13,6 +13,14 @@ import json
 import os
 import re
 import shlex
+import shutil
+import tempfile
+import threading
+import functools
+try:
+    import fcntl
+except ImportError:  # non-POSIX dev machines: in-process lock only
+    fcntl = None
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -22,12 +30,128 @@ from dns_utils import DEFAULT_PUBLIC_RESOLVERS, parse_resolvers
 SERVERS_FILE = Path(os.environ.get("SERVERS_FILE", "/data/certs/servers.json"))
 
 # ClearPass fields are always required: they are what the tool monitors and uploads to.
-_REQUIRED = {"label", "cppm_host", "cppm_client_id", "cppm_client_secret"}
+_REQUIRED = {"label", "certificate_id", "cppm_host", "cppm_client_id", "cppm_client_secret"}
+
+# Linux SSH targets need either a private key or a password, checked
+# separately below since _REQUIRED_BY_TYPE only expresses "must be non-blank".
+_REQUIRED_SSH = {"label", "certificate_id", "ssh_host", "ssh_user", "remote_cert_dir"}
+
+# ── Target type registry ──────────────────────────────────────────────────────
+#
+# One entry per deploy target type. Everything that used to branch on
+# `target_type == "linux_ssh"` (required fields, host field, deploy script,
+# which key types a target consumes) reads from here, so a new type (New
+# Central NAC, Juniper Access Assurance, ...) is one entry plus its deploy
+# script instead of edits scattered across the code base.
+#
+#   label          shown in the UI (Target Type dropdown, chooser cards)
+#   blurb          one-line description on the "Get started" chooser card
+#   needs          list of prerequisites shown on that card
+#   host_field     the entry field holding the target's address
+#   required       fields that must be non-blank (validate_server)
+#   deploy_script  script under /opt/cppm that pushes issued certs
+#   deploy_mode    how certs reach the target ("api_upload", "file_pair", ...)
+#   key_types      key types the type can consume; a type with more than one
+#                  lets the user choose via `key_type_field`
+#   key_type_field entry field holding that choice (None = fixed by cert_types)
+#   cert_slots     (key, label, hint) tuples: the per-profile certificate
+#                  checkboxes this type offers (stored in `cert_types`). Empty
+#                  for a type with no slots (Linux picks one key type instead).
+#   consumes       callable(entry) -> set of {"ecc", "rsa"} this target uses
+#
+# "ecc"/"rsa" are the two key types the pipeline can issue (ISSUE_ECC/ISSUE_RSA).
+
+KEY_TYPES = ("ecc", "rsa")
+# A Linux target may also deploy both certificates ("both").
+LINUX_KEY_CHOICES = ("ecc", "rsa", "both")
+
+_CLEARPASS_CERT_SLOTS = (
+    ("https_ecc", "HTTPS (ECC)", "Web UI and API"),
+    ("https_rsa", "HTTPS (RSA)", "Web UI and API"),
+    ("radius",    "RADIUS",      "802.1X / EAP"),
+    ("radsec",    "RadSec",      "RADIUS over TLS"),
+)
+
+
+def _clearpass_consumes(entry: dict) -> set:
+    targets = set(certificate_targets(entry))
+    out = set()
+    if "https_ecc" in targets:
+        out.add("ecc")
+    if targets & {"https_rsa", "radius", "radsec"}:
+        out.add("rsa")
+    return out
+
+
+def linux_key_type(entry: dict) -> str:
+    """What a linux_ssh entry deploys: "ecc" (default), "rsa" or "both"."""
+    value = str(_resolve_target_fields(entry).get("ssh_key_type", "") or "").strip().lower()
+    return value if value in LINUX_KEY_CHOICES else "ecc"
+
+
+def _linux_consumes(entry: dict) -> set:
+    choice = linux_key_type(entry)
+    return set(KEY_TYPES) if choice == "both" else {choice}
+
+
+TARGET_TYPES = {
+    "clearpass": {
+        "label": "ClearPass Policy Manager",
+        "blurb": "Upload HTTPS, RADIUS and RadSec certificates through the ClearPass API.",
+        "needs": ("A ClearPass API client (client_credentials)",
+                  "A host address ClearPass can reach for the PKCS12 callback"),
+        "host_field": "cppm_host",
+        "required": _REQUIRED,
+        "deploy_script": "clearpass_deploy_hook.sh",
+        "deploy_mode": "api_upload",
+        "key_types": ("ecc", "rsa"),
+        "key_type_field": None,
+        "cert_slots": _CLEARPASS_CERT_SLOTS,
+        "consumes": _clearpass_consumes,
+    },
+    "linux_ssh": {
+        "label": "Linux Server (SSH)",
+        "blurb": "Copy a certificate and key to a Linux host and reload the service (e.g. Frigate, FreeRADIUS).",
+        "needs": ("An SSH user with write access to the target directory",
+                  "A key or password for that user"),
+        "host_field": "ssh_host",
+        "required": _REQUIRED_SSH,
+        "deploy_script": "linux_ssh_deploy_hook.sh",
+        "deploy_mode": "file_pair",
+        "key_types": ("ecc", "rsa"),
+        "key_type_field": "ssh_key_type",
+        "cert_slots": (),
+        "consumes": _linux_consumes,
+    },
+}
+
+
+def target_spec(target_type: str) -> dict:
+    """Registry entry for a target type; ClearPass for unknown/blank types."""
+    return TARGET_TYPES.get(str(target_type or "clearpass"), TARGET_TYPES["clearpass"])
+
+
+def cert_slot_keys(target_type: str = None) -> tuple:
+    """Slot keys one target type offers, or (with no argument) the ordered
+    union across every registered type."""
+    if target_type is not None:
+        return tuple(k for k, _l, _h in target_spec(target_type)["cert_slots"])
+    out = []
+    for spec in TARGET_TYPES.values():
+        for k, _l, _h in spec["cert_slots"]:
+            if k not in out:
+                out.append(k)
+    return tuple(out)
+
+
+# Back-compat view of the registry's required fields.
+_REQUIRED_BY_TYPE = {t: spec["required"] for t, spec in TARGET_TYPES.items()}
 
 # ACME / DNS fields are optional as a group. All blank = ClearPass-only
 # monitoring (warning, not an error). Partly filled or invalid = error, because
-# the certificate pipeline would fail.
-_LE_DNS_FIELDS = ("domain", "acme_email", "acme_server", "dns_provider")
+# the certificate pipeline would fail. DNS credential completeness is checked
+# separately via the referenced DNS Credential (see le_dns_problems).
+_LE_DNS_FIELDS = ("domain", "acme_email", "acme_server")
 
 # DNS credential options per provider, matching entrypoint.sh validate_dns_creds.
 # Any one option with all its keys filled in is enough.
@@ -43,6 +167,7 @@ _DNS_PROVIDER_ALIASES = {"cf": "cloudflare", "aws": "route53", "r53": "route53",
 
 _FIELD_LABELS = {
     "label":             "Label",
+    "certificate_id":    "Certificate Profile ID",
     "cppm_host":         "ClearPass Host",
     "cppm_client_id":    "Client ID",
     "cppm_client_secret":"Client Secret",
@@ -50,7 +175,98 @@ _FIELD_LABELS = {
     "acme_email":        "ACME Email",
     "acme_server":       "ACME Server",
     "dns_provider":      "DNS Provider",
+    "dns_credential_id": "DNS Credential",
+    "ssh_host":          "SSH Host",
+    "ssh_user":          "SSH User",
+    "remote_cert_dir":   "Remote Certificate Directory",
 }
+
+
+# ── Locking and atomic writes ─────────────────────────────────────────────────
+#
+# servers.json, profiles.json and dns_credentials.json are edited by
+# read-modify-write cycles from several threads (the web UI is a
+# ThreadingHTTPServer) and several processes (web UI, cppm-servers CLI,
+# startup migrations). Every public function that changes them is wrapped in
+# _locked(): an in-process RLock plus an flock on a lock file beside
+# servers.json, held for the whole cycle so concurrent edits queue instead of
+# overwriting each other and both files change together. Files are replaced
+# atomically so a crash mid-write can't leave a truncated file (which the
+# loaders would read as "no servers").
+
+_LOCK = threading.RLock()
+_lock_depth = 0
+_lock_fd = None
+
+
+def _lock_path() -> Path:
+    return SERVERS_FILE.parent / ".config.lock"
+
+
+class _config_lock:
+    """Re-entrant (thread and process) lock around config read-modify-write."""
+
+    def __enter__(self):
+        global _lock_depth, _lock_fd
+        _LOCK.acquire()
+        try:
+            if _lock_depth == 0 and fcntl is not None:
+                path = _lock_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except Exception:
+                    os.close(fd)
+                    raise
+                _lock_fd = fd
+            _lock_depth += 1
+        except Exception:
+            _LOCK.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        global _lock_depth, _lock_fd
+        try:
+            _lock_depth -= 1
+            if _lock_depth == 0 and _lock_fd is not None:
+                try:
+                    fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(_lock_fd)
+                    _lock_fd = None
+        finally:
+            _LOCK.release()
+        return False
+
+
+def _locked(fn):
+    """Run fn inside _config_lock()."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _config_lock():
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    """Write text to path via a same-directory temp file and os.replace()."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ── Read / write ──────────────────────────────────────────────────────────────
@@ -61,7 +277,10 @@ def load_servers() -> list:
         return []
     try:
         data = json.loads(SERVERS_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        profiles = load_profiles()
+        return [_hydrate(s, profiles) for s in data] if profiles else data
     except Exception:
         return []
 
@@ -76,14 +295,77 @@ def get_server(server_id: str) -> Optional[dict]:
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
+def _resolve_target_fields(entry: dict) -> dict:
+    """Return entry with target_config flattened over its top-level fields.
+
+    A target's type-specific config (today: ClearPass's cppm_*/cert_types
+    fields) can live either as flat legacy fields, the way every existing
+    servers.json entry stores them, or nested under a "target_config" dict,
+    the way new entries will. This lets every reader work from one flat view
+    without a migration step, and without the shape of one target_type
+    leaking into another's.
+    """
+    resolved = dict(entry)
+    resolved.update(entry.get("target_config") or {})
+    return resolved
+
+
+def server_host(entry: dict) -> str:
+    """Return the target's address, read from its type's host field."""
+    r = _resolve_target_fields(entry)
+    return str(r.get(target_spec(r.get("target_type"))["host_field"]) or "")
+
+
+_MAX_SERVICES = 20
+_MAX_SERVICE_LEN = 40
+
+
+def parse_services(raw) -> list:
+    """Normalize a comma/newline-separated string (or list) into a clean service list.
+
+    Linux SSH entries only: the names are purely informational labels for what
+    consumes the certificate (e.g. "Apache", "Frigate"); they never affect
+    deployment. Blanks and case-insensitive duplicates are dropped.
+    """
+    if isinstance(raw, str):
+        raw = re.split(r"[,\n]", raw)
+    out: list = []
+    seen: set = set()
+    for item in raw or []:
+        name = " ".join(str(item).split())[:_MAX_SERVICE_LEN]
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out[:_MAX_SERVICES]
+
+
+def server_services(entry: dict) -> list:
+    """Return the informational service list for a linux_ssh entry ([] otherwise)."""
+    r = _resolve_target_fields(entry)
+    if r.get("target_type") != "linux_ssh":
+        return []
+    return parse_services(r.get("services"))
+
+
+def server_display_name(entry: dict, default: str = "") -> str:
+    """Return the entry's label, falling back to its host, then default."""
+    return str(entry.get("label") or server_host(entry) or default)
+
+
+# Public alias — other modules (status_server.py, cppm_acme_manager_servers.py)
+# need the same flattening to read a server entry regardless of target_type.
+resolve_target_fields = _resolve_target_fields
+
+
 def certificate_targets(entry: dict) -> list[str]:
     """Return normalized ClearPass targets, including legacy config values."""
+    entry = _resolve_target_fields(entry)
     targets = set(entry.get("cert_types") or [])
     if "ecc" in targets:
         targets.add("https_ecc")
     if "rsa" in targets:
         targets.update(("radius", "radsec"))
-    return [t for t in ("https_ecc", "https_rsa", "radius", "radsec") if t in targets]
+    return [t for t in cert_slot_keys("clearpass") if t in targets]
 
 
 def san_dns_names(entry: dict) -> list[str]:
@@ -114,19 +396,24 @@ def acme_dns_resolvers(entry: dict) -> list[str]:
 
 def le_dns_configured(entry: dict) -> bool:
     """True if any ACME / DNS field is filled in."""
-    return any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
+    return bool(str(entry.get("dns_credential_id", "")).strip()) or \
+        any(str(entry.get(f, "")).strip() for f in _LE_DNS_FIELDS)
 
 
 def le_dns_problems(entry: dict) -> list[str]:
     """Return errors for a partly filled or invalid ACME / DNS setup.
 
     Called only when le_dns_configured() is true. Checks shape and required
-    credentials, not live API access.
+    credentials (resolved through the referenced DNS Credential), not live
+    API access.
     """
     problems = []
     for field in _LE_DNS_FIELDS:
         if not str(entry.get(field, "")).strip():
             problems.append(f"{_FIELD_LABELS.get(field, field)} is required when ACME / DNS is set up.")
+    dns_credential_id = str(entry.get("dns_credential_id", "")).strip()
+    if not dns_credential_id:
+        problems.append("A DNS Credential is required when ACME / DNS is set up.")
     if problems:
         return problems
 
@@ -134,12 +421,16 @@ def le_dns_problems(entry: dict) -> list[str]:
     if "@" not in email:
         problems.append("ACME Email must be an email address.")
     acme = str(entry.get("acme_server", "")).strip()
-    if acme not in ("letsencrypt", "zerossl") and not acme.startswith("https://"):
-        problems.append("ACME Server must be 'letsencrypt', 'zerossl', or an https:// URL.")
+    if acme not in ("letsencrypt", "letsencrypt_test", "zerossl") and not acme.startswith("https://"):
+        problems.append("ACME Server must be 'letsencrypt', 'letsencrypt_test', 'zerossl', or an https:// URL.")
 
-    provider = str(entry.get("dns_provider", "")).strip().lower()
+    credential = get_dns_credential(dns_credential_id)
+    if credential is None:
+        problems.append(f"DNS Credential '{dns_credential_id}' not found.")
+        return problems
+    provider = str(credential.get("dns_provider", "")).strip().lower()
     provider = _DNS_PROVIDER_ALIASES.get(provider, provider)
-    creds = entry.get("dns_credentials") or {}
+    creds = credential.get("dns_credentials") or {}
     if provider not in _DNS_CREDENTIAL_OPTIONS:
         # Unknown providers are allowed; credentials can't be pre-checked.
         return problems
@@ -152,76 +443,258 @@ def le_dns_problems(entry: dict) -> list[str]:
 
 def validate_server(entry: dict) -> None:
     """Raises ValueError on missing or invalid fields."""
-    for field in _REQUIRED:
-        if not str(entry.get(field, "")).strip():
+    resolved = _resolve_target_fields(entry)
+    target_type = str(resolved.get("target_type", "clearpass") or "clearpass")
+    required = target_spec(target_type)["required"]
+    for field in required:
+        if not str(resolved.get(field, "")).strip():
             label = _FIELD_LABELS.get(field, field)
             raise ValueError(f"{label} is required.")
-    if le_dns_configured(entry):
-        problems = le_dns_problems(entry)
+    if target_type == "linux_ssh":
+        if not str(resolved.get("ssh_private_key", "")).strip() \
+                and not str(resolved.get("ssh_password", "")).strip():
+            raise ValueError("Either a private key or a password is required.")
+        key_type = str(resolved.get("ssh_key_type", "") or "").strip().lower()
+        if key_type and key_type not in LINUX_KEY_CHOICES:
+            raise ValueError("Key type must be 'ecc', 'rsa' or 'both'.")
+    if le_dns_configured(resolved):
+        problems = le_dns_problems(resolved)
         if problems:
             raise ValueError(" ".join(problems))
     try:
-        port = int(entry.get("cppm_callback_port", 8765))
-        if not 1 <= port <= 65535:
-            raise ValueError()
-    except (ValueError, TypeError):
-        raise ValueError("Callback port must be a number between 1 and 65535.")
-    try:
-        acme_dns_resolvers(entry)
+        acme_dns_resolvers(resolved)
     except ValueError as exc:
         raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
-    cert_types = certificate_targets(entry)
-    valid_types = {"https_ecc", "https_rsa", "radius", "radsec"}
-    if not any(t in cert_types for t in valid_types):
-        raise ValueError("At least one ClearPass certificate target must be selected.")
+    if target_type == "clearpass":
+        try:
+            port = int(resolved.get("cppm_callback_port", 8765))
+            if not 1 <= port <= 65535:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("Callback port must be a number between 1 and 65535.")
+        cert_types = certificate_targets(resolved)
+        if not any(t in cert_types for t in cert_slot_keys(target_type)):
+            raise ValueError("At least one ClearPass certificate target must be selected.")
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
-def _check_duplicate_host(host: str, exclude_id: str = None) -> None:
-    """Raise ValueError if another entry already uses the same cppm_host."""
-    host = host.strip().lower()
+def _dup_key(resolved: dict) -> tuple:
+    """Return the uniqueness key for an entry, or () when it has no host yet.
+
+    ClearPass: one appliance per cppm_host. Linux SSH: a host may carry several
+    services, so the key is (ssh_host, ssh_port, remote_cert_dir) -- two entries
+    only collide when they would write the same files on the same host.
+    """
+    if str(resolved.get("target_type", "clearpass") or "clearpass") == "linux_ssh":
+        host = str(resolved.get("ssh_host", "")).strip().lower()
+        if not host:
+            return ()
+        port = str(resolved.get("ssh_port") or "22").strip()
+        remote_dir = str(resolved.get("remote_cert_dir", "")).strip().rstrip("/") or "/"
+        return ("linux_ssh", host, port, remote_dir)
+    host = str(resolved.get("cppm_host", "")).strip().lower()
+    return ("clearpass", host) if host else ()
+
+
+def _check_duplicate_host(entry: dict, exclude_id: str = None) -> None:
+    """Raise ValueError if another entry already targets the same host.
+
+    See _dup_key: clearpass dedupes on cppm_host, linux_ssh on host + port +
+    remote directory, so one Linux host can serve several services (same
+    certificate via a chained reload_command, or different certificates in
+    different directories).
+    """
+    resolved = _resolve_target_fields(entry)
+    key = _dup_key(resolved)
+    if not key:
+        return
     for s in load_servers():
         if s.get("id") == exclude_id:
             continue
-        if s.get("cppm_host", "").strip().lower() == host:
-            label = s.get("label") or s.get("cppm_host", "")
+        s = _resolve_target_fields(s)
+        if _dup_key(s) != key:
+            continue
+        label = s.get("label") or server_host(s)
+        if key[0] == "linux_ssh":
             raise ValueError(
-                f"A server entry for '{s.get('cppm_host', '')}' already exists "
-                f"('{label}'). Each ClearPass host must be unique."
+                f"'{label}' already deploys to {s.get('remote_cert_dir', '')} on "
+                f"{s.get('ssh_host', '')}. Use a different Remote Certificate Directory "
+                "for a separate certificate, or add the extra service to that entry's "
+                "reload command."
             )
+        raise ValueError(
+            f"A server entry for '{s.get('cppm_host', '')}' already exists "
+            f"('{label}'). Each {_FIELD_LABELS['cppm_host']} must be unique."
+        )
 
 
-def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
-    """Fill shared ACME fields from an existing explicit certificate profile."""
-    profile_id = str(entry.get("certificate_id", "")).strip()
-    if not profile_id:
+# The cert-identity fields a certificate profile shares across every target
+# that references it, regardless of target_type. DNS vendor credentials are
+# NOT part of this bundle — they live in their own reusable DNS Credential
+# entity (see "DNS Credentials" below) and are referenced by dns_credential_id,
+# since the same DNS vendor account can be shared across profiles that can
+# never share an identity (different domains/targets). Used both to pull
+# these fields into a newly saved entry (_inherit_certificate_profile) and to
+# push an edited value out to every entry sharing a profile
+# (update_certificate_profile).
+_SHARED_PROFILE_FIELDS = (
+    "domain", "san_dns", "acme_email", "acme_server", "dns_credential_id",
+    "cert_types", "split_horizon_dns", "split_horizon_resolvers",
+    "eab_kid", "eab_hmac_key",
+)
+
+
+# ── Certificate Profile store ─────────────────────────────────────────────────
+#
+# The shared fields above live in profiles.json (keyed by certificate_id), next
+# to servers.json, instead of being copied onto every member. The split is
+# transparent to callers: load_servers() merges a member's profile over the
+# entry ("hydration"), and _write() splits the shared fields back out. Anything
+# that reads or edits entries through config_utils therefore keeps seeing the
+# same flat entries it always did.
+#
+# Two kinds of profile live in the store. One created explicitly
+# (create_profile) carries "explicit": true and persists with no members. One
+# defined implicitly by the first server that names a new certificate_id has no
+# flag and is dropped when its last member goes. The store is the source of
+# truth: stored profiles change only through update_certificate_profile (or a
+# sole member's own edit, see update_server), never as a side effect of saving
+# some other entry. Issuance is driven by servers (certificate_owner_ids), so a
+# member-less profile never issues anything.
+
+def _profiles_file() -> Path:
+    # Resolved at call time so tests (and SERVERS_FILE overrides) redirect it.
+    return SERVERS_FILE.parent / "profiles.json"
+
+
+def load_profiles() -> dict:
+    """Return {certificate_id: {shared fields}}. {} on a missing or corrupt file."""
+    path = _profiles_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_profiles(profiles: dict) -> None:
+    path = _profiles_file()
+    if not profiles:
+        path.unlink(missing_ok=True)
+        return
+    _atomic_write(path, json.dumps(profiles, indent=2))
+
+
+def _copy_value(value):
+    return list(value) if isinstance(value, list) else value
+
+
+def _hydrate(entry: dict, profiles: dict) -> dict:
+    """Return entry with its profile's shared fields merged over it."""
+    pid = str(entry.get("certificate_id", "")).strip()
+    profile = profiles.get(pid) if pid else None
+    if not profile:
         return entry
-    for existing in load_servers():
-        if existing.get("id") == exclude_id:
-            continue
-        if str(existing.get("certificate_id", "")).strip() != profile_id:
-            continue
-        merged = dict(entry)
-        for field in (
-            "domain", "san_dns", "acme_email", "acme_server",
-            "dns_provider", "dns_credentials", "cert_types",
-            "split_horizon_dns", "split_horizon_resolvers",
-        ):
-            if field in existing:
-                value = existing[field]
-                merged[field] = dict(value) if field == "dns_credentials" else (
-                    list(value) if isinstance(value, list) else value
-                )
-        return merged
-    return entry
+    merged = dict(entry)
+    for field in _SHARED_PROFILE_FIELDS:
+        if field in profile:
+            merged[field] = _copy_value(profile[field])
+    return merged
 
 
+def _split_profiles(servers: list, writethrough: tuple = ()) -> tuple:
+    """Pure inverse of hydration: return (entries without shared fields, profiles).
+
+    - A profile already in the store is NOT changed by the entries that name it
+      (the store wins), except for pids listed in writethrough, which take the
+      shared values from their members (a sole member editing its own profile).
+    - A profile not yet stored is defined by its first member that carries a
+      domain. Later members that disagree are ignored (only the first member's
+      values were ever used to issue the certificate) and a warning names the
+      fields.
+    - Entries with no certificate_id keep their shared fields inline.
+    - Implicit profiles with no member are dropped; explicit ones are kept.
+    """
+    stored = load_profiles()
+    profiles = {pid: {k: _copy_value(v) for k, v in p.items()}
+                for pid, p in stored.items() if isinstance(p, dict)}
+    used: set = set()
+    out: list = []
+    for entry in servers:
+        pid = str(entry.get("certificate_id", "")).strip()
+        if not pid:
+            out.append(entry)
+            continue
+        used.add(pid)
+        shared = {k: _copy_value(entry[k]) for k in _SHARED_PROFILE_FIELDS if k in entry}
+        if pid not in profiles:
+            if str(shared.get("domain", "")).strip():
+                profiles[pid] = shared
+        elif pid in writethrough:
+            profiles[pid].update(shared)
+        elif pid not in stored:
+            differing = [k for k, v in shared.items() if profiles[pid].get(k) != v]
+            if differing:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Profile '%s': '%s' differs from the profile's first member in %s; "
+                    "using the first member's values.",
+                    pid, entry.get("label") or entry.get("id"), ", ".join(differing))
+        out.append({k: v for k, v in entry.items() if k not in _SHARED_PROFILE_FIELDS})
+    return out, {pid: p for pid, p in profiles.items()
+                 if pid in used or p.get("explicit")}
+
+
+@_locked
+def migrate_profiles_from_servers() -> int:
+    """One-time, idempotent startup migration: move shared ACME/DNS fields out
+    of servers.json into profiles.json. Returns the number of profiles created.
+
+    Backs servers.json up to servers.json.pre-profiles before the first rewrite
+    (an older image cannot read the split layout). Run at container start,
+    after migrate_dns_credentials_from_servers().
+    """
+    if not SERVERS_FILE.exists():
+        return 0
+    try:
+        raw = json.loads(SERVERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(raw, list):
+        return 0
+    old_profiles = load_profiles()
+    out, profiles = _split_profiles(load_servers())
+    if out == raw and profiles == old_profiles:
+        return 0
+    backup = SERVERS_FILE.with_name(SERVERS_FILE.name + ".pre-profiles")
+    if not backup.exists():
+        shutil.copy2(SERVERS_FILE, backup)
+    _write_profiles(profiles)
+    _write(out)
+    return len(set(profiles) - set(old_profiles))
+
+
+def server_profile_error(entry: dict) -> str:
+    """Non-empty message when entry names a profile that is not in the store
+    and carries no ACME/DNS values of its own (e.g. profiles.json was lost)."""
+    pid = str(entry.get("certificate_id", "")).strip()
+    if pid and pid not in load_profiles() and not str(entry.get("domain", "")).strip():
+        return f"Certificate profile '{pid}' is missing (no profile data found)."
+    return ""
+
+
+@_locked
 def add_server(entry: dict) -> str:
-    """Validate, check for duplicate host, and append. Returns the assigned server ID."""
-    entry = _inherit_certificate_profile(dict(entry))
+    """Validate, check for duplicate host, and append. Returns the assigned server ID.
+
+    If the entry names a stored profile, the profile's shared fields win over
+    whatever the entry carries; otherwise the entry defines a new profile."""
+    entry = _hydrate(dict(entry), load_profiles())
     validate_server(entry)
-    _check_duplicate_host(entry.get("cppm_host", ""))
+    _check_duplicate_host(entry)
     entry = dict(entry)
     entry["id"] = str(uuid.uuid4())
     servers = load_servers()
@@ -230,22 +703,39 @@ def add_server(entry: dict) -> str:
     return entry["id"]
 
 
+@_locked
 def update_server(server_id: str, entry: dict) -> bool:
-    """Replace the existing entry with the given ID. Returns True if found."""
-    entry = _inherit_certificate_profile(dict(entry), exclude_id=server_id)
-    validate_server(entry)
-    _check_duplicate_host(entry.get("cppm_host", ""), exclude_id=server_id)
+    """Replace the existing entry with the given ID. Returns True if found.
+
+    A stored profile wins over the entry's shared fields, except when this
+    server is already its only member, in which case the typed values update
+    the profile (there is nobody else to surprise)."""
     servers = load_servers()
+    old = next((s for s in servers if s.get("id") == server_id), None)
+    pid = str(entry.get("certificate_id", "")).strip()
+    entry = dict(entry)
+    writethrough: tuple = ()
+    profiles = load_profiles()
+    if pid and pid in profiles:
+        others = [s for s in servers if s.get("id") != server_id
+                  and str(s.get("certificate_id", "")).strip() == pid]
+        if old is not None and str(old.get("certificate_id", "")).strip() == pid \
+                and not others:
+            writethrough = (pid,)
+        else:
+            entry = _hydrate(entry, profiles)
+    validate_server(entry)
+    _check_duplicate_host(entry, exclude_id=server_id)
     for i, s in enumerate(servers):
         if s.get("id") == server_id:
-            entry = dict(entry)
             entry["id"] = server_id
             servers[i] = entry
-            _write(servers)
+            _write(servers, writethrough)
             return True
     return False
 
 
+@_locked
 def delete_server(server_id: str) -> bool:
     """Remove the entry with the given ID. Returns True if found."""
     servers = load_servers()
@@ -256,11 +746,20 @@ def delete_server(server_id: str) -> bool:
         _write(filtered)
     else:
         SERVERS_FILE.unlink(missing_ok=True)
+        _write_profiles({pid: p for pid, p in load_profiles().items()
+                         if isinstance(p, dict) and p.get("explicit")})
     return True
 
 
 # ── Migration ─────────────────────────────────────────────────────────────────
 
+def _slugify_certificate_id(value: str, default: str = "certificate") -> str:
+    """Sanitize a free-form string into a safe certificate_id / directory-name token."""
+    safe = re.sub(r"[^\w.\-]", "_", str(value)).strip("._-")
+    return safe or default
+
+
+@_locked
 def migrate_from_env() -> Optional[str]:
     """
     One-time backwards-compatibility migration.
@@ -282,7 +781,7 @@ def migrate_from_env() -> Optional[str]:
         return None
 
     entry = {
-        "certificate_id": re.sub(r"[^\w.\-]", "_", domain).strip("._-") or "certificate",
+        "certificate_id": _slugify_certificate_id(domain),
         "label":                f"ClearPass ({cppm_host})",
         "cppm_host":            cppm_host,
         "cppm_client_id":       os.environ.get("CPPM_CLIENT_ID",       ""),
@@ -330,12 +829,16 @@ def server_cert_dir(server: dict) -> Path:
     """
     certificate_id = str(server.get("certificate_id", "")).strip()
     if certificate_id:
-        safe = re.sub(r"[^\w.\-]", "_", certificate_id).strip("._-") or "certificate"
-        return SERVERS_FILE.parent / "certificates" / safe
+        return SERVERS_FILE.parent / "certificates" / _slugify_certificate_id(certificate_id)
 
-    host = str(server.get("cppm_host", "")).strip()
-    safe = re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
-    return SERVERS_FILE.parent / safe
+    host = str(_legacy_host(server)).strip()
+    return SERVERS_FILE.parent / _slugify_certificate_id(host, default="default")
+
+
+def _legacy_host(server: dict) -> str:
+    """Return the target-type-appropriate host used as a fallback directory key."""
+    resolved = _resolve_target_fields(server)
+    return str(resolved.get(target_spec(resolved.get("target_type"))["host_field"], ""))
 
 
 def certificate_id(server: dict) -> str:
@@ -343,8 +846,8 @@ def certificate_id(server: dict) -> str:
     configured = str(server.get("certificate_id", "")).strip()
     if configured:
         return configured
-    host = str(server.get("cppm_host", "")).strip()
-    return re.sub(r"[^\w.\-]", "_", host).strip("._-") or "default"
+    host = str(_legacy_host(server)).strip()
+    return _slugify_certificate_id(host, default="default")
 
 
 def certificate_members(profile_id: str) -> list[dict]:
@@ -352,19 +855,279 @@ def certificate_members(profile_id: str) -> list[dict]:
     return [s for s in load_servers() if certificate_id(s) == profile_id]
 
 
-def list_certificate_profiles() -> list[dict]:
-    """Return one representative server entry per distinct *explicit* certificate
-    profile ID (the value typed into the Certificate Profile ID field — this is
-    what _inherit_certificate_profile matches on, not the host-based fallback)."""
-    profiles: list[dict] = []
-    seen: set[str] = set()
-    for server in load_servers():
-        profile_id = str(server.get("certificate_id", "")).strip()
-        if not profile_id or profile_id in seen:
+@_locked
+def backfill_certificate_ids() -> int:
+    """Assign an explicit certificate_id to every entry that's missing one.
+
+    certificate_id is now a required field (see validate_server), but
+    entries written before that requirement existed may still have it
+    blank. Uses the same host-based fallback certificate_id() already
+    computes for cert-directory/trust-sync grouping, so this only makes
+    that existing (implicit) grouping explicit — it doesn't change which
+    entries are considered part of the same certificate. Run once at
+    container startup (entrypoint.sh), before anything reads servers.json.
+    """
+    servers = load_servers()
+    updated = list(servers)
+    changed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("certificate_id", "")).strip():
             continue
-        seen.add(profile_id)
-        profiles.append(server)
-    return profiles
+        merged = dict(s)
+        merged["certificate_id"] = certificate_id(s)
+        updated[i] = merged
+        changed += 1
+    if changed:
+        _write(updated)
+    return changed
+
+
+def list_certificate_profiles() -> list[dict]:
+    """Return one representative entry per certificate profile.
+
+    A profile with members is represented by its first member (resolved, so
+    host/label read the same for every target_type). A stored profile without
+    members is represented by {"certificate_id", shared fields...} — it has no
+    label or host. Profiles come from the store first, then any pid that only
+    servers mention."""
+    by_pid: dict = {}
+    for server in load_servers():
+        pid = str(server.get("certificate_id", "")).strip()
+        if pid and pid not in by_pid:
+            by_pid[pid] = _resolve_target_fields(server)
+    out: list = []
+    for pid, shared in load_profiles().items():
+        if pid in by_pid:
+            out.append(by_pid.pop(pid))
+        elif isinstance(shared, dict):
+            out.append({"certificate_id": pid,
+                        **{k: _copy_value(v) for k, v in shared.items()
+                           if k in _SHARED_PROFILE_FIELDS}})
+    out.extend(by_pid.values())
+    return out
+
+
+def get_profile(profile_id: str) -> Optional[dict]:
+    """Shared fields of a stored profile (plus certificate_id), or None."""
+    pid = str(profile_id).strip()
+    shared = load_profiles().get(pid)
+    if not isinstance(shared, dict):
+        return None
+    return {"certificate_id": pid,
+            **{k: _copy_value(v) for k, v in shared.items() if k in _SHARED_PROFILE_FIELDS}}
+
+
+def list_profile_members(profile_id: str) -> list[dict]:
+    """Return every (resolved) entry whose explicit certificate_id matches."""
+    profile_id = str(profile_id).strip()
+    if not profile_id:
+        return []
+    return [
+        _resolve_target_fields(s) for s in load_servers()
+        if str(s.get("certificate_id", "")).strip() == profile_id
+    ]
+
+
+def _validate_profile_fields(shared: dict) -> None:
+    """Shape check for a profile on its own (no target): domain + ACME/DNS."""
+    if not str(shared.get("domain", "")).strip():
+        raise ValueError(f"{_FIELD_LABELS.get('domain', 'Domain')} is required.")
+    problems = le_dns_problems(shared)
+    if problems:
+        raise ValueError(" ".join(problems))
+    try:
+        acme_dns_resolvers(shared)
+    except ValueError as exc:
+        raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
+
+
+def _check_profile_id(pid: str) -> str:
+    pid = str(pid).strip()
+    if not pid:
+        raise ValueError("Certificate Profile ID is required.")
+    if not _ID_PATTERN.fullmatch(pid):
+        raise ValueError(
+            "Certificate Profile ID may only contain letters, numbers, '.', '_', and '-'."
+        )
+    return pid
+
+
+@_locked
+def create_profile(profile_id: str, fields: dict) -> str:
+    """Create a standalone (explicit) profile with no members. Create-only:
+    raises ValueError if the ID, or its certificate directory name, is taken
+    by an existing profile or server reference."""
+    pid = _check_profile_id(profile_id)
+    taken = set(load_profiles()) | {
+        str(s.get("certificate_id", "")).strip() for s in load_servers()}
+    taken.discard("")
+    if pid in taken:
+        raise ValueError(f"Certificate profile '{pid}' already exists.")
+    slug = _slugify_certificate_id(pid)
+    if slug in {_slugify_certificate_id(t) for t in taken}:
+        raise ValueError(
+            f"'{pid}' resolves to the same certificate directory as an existing profile.")
+    shared = {k: _copy_value(fields[k]) for k in _SHARED_PROFILE_FIELDS if k in fields}
+    _validate_profile_fields(shared)
+    profiles = load_profiles()
+    profiles[pid] = {**shared, "explicit": True}
+    _write_profiles(profiles)
+    return pid
+
+
+@_locked
+def remove_profile(profile_id: str) -> bool:
+    """Delete a profile that has no members. Returns False if it doesn't exist.
+    Raises ValueError while servers still use it (detach them first). The
+    certificate directory on disk is left alone."""
+    pid = str(profile_id).strip()
+    profiles = load_profiles()
+    if pid not in profiles:
+        return False
+    n = len(list_profile_members(pid))
+    if n:
+        raise ValueError(
+            f"Profile '{pid}' is still used by {n} target(s); detach or remove them first.")
+    del profiles[pid]
+    _write_profiles(profiles)
+    return True
+
+
+@_locked
+def update_certificate_profile(profile_id: str, fields: dict) -> int:
+    """Apply shared ACME/DNS fields to a profile and so to all its members.
+
+    All-or-nothing: the profile and every member are validated with the merged
+    fields before anything is written. Works for profiles with no members.
+    Returns the number of member entries affected. Raises ValueError if the
+    profile doesn't exist or anything would fail validation.
+    """
+    profile_id = str(profile_id).strip()
+    servers = load_servers()
+    profiles = load_profiles()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == profile_id]
+    if not indices and profile_id not in profiles:
+        raise ValueError("Certificate profile not found.")
+
+    base = dict(profiles.get(profile_id) or {})
+    if not base and indices:
+        base = {k: _copy_value(servers[indices[0]][k])
+                for k in _SHARED_PROFILE_FIELDS if k in servers[indices[0]]}
+    for field in _SHARED_PROFILE_FIELDS:
+        if field in fields:
+            base[field] = _copy_value(fields[field])
+    _validate_profile_fields(base)
+
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        for field in _SHARED_PROFILE_FIELDS:
+            if field in base:
+                merged[field] = _copy_value(base[field])
+        validate_server(merged)
+        updated[i] = merged
+
+    profiles[profile_id] = base
+    _write_profiles(profiles)
+    _write(updated)
+    return len(indices)
+
+
+@_locked
+def delete_certificate_profile(profile_id: str) -> int:
+    """Detach every entry sharing profile_id (clears certificate_id on each).
+
+    Each entry keeps the ACME/DNS values it had (hydrated from the profile) —
+    this only stops them being linked, it does not delete any server entry.
+    The profile itself is dropped from the store once it has no members, unless
+    it was created explicitly."""
+    profile_id = str(profile_id).strip()
+    servers = load_servers()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == profile_id]
+    if not indices:
+        return 0
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        merged["certificate_id"] = ""
+        updated[i] = merged
+    _write(updated)
+    return len(indices)
+
+
+# Shared ID-format validator for both Certificate Profile IDs and DNS
+# Credential IDs — same allowed charset, same rename/collision semantics.
+_ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]+")
+_CERT_ID_PATTERN = _ID_PATTERN  # back-compat alias
+
+
+@_locked
+def rename_certificate_profile(old_id: str, new_id: str) -> int:
+    """Rename a certificate profile's ID across every entry sharing it.
+
+    Also moves the on-disk certificate directory (Lego account storage,
+    issued certs, logs — see server_cert_dir()) so already-issued
+    certificates survive the rename instead of looking "missing" to the
+    pipeline and triggering a fresh issuance. Raises ValueError if new_id is
+    invalid, collides with a different existing profile (by raw ID or by
+    slugified directory name), or old_id doesn't match any entry. Returns
+    the number of entries renamed (0 if new_id == old_id).
+    """
+    old_id = str(old_id).strip()
+    new_id = str(new_id).strip()
+    if not new_id:
+        raise ValueError("Certificate Profile ID is required.")
+    if not _CERT_ID_PATTERN.fullmatch(new_id):
+        raise ValueError(
+            "Certificate Profile ID may only contain letters, numbers, '.', '_', and '-'."
+        )
+    if new_id == old_id:
+        return 0
+
+    servers = load_servers()
+    profiles = load_profiles()
+    indices = [i for i, s in enumerate(servers)
+               if str(s.get("certificate_id", "")).strip() == old_id]
+    if not indices and old_id not in profiles:
+        raise ValueError("Certificate profile not found.")
+
+    other_ids = ({str(s.get("certificate_id", "")).strip() for s in servers}
+                 | set(profiles)) - {old_id, ""}
+    if new_id in other_ids:
+        raise ValueError(f"'{new_id}' is already used by another certificate profile.")
+    new_slug = _slugify_certificate_id(new_id)
+    if new_slug in {_slugify_certificate_id(pid) for pid in other_ids}:
+        raise ValueError(
+            f"'{new_id}' resolves to the same certificate directory as an existing profile."
+        )
+
+    old_dir = SERVERS_FILE.parent / "certificates" / _slugify_certificate_id(old_id)
+    new_dir = SERVERS_FILE.parent / "certificates" / new_slug
+    moved = False
+    if old_dir.exists():
+        if new_dir.exists():
+            raise ValueError(f"Target certificate directory already exists: {new_dir}")
+        new_dir.parent.mkdir(parents=True, exist_ok=True)
+        old_dir.rename(new_dir)
+        moved = True
+
+    updated = list(servers)
+    for i in indices:
+        merged = dict(updated[i])
+        merged["certificate_id"] = new_id
+        updated[i] = merged
+    new_profiles = {(new_id if pid == old_id else pid): p for pid, p in profiles.items()}
+    try:
+        _write_profiles(new_profiles)
+        _write(updated)
+    except Exception:
+        _write_profiles(profiles)
+        if moved:
+            new_dir.rename(old_dir)
+        raise
+    return len(indices)
 
 
 def certificate_owner_ids() -> list[str]:
@@ -372,6 +1135,12 @@ def certificate_owner_ids() -> list[str]:
     owners: list[str] = []
     seen: set[str] = set()
     for server in load_servers():
+        err = server_profile_error(server)
+        if err:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Skipping '%s': %s", server.get("label") or server.get("id"), err)
+            continue
         profile_id = certificate_id(server)
         if profile_id not in seen and server.get("id"):
             seen.add(profile_id)
@@ -379,7 +1148,285 @@ def certificate_owner_ids() -> list[str]:
     return owners
 
 
+# ── DNS Credentials ───────────────────────────────────────────────────────────
+#
+# A DNS Credential is a reusable (provider, auth fields) pair, referenced by
+# Certificate Profiles / server entries via dns_credential_id. Unlike a
+# Certificate Profile it has no on-disk directory of its own — it's a pure
+# credential reference — so renaming/deleting it never touches the filesystem.
+
+DNS_CREDENTIALS_FILE = SERVERS_FILE.parent / "dns_credentials.json"
+
+
+def load_dns_credentials() -> dict:
+    """Return {dns_credential_id: {"dns_provider": ..., "dns_credentials": {...}}}."""
+    if not DNS_CREDENTIALS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(DNS_CREDENTIALS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_dns_credentials(creds: dict) -> None:
+    _atomic_write(DNS_CREDENTIALS_FILE, json.dumps(creds, indent=2))
+
+
+def list_dns_credentials() -> list[dict]:
+    """Return every DNS Credential as a dict with its id included."""
+    return [
+        {"id": cred_id, **cred}
+        for cred_id, cred in sorted(load_dns_credentials().items())
+    ]
+
+
+def get_dns_credential(dns_credential_id: str) -> Optional[dict]:
+    """Return the {"dns_provider", "dns_credentials"} dict for an id, or None."""
+    dns_credential_id = str(dns_credential_id).strip()
+    if not dns_credential_id:
+        return None
+    creds = load_dns_credentials()
+    cred = creds.get(dns_credential_id)
+    return dict(cred) if cred is not None else None
+
+
+def dns_credential_owner_ids(dns_credential_id: str) -> list[str]:
+    """Return every certificate_id (profile or legacy) referencing this credential."""
+    dns_credential_id = str(dns_credential_id).strip()
+    owners: list[str] = []
+    seen: set[str] = set()
+    for server in load_servers():
+        if str(server.get("dns_credential_id", "")).strip() != dns_credential_id:
+            continue
+        profile_id = certificate_id(server)
+        if profile_id not in seen:
+            seen.add(profile_id)
+            owners.append(profile_id)
+    return owners
+
+
+def _validate_dns_credential_fields(dns_provider: str, dns_credentials: dict) -> None:
+    provider = str(dns_provider).strip().lower()
+    provider = _DNS_PROVIDER_ALIASES.get(provider, provider)
+    if not provider:
+        raise ValueError("DNS Provider is required.")
+    options = _DNS_CREDENTIAL_OPTIONS.get(provider)
+    if options is None:
+        # Unknown providers are allowed; credentials can't be pre-checked.
+        return
+    creds = dns_credentials or {}
+    if not any(all(str(creds.get(k, "")).strip() for k in opt) for opt in options):
+        wanted = " or ".join(" + ".join(opt) for opt in options)
+        raise ValueError(f"DNS credentials for {provider} are incomplete: need {wanted}.")
+
+
+@_locked
+def add_dns_credential(dns_credential_id: str, dns_provider: str, dns_credentials: dict) -> str:
+    """Create a new DNS Credential. Raises ValueError on invalid id/fields or collision."""
+    dns_credential_id = str(dns_credential_id).strip()
+    if not dns_credential_id:
+        raise ValueError("DNS Credential ID is required.")
+    if not _ID_PATTERN.fullmatch(dns_credential_id):
+        raise ValueError("DNS Credential ID may only contain letters, numbers, '.', '_', and '-'.")
+    _validate_dns_credential_fields(dns_provider, dns_credentials)
+    creds = load_dns_credentials()
+    if dns_credential_id in creds:
+        raise ValueError(f"'{dns_credential_id}' is already used by another DNS Credential.")
+    creds[dns_credential_id] = {
+        "dns_provider": str(dns_provider).strip().lower(),
+        "dns_credentials": dict(dns_credentials or {}),
+    }
+    _write_dns_credentials(creds)
+    return dns_credential_id
+
+
+@_locked
+def update_dns_credential(dns_credential_id: str, fields: dict) -> None:
+    """Update an existing DNS Credential's provider/credentials in place.
+
+    Raises ValueError if the credential doesn't exist or the merged fields
+    fail validation.
+    """
+    dns_credential_id = str(dns_credential_id).strip()
+    creds = load_dns_credentials()
+    existing = creds.get(dns_credential_id)
+    if existing is None:
+        raise ValueError("DNS Credential not found.")
+    merged = dict(existing)
+    if "dns_provider" in fields:
+        merged["dns_provider"] = str(fields["dns_provider"]).strip().lower()
+    if "dns_credentials" in fields:
+        merged["dns_credentials"] = dict(fields["dns_credentials"] or {})
+    _validate_dns_credential_fields(merged.get("dns_provider", ""), merged.get("dns_credentials", {}))
+    creds[dns_credential_id] = merged
+    _write_dns_credentials(creds)
+
+
+def _retarget_profile_dns_credential(old: str, new: str) -> None:
+    """Point every stored profile (including member-less ones) at a different
+    DNS Credential ID. Servers are hydrated from the store, so this is what
+    makes a DNS Credential rename/delete reach them."""
+    profiles = load_profiles()
+    changed = False
+    for p in profiles.values():
+        if isinstance(p, dict) and str(p.get("dns_credential_id", "")).strip() == old:
+            p["dns_credential_id"] = new
+            changed = True
+    if changed:
+        _write_profiles(profiles)
+
+
+@_locked
+def delete_dns_credential(dns_credential_id: str) -> int:
+    """Delete a DNS Credential, detaching it (clears dns_credential_id) from
+    every referencing server entry — same semantics as
+    delete_certificate_profile. Returns the number of entries detached
+    (0 if the credential didn't exist)."""
+    dns_credential_id = str(dns_credential_id).strip()
+    creds = load_dns_credentials()
+    if dns_credential_id not in creds:
+        return 0
+    del creds[dns_credential_id]
+    _write_dns_credentials(creds)
+
+    servers = load_servers()
+    updated = list(servers)
+    detached = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip() != dns_credential_id:
+            continue
+        merged = dict(s)
+        merged["dns_credential_id"] = ""
+        updated[i] = merged
+        detached += 1
+    _retarget_profile_dns_credential(dns_credential_id, "")
+    if detached:
+        _write(updated)
+    return detached
+
+
+@_locked
+def rename_dns_credential(old_id: str, new_id: str) -> int:
+    """Rename a DNS Credential's ID, rewriting dns_credential_id on every
+    referencing server entry. Simpler than rename_certificate_profile since
+    there's no on-disk directory to move. Returns the number of entries
+    rewritten (0 if new_id == old_id). Raises ValueError if new_id is
+    invalid, collides with an existing credential, or old_id doesn't exist.
+    """
+    old_id = str(old_id).strip()
+    new_id = str(new_id).strip()
+    if not new_id:
+        raise ValueError("DNS Credential ID is required.")
+    if not _ID_PATTERN.fullmatch(new_id):
+        raise ValueError("DNS Credential ID may only contain letters, numbers, '.', '_', and '-'.")
+    if new_id == old_id:
+        return 0
+
+    creds = load_dns_credentials()
+    if old_id not in creds:
+        raise ValueError("DNS Credential not found.")
+    if new_id in creds:
+        raise ValueError(f"'{new_id}' is already used by another DNS Credential.")
+
+    creds[new_id] = creds.pop(old_id)
+    _write_dns_credentials(creds)
+
+    servers = load_servers()
+    updated = list(servers)
+    renamed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip() != old_id:
+            continue
+        merged = dict(s)
+        merged["dns_credential_id"] = new_id
+        updated[i] = merged
+        renamed += 1
+    _retarget_profile_dns_credential(old_id, new_id)
+    if renamed:
+        _write(updated)
+    return renamed
+
+
+@_locked
+def migrate_dns_credentials_from_servers() -> int:
+    """One-time, idempotent startup migration: extract embedded dns_provider/
+    dns_credentials fields out of servers.json entries into the DNS
+    Credentials store, replacing them with a dns_credential_id reference.
+
+    Entries that already have dns_credential_id (or neither legacy field)
+    are left alone. Entries with an identical (provider, credentials) pair
+    are deduped onto the same new DNS Credential rather than creating one
+    per entry. Run once at container startup (entrypoint.sh), right after
+    backfill_certificate_ids(), before anything else reads servers.json.
+    """
+    servers = load_servers()
+    creds = load_dns_credentials()
+    # Map a dedup key to the credential id created/reused for it in this pass.
+    by_key: dict[tuple, str] = {}
+    for cred_id, cred in creds.items():
+        key = (
+            str(cred.get("dns_provider", "")).strip().lower(),
+            tuple(sorted((cred.get("dns_credentials") or {}).items())),
+        )
+        by_key.setdefault(key, cred_id)
+
+    updated = list(servers)
+    changed = 0
+    for i, s in enumerate(servers):
+        if str(s.get("dns_credential_id", "")).strip():
+            continue
+        provider = str(s.get("dns_provider", "")).strip()
+        if not provider:
+            continue
+        cred_fields = s.get("dns_credentials") or {}
+        key = (provider.lower(), tuple(sorted(cred_fields.items())))
+        cred_id = by_key.get(key)
+        if cred_id is None:
+            base = _slugify_certificate_id(provider.lower(), default="dns-credential")
+            cred_id = base
+            n = 2
+            while cred_id in creds:
+                cred_id = f"{base}-{n}"
+                n += 1
+            creds[cred_id] = {
+                "dns_provider": provider.lower(),
+                "dns_credentials": dict(cred_fields),
+            }
+            by_key[key] = cred_id
+
+        merged = dict(s)
+        merged["dns_credential_id"] = cred_id
+        merged.pop("dns_provider", None)
+        merged.pop("dns_credentials", None)
+        updated[i] = merged
+        changed += 1
+
+    if changed:
+        _write_dns_credentials(creds)
+        # Entries carry the freshly extracted credential reference; let it
+        # reach any already-stored profile (the store normally wins).
+        _write(updated, tuple(str(e.get("certificate_id", "")).strip() for e in updated))
+    return changed
+
+
 # ── Shell environment export ───────────────────────────────────────────────────
+
+def target_key_types(entry: dict) -> set:
+    """Key types ("ecc"/"rsa") this one target consumes, per its type."""
+    r = _resolve_target_fields(entry)
+    return set(target_spec(r.get("target_type"))["consumes"](r))
+
+
+def profile_key_types(entry: dict) -> set:
+    """Key types the entry's whole certificate profile must issue: the union
+    of what every member consumes (the entry itself when it has no peers)."""
+    members = certificate_members(certificate_id(entry)) or [entry]
+    out: set = set()
+    for m in members:
+        out |= target_key_types(m)
+    return out
+
 
 def get_server_env_dict(server_id: str) -> Optional[dict]:
     """Return the per-server environment as a plain Python dict.
@@ -390,14 +1437,23 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
     if not s:
         return None
 
-    creds = s.get("dns_credentials") or {}
+    s = _resolve_target_fields(s)
+    credential = get_dns_credential(s.get("dns_credential_id", "")) or {}
+    dns_provider = str(credential.get("dns_provider", ""))
+    creds = credential.get("dns_credentials") or {}
+    target_type = str(s.get("target_type", "clearpass") or "clearpass")
+    own_types = target_spec(target_type)["consumes"](s)
+    issue_types = profile_key_types(s) or own_types or {"ecc"}
     env: dict[str, str] = {
         "CERTIFICATE_ID":       certificate_id(s),
+        "TARGET_TYPE":          target_type,
         "DOMAIN":               str(s.get("domain",               "")),
         "SAN_DNS":              "|".join(san_dns_names(s)),
         "ACME_EMAIL":           str(s.get("acme_email",           "")),
         "ACME_SERVER":          str(s.get("acme_server",          "letsencrypt")),
-        "DNS_PROVIDER":         str(s.get("dns_provider",         "")),
+        "EAB_KID":              str(s.get("eab_kid",              "")),
+        "EAB_HMAC_KEY":         str(s.get("eab_hmac_key",         "")),
+        "DNS_PROVIDER":         dns_provider,
         "CPPM_HOST":            str(s.get("cppm_host",            "")),
         "CPPM_CLUSTER_MODE":    "true" if s.get("cppm_cluster_mode") else "false",
         "CPPM_CLIENT_ID":       str(s.get("cppm_client_id",       "")),
@@ -406,8 +1462,13 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "CPPM_CERT_PASSPHRASE": str(s.get("cppm_cert_passphrase", "")),
         "CPPM_CALLBACK_HOST":   str(s.get("cppm_callback_host",   "")),
         "CPPM_CALLBACK_PORT":   str(s.get("cppm_callback_port",   "8765")),
-        "ISSUE_ECC":            "true" if "https_ecc" in certificate_targets(s) else "false",
-        "ISSUE_RSA":            "true" if any(t in certificate_targets(s) for t in ("https_rsa", "radius", "radsec")) else "false",
+        # ISSUE_* is what the whole certificate profile needs issued (union
+        # over its members); CONSUME_* is what this target itself deploys.
+        "ISSUE_ECC":            "true" if "ecc" in issue_types else "false",
+        "ISSUE_RSA":            "true" if "rsa" in issue_types else "false",
+        "CONSUME_ECC":          "true" if "ecc" in own_types else "false",
+        "CONSUME_RSA":          "true" if "rsa" in own_types else "false",
+        "SSH_KEY_TYPE":         linux_key_type(s),
         "UPLOAD_HTTPS_ECC":     "true" if "https_ecc" in certificate_targets(s) else "false",
         "UPLOAD_HTTPS_RSA":     "true" if "https_rsa" in certificate_targets(s) else "false",
         "UPLOAD_RADIUS":        "true" if "radius" in certificate_targets(s) else "false",
@@ -417,6 +1478,13 @@ def get_server_env_dict(server_id: str) -> Optional[dict]:
         "SERVER_LOG_DIR":       str(server_cert_dir(s) / "logs"),
         "STATUS_LOG":           str(server_cert_dir(s) / "status.log"),
         "SERVER_ID":            str(s.get("id", "")),
+        "SSH_HOST":             str(s.get("ssh_host",          "")),
+        "SSH_PORT":             str(s.get("ssh_port",          "22")),
+        "SSH_USER":             str(s.get("ssh_user",          "")),
+        "REMOTE_CERT_DIR":      str(s.get("remote_cert_dir",   "")),
+        "RELOAD_COMMAND":       str(s.get("reload_command",    "")),
+        "SSH_PRIVATE_KEY":      str(s.get("ssh_private_key",   "")),
+        "SSH_PASSWORD":         str(s.get("ssh_password",      "")),
     }
     for k, v in creds.items():
         env[k] = str(v)
@@ -445,6 +1513,7 @@ def get_server_notifications(server_id: str) -> dict:
     return s.get("notifications") or {"expiry_warning_days": 14, "channels": []}
 
 
+@_locked
 def update_server_notifications(server_id: str, notifications: dict) -> bool:
     """Replace the notifications block for a server. Returns True if found."""
     servers = load_servers()
@@ -578,7 +1647,7 @@ def generate_traefik_compose(cfg: dict) -> str:
         "services:",
         "",
         "  traefik:",
-        "    image: traefik:v3.3",
+        "    image: traefik:v3.7",
         "    container_name: traefik",
         "    restart: unless-stopped",
         "    command:",
@@ -650,7 +1719,9 @@ def get_traefik_log(lines: int = 150) -> list:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _write(servers: list) -> None:
-    SERVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SERVERS_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
-    SERVERS_FILE.chmod(0o600)
+def _write(servers: list, writethrough: tuple = ()) -> None:
+    entries, profiles = _split_profiles(servers, writethrough)
+    if profiles != load_profiles():
+        _write_profiles(profiles)  # first: a crash between the two writes is harmless
+    servers = entries
+    _atomic_write(SERVERS_FILE, json.dumps(servers, indent=2))

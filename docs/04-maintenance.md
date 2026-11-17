@@ -88,14 +88,14 @@ Log updates as the upload progresses.
 **CLI alternative:**
 
 ```bash
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 ```
 
 Both methods run the same sequence: trust list pre-flight, HTTPS(ECC) cert upload,
 RADIUS(RSA) cert upload.
 
 > Only one upload can run at a time. If a renewal or another upload is already
-> in progress, `deploy_hook.sh` exits immediately with a WARN in the Activity Log.
+> in progress, `clearpass_deploy_hook.sh` exits immediately with a WARN in the Activity Log.
 > Wait a moment and retry.
 
 ---
@@ -145,7 +145,7 @@ Update the passphrase in the web UI: **Servers → Edit → Cert Passphrase → 
 then re-upload so CPPM receives a PKCS12 encrypted with the new passphrase:
 
 ```bash
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 ```
 
 ---
@@ -157,7 +157,7 @@ checked and repaired automatically on two schedules:
 
 | Schedule | Trigger | What runs |
 |---|---|---|
-| After every cert issuance or renewal | Automatic via `deploy_hook.sh` | Trust check + HTTPS + RADIUS upload |
+| After every cert issuance or renewal | Automatic via `clearpass_deploy_hook.sh` | Trust check + HTTPS + RADIUS upload |
 | Weekly — Sunday 03:00 container-local | Automatic via `trust_check.sh` | Trust check only (no cert upload) |
 
 ### Run the trust list check manually
@@ -309,8 +309,8 @@ docker exec -it cppm-acme-cert-manager cppm-servers delete <id>
 docker exec -it cppm-acme-cert-manager bash
 
 # Useful commands once inside:
-lego --path /data/certs/cppm.example.com/lego-ecc list  # show ECC certs known to Lego
-lego --path /data/certs/cppm.example.com/lego-rsa list  # show RSA certs known to Lego
+lego certificates list --path /data/certs/cppm.example.com/lego-ecc  # show ECC certs known to Lego
+lego certificates list --path /data/certs/cppm.example.com/lego-rsa  # show RSA certs known to Lego
 cat /data/certs/status.log             # view status log
 cat /data/certs/servers.json           # view server configuration
 ```

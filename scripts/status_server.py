@@ -30,7 +30,7 @@ import traceback
 import zoneinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote as _url_quote
 
 try:
     from cryptography import x509
@@ -49,10 +49,17 @@ from auth_utils import (
 from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
+    list_profile_members, update_certificate_profile, delete_certificate_profile,
+    rename_certificate_profile, create_profile, remove_profile, get_profile,
+    list_dns_credentials, get_dns_credential, add_dns_credential,
+    update_dns_credential, delete_dns_credential, rename_dns_credential,
+    dns_credential_owner_ids,
     get_server_notifications, update_server_notifications,
     get_traefik_config, save_traefik_config, get_traefik_log,
     certificate_targets, le_dns_configured, le_dns_problems, SERVERS_FILE,
-    acme_dns_resolvers,
+    acme_dns_resolvers, resolve_target_fields as _resolve_target_fields,
+    TARGET_TYPES, linux_key_type, cert_slot_keys,
+    server_display_name, server_host, server_services, parse_services,
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -353,14 +360,20 @@ def build_log_bundle(server: dict) -> bytes:
 
 def build_server_status(server: dict) -> dict:
     """Build the full status dict for a single server configuration entry."""
+    server   = _resolve_target_fields(server)
     tz       = _tz()
     domain   = server.get("domain", "")
     cert_dir = server_cert_dir(server)
+    dns_credential = get_dns_credential(server.get("dns_credential_id", "")) or {}
     status = {
         "id":              server.get("id", ""),
         "label":           server.get("label", domain),
+        "target_type":     server.get("target_type", "clearpass"),
+        "host":            server_host(server),
         "cppm_host":       server.get("cppm_host", ""),
-        "dns_provider":    server.get("dns_provider", ""),
+        "ssh_host":        server.get("ssh_host", ""),
+        "services":        server_services(server),
+        "dns_provider":    dns_credential.get("dns_provider", ""),
         "acme_server":     server.get("acme_server", ""),
         "domain":          domain,
         "callback_host":   server.get("cppm_callback_host", ""),
@@ -910,6 +923,13 @@ _HEALTH_CATEGORY: dict[str, str] = {
     "cppm":     "CPPM",
     "dns":      "DNS",
     "callback": "CALLBACK",
+    "ssh":      "SSH",
+}
+
+# Which health checks run for each target_type — see _build_health().
+_HEALTH_CHECKS_BY_TYPE: dict[str, tuple] = {
+    "clearpass": ("cppm", "dns", "callback"),
+    "linux_ssh": ("ssh", "dns"),
 }
 
 
@@ -1047,6 +1067,17 @@ def _check_cppm(server: dict = None) -> dict:
         return _classify_conn_error(exc, host)
 
 
+def _check_ssh(server: dict = None) -> dict:
+    """Run the SSH target smoke test (write/read/delete probe, no reload)."""
+    if not server:
+        return {"status": "unknown", "message": "Not configured"}
+    try:
+        import ssh_upload
+        return ssh_upload.test_ssh_target(server)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)[:200]}
+
+
 def _check_dns(server: dict = None) -> dict:
     """DNS provider check, plus a split-horizon warning when the provider is OK.
 
@@ -1071,6 +1102,28 @@ def _check_dns(server: dict = None) -> dict:
     return result
 
 
+def _split_horizon_preflight(entry: dict) -> str | None:
+    """Best-effort split-horizon DNS check run right after a server is saved.
+
+    Catches a split-horizon misconfiguration before the first issuance
+    attempt instead of only surfacing it later in the dashboard DNS tile or
+    the renewal log. Read-only (SOA lookups via dig); any failure here is
+    swallowed so it never blocks saving the server.
+    """
+    if not entry.get("domain"):
+        return None
+    try:
+        from dns_utils import split_horizon_check
+        problem = split_horizon_check(
+            entry.get("domain", ""),
+            bool(entry.get("split_horizon_dns")),
+            acme_dns_resolvers(entry),
+        )
+    except Exception:
+        return None
+    return problem["message"] if problem else None
+
+
 def _check_dns_provider(server: dict = None) -> dict:
     """Check the ACME / DNS setup, then DNS provider API connectivity.
 
@@ -1086,8 +1139,9 @@ def _check_dns_provider(server: dict = None) -> dict:
     problems = le_dns_problems(server)
     if problems:
         return {"status": "error", "message": "Incomplete: " + " ".join(problems)}
-    provider = server.get("dns_provider", "")
-    _creds   = server.get("dns_credentials") or {}
+    credential = get_dns_credential(server.get("dns_credential_id", "")) or {}
+    provider = credential.get("dns_provider", "")
+    _creds   = credential.get("dns_credentials") or {}
     def g(k): return _creds.get(k, "")
     try:
         import requests as _req
@@ -1342,19 +1396,25 @@ def _build_health() -> dict:
     if not servers:
         return {"servers": {}, "checked_at": datetime.datetime.now(_tz()).isoformat()}
 
-    # Flatten into (server_id, check_type, server_dict) tasks
-    tasks = [(s.get("id", ""), t, s) for s in servers for t in ("cppm", "dns", "callback")]
+    # Flatten into (server_id, check_type, server_dict) tasks, per target_type
+    resolved_servers = [_resolve_target_fields(s) for s in servers]
+    tasks = [
+        (s.get("id", ""), t, s)
+        for s in resolved_servers
+        for t in _HEALTH_CHECKS_BY_TYPE.get(str(s.get("target_type", "clearpass") or "clearpass"),
+                                             ("cppm", "dns", "callback"))
+    ]
     # Keep a lookup so we can resolve server dicts when logging state changes
-    sid_to_server = {s.get("id", ""): s for s in servers}
+    sid_to_server = {s.get("id", ""): s for s in resolved_servers}
+
+    _HEALTH_FNS = {"cppm": _check_cppm, "dns": _check_dns, "callback": _check_callback, "ssh": _check_ssh}
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     per_server: dict = {}
     with ThreadPoolExecutor(max_workers=max(len(tasks), 1)) as pool:
         fut_map = {}
         for sid, check_type, s in tasks:
-            fn = (_check_cppm if check_type == "cppm"
-                  else _check_dns if check_type == "dns"
-                  else _check_callback)
+            fn = _HEALTH_FNS[check_type]
             fut_map[pool.submit(fn, s)] = (sid, check_type)
         for fut in as_completed(fut_map):
             sid, check_type = fut_map[fut]
@@ -1445,7 +1505,7 @@ def _check_expiry_warnings() -> None:
                 days = d if days is None else min(days, d)
 
         if days is not None and days <= threshold:
-            srv_label = s.get("label") or s.get("cppm_host", sid)
+            srv_label = server_display_name(s, sid)
             msg       = (f"[{srv_label}] Certificate for {s.get('domain', '?')} expires in "
                          f"{days} day(s). Renewal runs automatically at ≤30 days, "
                          f"but manual action may be needed.")
@@ -1488,6 +1548,9 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
                     member_env = get_server_env_dict(str(member.get("id", "")))
                     if not member_env:
                         continue
+                    deploy_script = _deploy_script_for(member_env)
+                    if deploy_script is None:
+                        continue
                     Path(member_env["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
                     upload_env = {**os.environ, **member_env}
                     if debug:
@@ -1497,7 +1560,7 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
                         env_dict["CERTIFICATE_ID"], member.get("cppm_host", member.get("id")),
                     )
                     upload_rc = subprocess.run(
-                        [str(_DEPLOY_SCRIPT)], env=upload_env, check=False
+                        [str(deploy_script)], env=upload_env, check=False
                     ).returncode
                     if upload_rc != 0:
                         _log.error("cert pipeline: upload failed for target %s (rc=%d)", member.get("id"), upload_rc)
@@ -1507,7 +1570,21 @@ def _spawn_cert_pipeline(server_id: str, force: bool = False, debug: bool = Fals
     threading.Thread(target=_run, daemon=True).start()
 
 
-_DEPLOY_SCRIPT = Path("/opt/cppm/deploy_hook.sh")
+# Deploy script per target_type. "clearpass" is the only implemented type
+# today; this is the plug-in point future target types (New Central, Mist,
+# a generic Linux target, ...) register their own deploy script against.
+_DEPLOY_SCRIPTS = {
+    t: Path("/opt/cppm") / spec["deploy_script"] for t, spec in TARGET_TYPES.items()
+}
+
+
+def _deploy_script_for(env_dict: dict) -> Path | None:
+    """Return the deploy script for env_dict's TARGET_TYPE, or None if unsupported."""
+    target_type = env_dict.get("TARGET_TYPE", "clearpass")
+    script = _DEPLOY_SCRIPTS.get(target_type)
+    if script is None:
+        _log.error("deploy: no deploy script registered for target_type '%s'", target_type)
+    return script
 
 def _status_write(status_log: str, level: str, category: str, message: str) -> None:
     """Write a single status entry directly to a server's status.log."""
@@ -1521,18 +1598,21 @@ def _status_write(status_log: str, level: str, category: str, message: str) -> N
 
 
 def _spawn_upload_pipeline(server_id: str, debug: bool = False) -> None:
-    """Run deploy_hook.sh for server_id in a background daemon thread.
+    """Run the target's deploy script for server_id in a background daemon thread.
 
     `debug` enables verbose (DEBUG) logging for this single run only — it is
     never persisted, so it has no effect on scheduled/automatic uploads.
     """
     def _run():
-        if not _DEPLOY_SCRIPT.exists():
-            _log.warning("upload pipeline: %s not found (not in container?)", _DEPLOY_SCRIPT)
-            return
         env_dict = get_server_env_dict(server_id)
         if env_dict is None:
             _log.error("upload pipeline: server %s not found", server_id)
+            return
+        deploy_script = _deploy_script_for(env_dict)
+        if deploy_script is None:
+            return
+        if not deploy_script.exists():
+            _log.warning("upload pipeline: %s not found (not in container?)", deploy_script)
             return
         Path(env_dict["SERVER_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
         status_log = env_dict.get("STATUS_LOG", "")
@@ -1549,7 +1629,7 @@ def _spawn_upload_pipeline(server_id: str, debug: bool = False) -> None:
             if debug:
                 env["LOG_LEVEL"] = "DEBUG"
             _log.info("upload pipeline: starting for %s (debug=%s)", server_id, debug)
-            rc = subprocess.run([str(_DEPLOY_SCRIPT)], env=env, check=False).returncode
+            rc = subprocess.run([str(deploy_script)], env=env, check=False).returncode
             _log.info("upload pipeline: finished for %s (rc=%d)", server_id, rc)
         except Exception as exc:
             _log.error("upload pipeline: error for %s: %s", server_id, exc)
@@ -1576,17 +1656,83 @@ _DNS_CRED_FIELDS: dict = {
 }
 
 
-def _parse_server_form(f: dict) -> dict:
-    """Convert POST form data into a server config dict."""
+def _parse_identity_fields(f: dict) -> dict:
+    """Parse the cert-identity fields a certificate profile shares across targets.
+
+    Mirrors config_utils._SHARED_PROFILE_FIELDS — used by both server-form
+    parsers below and by the certificate-profile editor, which posts the
+    same field names via _identity_fields_html. DNS vendor credentials are
+    parsed separately by _parse_dns_credential_fields, since they're no
+    longer part of a certificate profile's own fields.
+    """
+    acme_sel    = f.get("acme_server", "letsencrypt")
+    acme_server = f.get("acme_server_url", "").strip() if acme_sel == "custom" else acme_sel
+    san_dns     = [f.get(f"san_dns_{i}", "").strip().lower() for i in range(1, 11)]
+    fields = {
+        "domain":           f.get("domain", "").strip(),
+        "san_dns":          [name for name in san_dns if name],
+        "acme_email":       f.get("acme_email", "").strip(),
+        "acme_server":      acme_server or "letsencrypt",
+        "dns_credential_id": f.get("dns_credential_id", "").strip(),
+        "cert_types": [t for t in cert_slot_keys() if f.get(f"issue_{t}") == "true"]
+                      or list(cert_slot_keys("clearpass")),
+        "split_horizon_dns": f.get("split_horizon_dns", "") == "true",
+        "split_horizon_resolvers": [r for r in re.split(r"[,\s]+", f.get("split_horizon_resolvers", "")) if r],
+    }
+    if acme_server == "zerossl":
+        fields["eab_kid"] = f.get("EAB_KID", "").strip()
+        fields["eab_hmac_key"] = f.get("EAB_HMAC_KEY", "")
+    return fields
+
+
+def _parse_dns_credential_fields(f: dict) -> dict:
+    """Parse the DNS provider + vendor credential fields from a form POST.
+
+    Used by the DNS Credential form's POST handler, and by
+    _parse_server_form for a non-profiled server entry that's creating its
+    DNS Credential inline rather than picking an existing one.
+    """
     provider  = f.get("dns_provider", "cloudflare")
     cred_keys = _DNS_CRED_FIELDS.get(provider, [])
-    if f.get("acme_server", "letsencrypt") == "zerossl":
-        cred_keys = [*cred_keys, "EAB_KID", "EAB_HMAC_KEY"]
-    acme_sel  = f.get("acme_server", "letsencrypt")
-    acme_server = f.get("acme_server_url", "").strip() if acme_sel == "custom" else acme_sel
-    san_dns = [f.get(f"san_dns_{i}", "").strip().lower() for i in range(1, 11)]
+    return {
+        "dns_provider":    provider,
+        "dns_credentials": {k: f.get(k, "") for k in cred_keys},
+    }
+
+
+def _parse_ssh_server_form(f: dict) -> dict:
+    """Convert POST form data into a linux_ssh server config dict.
+
+    SSH-specific fields live under target_config (the groundwork shim's
+    nesting convention for non-clearpass target types) rather than as flat
+    top-level fields.
+    """
+    return {
+        "label":          f.get("label", "").strip(),
+        "target_type":    "linux_ssh",
+        "certificate_id": f.get("certificate_id", "").strip(),
+        **_parse_identity_fields(f),
+        "target_config": {
+            "ssh_host":         f.get("ssh_host", "").strip(),
+            "ssh_port":         f.get("ssh_port", "22").strip() or "22",
+            "ssh_user":         f.get("ssh_user", "").strip(),
+            "remote_cert_dir":  f.get("remote_cert_dir", "").strip(),
+            "reload_command":  f.get("reload_command", "").strip(),
+            "services":        parse_services(f.get("services", "")),
+            "ssh_private_key": f.get("ssh_private_key", ""),
+            "ssh_password":    f.get("ssh_password", ""),
+            "ssh_key_type":    linux_key_type({"ssh_key_type": f.get("ssh_key_type", "")}),
+        },
+    }
+
+
+def _parse_server_form(f: dict) -> dict:
+    """Convert POST form data into a server config dict."""
+    if f.get("target_type", "clearpass") == "linux_ssh":
+        return _parse_ssh_server_form(f)
     return {
         "label":                f.get("label", "").strip(),
+        "target_type":          "clearpass",
         "certificate_id":       f.get("certificate_id", "").strip(),
         "cppm_host":            f.get("cppm_host", "").strip(),
         "cppm_cluster_mode":   f.get("cppm_cluster_mode", "") == "true",
@@ -1596,16 +1742,7 @@ def _parse_server_form(f: dict) -> dict:
         "cppm_cert_passphrase": f.get("cppm_cert_passphrase", ""),
         "cppm_callback_host":   f.get("cppm_callback_host", "").strip(),
         "cppm_callback_port":   f.get("cppm_callback_port", "8765").strip() or "8765",
-        "domain":               f.get("domain", "").strip(),
-        "san_dns":              [name for name in san_dns if name],
-        "acme_email":           f.get("acme_email", "").strip(),
-        "acme_server":          acme_server or "letsencrypt",
-        "dns_provider":         provider,
-        "dns_credentials":      {k: f.get(k, "") for k in cred_keys},
-        "cert_types": [t for t in ("https_ecc", "https_rsa", "radius", "radsec")
-                 if f.get(f"issue_{t}") == "true"] or ["https_ecc", "https_rsa", "radius", "radsec"],
-        "split_horizon_dns":    f.get("split_horizon_dns", "") == "true",
-        "split_horizon_resolvers": [r for r in re.split(r"[,\s]+", f.get("split_horizon_resolvers", "")) if r],
+        **_parse_identity_fields(f),
     }
 
 
@@ -1614,6 +1751,7 @@ def _default_server_from_env() -> dict:
     return {
         "id":                   None,
         "label":                "",
+        "target_type":          "clearpass",
         "certificate_id":       "",
         "cppm_host":            "",
         "cppm_cluster_mode":   False,
@@ -1627,11 +1765,20 @@ def _default_server_from_env() -> dict:
         "san_dns":              [],
         "acme_email":           "",
         "acme_server":          "letsencrypt",
-        "dns_provider":         "cloudflare",
-        "dns_credentials":      {},
-        "cert_types":           ["https_ecc", "https_rsa", "radius", "radsec"],
+        "dns_credential_id":    "",
+        "eab_kid":              "",
+        "eab_hmac_key":         "",
+        "cert_types":           list(cert_slot_keys("clearpass")),
         "split_horizon_dns":    False,
         "split_horizon_resolvers": [],
+        "ssh_host":             "",
+        "ssh_port":             "22",
+        "ssh_user":             "",
+        "remote_cert_dir":      "",
+        "reload_command":       "",
+        "ssh_private_key":      "",
+        "ssh_password":         "",
+        "ssh_key_type":         "ecc",
     }
 
 
@@ -1871,6 +2018,7 @@ _HELP_DOCS = [
     ("script-reference", "Script Reference",     "06-script-reference.md"),
     ("quick-reference",  "Quick Reference",      "07-quick-reference.md"),
     ("traefik",          "HTTPS with Traefik",   "08-traefik.md"),
+    ("linux-ssh-target", "Linux SSH Target",     "10-linux-ssh-target.md"),
 ]
 
 _HELP_DESC = {
@@ -1882,6 +2030,7 @@ _HELP_DESC = {
     "script-reference": "Reference for all included shell scripts and Python CLIs (cppm-servers, cppm-users, etc.).",
     "quick-reference":  "At-a-glance cheatsheet: ports, paths, environment variables, and key commands.",
     "traefik":          "Enable HTTPS for the web UI using Traefik as a reverse proxy with automatic Let's Encrypt certificates.",
+    "linux-ssh-target": "Deploy certificates to any Linux server over SSH — setup, deploy-key best practices, and target-side examples.",
 }
 
 
@@ -1908,7 +2057,7 @@ def _help_index_page(username: str = "") -> str:
   <div class="card" style="margin-bottom:1.25rem">
     <div class="card-title">Reference Guides</div>
     <p style="font-size:0.82rem;color:var(--muted);margin-bottom:1rem">
-      Complete documentation for ClearPass ACME Certificate Manager.
+      Complete documentation for ACME Certificate Manager.
       Select a topic to read it inline.
     </p>
     {grid}
@@ -2005,6 +2154,10 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .nav-sep{width:1px;height:16px;background:var(--border);margin:0 0.25rem}
 .nav-user{font-size:0.78rem;color:var(--subtle);padding:0.3rem 0.5rem}
 .nav-logout{color:var(--muted)}
+.subtabs{display:flex;gap:0.25rem;border-bottom:1px solid var(--border);margin-bottom:1rem}
+.subtab{padding:0.5rem 0.9rem;font-size:0.82rem;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
+.subtab:hover{color:var(--text)}
+.subtab.active{color:var(--text);border-bottom-color:var(--accent)}
 
 /* ── Dashboard layout ── */
 .app{max-width:1200px;margin:0 auto;padding:1.5rem}
@@ -2091,6 +2244,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .field label{display:block;font-size:0.78rem;font-weight:500;color:var(--muted);margin-bottom:0.35rem}
 .field label .hint{font-weight:400;color:var(--subtle)}
 .field input{width:100%;background:#0f172a;border:1px solid var(--border2);border-radius:0.4rem;padding:0.5rem 0.75rem;color:var(--text);font-size:0.85rem;outline:none;transition:border-color .15s}
+.field input::placeholder,.field textarea::placeholder{color:var(--subtle);font-style:italic;opacity:1}
 .field input:focus{border-color:var(--accent)}
 .btn-submit{width:100%;padding:0.55rem;background:var(--accent);color:#0f172a;border:none;border-radius:0.4rem;font-size:0.9rem;font-weight:600;cursor:pointer;margin-top:0.5rem;transition:opacity .15s}
 .btn-submit:hover{opacity:.9}
@@ -2131,6 +2285,8 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .server-row{cursor:pointer;transition:background .12s}
 .server-row:hover td{background:rgba(255,255,255,.022)}
 .srv-label{font-weight:600;font-size:0.85rem;margin-bottom:0.18rem}
+.svc-tags{display:flex;flex-wrap:wrap;gap:0.25rem;margin-top:0.3rem}
+.svc-tag{font-size:0.65rem;padding:0.05rem 0.4rem;border:1px solid var(--border2,var(--border));border-radius:999px;color:var(--muted);white-space:nowrap}
 .srv-host{font-family:monospace;font-size:0.75rem;color:var(--muted);display:flex;align-items:center;gap:0.3rem}
 .mini-cert{border-left:3px solid var(--subtle);padding:0.22rem 0.4rem;border-radius:0 0.3rem 0.3rem 0;display:inline-block;min-width:70px}
 .mini-cert.ok{border-left-color:var(--ok)}.mini-cert.warn{border-left-color:var(--warn)}.mini-cert.danger{border-left-color:var(--danger)}.mini-cert.none{border-left-color:var(--subtle)}
@@ -2234,6 +2390,7 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
         right = (
             _link("/", "Dashboard", "dashboard")
             + _link("/settings", "Servers", "settings")
+            + _link("/settings/profiles", "Profiles", "profiles")
             + _link("/settings/traefik", f"Traefik{t_dot}", "traefik")
             + _link("/admin/users", "Users", "users")
             + _link("/help", "Help", "help")
@@ -2247,7 +2404,7 @@ def _nav(username: str = "", active: str = "dashboard") -> str:
         right = '<a href="/login" class="nav-link">Sign In</a><a href="/help" class="nav-link">Help</a>'
 
     return f"""<nav class="nav">
-  <span class="nav-brand">ClearPass ACME Certificate Manager</span>
+  <span class="nav-brand">ACME Certificate Manager</span>
   <div class="nav-links">{right}</div>
 </nav>"""
 
@@ -2263,14 +2420,14 @@ def _base(title: str, body: str, nav_user: str = "", active: str = "",
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_esc(title)} — ClearPass ACME Certificate Manager</title>
+<title>{_esc(title)} — ACME Certificate Manager</title>
 <style>{_CSS}</style>
 </head>
 <body>
 {nav}
 {body}
 <footer style="text-align:center;padding:1.5rem 1rem;font-size:0.68rem;color:var(--subtle)">
-  ClearPass ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
+  ACME Certificate Manager v{_esc(_APP_VERSION)} &nbsp;·&nbsp; build {_esc(_APP_BUILD)}
 </footer>
 <script>
 (function(){{
@@ -2297,7 +2454,7 @@ def _login_page(error: str = "", username_val: str = "") -> str:
     return _base("Sign In", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <h1 class="auth-title">Sign In</h1>
     {err_html}
     <form method="POST" action="/login">
@@ -2323,7 +2480,7 @@ def _setup_page(error: str = "") -> str:
     return _base("First-Time Setup", f"""
 <div class="auth-wrap">
   <div class="auth-card">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <h1 class="auth-title">First-Time Setup</h1>
     <p class="auth-desc">No admin users are configured yet. Create the initial
     administrator account to secure access to this interface.</p>
@@ -2736,7 +2893,7 @@ function loadTraefikLog() {
         content = f"""
 <div class="auth-wrap">
   <div class="auth-card" style="max-width:660px;width:100%">
-    <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+    <div class="auth-logo">ACME Certificate Manager</div>
     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.75rem">
       <h1 class="auth-title" style="margin-bottom:0">Configure HTTPS (Step 1 of 2)</h1>
       <a href="/setup?step=admin" style="font-size:0.78rem;color:var(--subtle)">Skip →</a>
@@ -2910,7 +3067,7 @@ def _overview_page(username: str = "") -> str:
 <div class="card" style="padding:0;overflow:hidden">
   <table class="overview-table">
     <thead><tr>
-      <th>ClearPass Server</th>
+      <th>Server</th>
       <th>DNS &amp; ACME Provider</th>
       <th>Certificate Services</th>
       <th>Next Renewal Check</th>
@@ -2948,19 +3105,26 @@ def _settings_list_page(servers: list, username: str,
         flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
 
     if not servers:
-        rows = ('<tr><td colspan="5"><div class="empty">'
-                'No servers configured yet.&nbsp; '
-                '<a href="/settings/add" style="color:var(--accent)">Add the first server</a>.'
-                '</div></td></tr>')
+        rows = f'<tr><td colspan="5">{_get_started_html()}</td></tr>'
     else:
         rows = ""
         for s in servers:
             sid    = _esc(str(s.get("id", "")))
             label  = _esc(s.get("label", ""))
-            host   = _esc(s.get("cppm_host", ""))
+            rs     = _resolve_target_fields(s)
+            host   = _esc(server_host(rs))
+            host  += _svc_tags_html(server_services(rs))
             domain = _esc(s.get("domain", ""))
-            prov   = _esc(s.get("dns_provider", ""))
+            prov   = _esc((get_dns_credential(s.get("dns_credential_id", "")) or {}).get("dns_provider", ""))
             acme   = _esc(s.get("acme_server", "letsencrypt"))
+            profile_id = str(s.get("certificate_id", "")).strip()
+            if profile_id:
+                domain += (
+                    f'<div style="margin-top:0.2rem;font-family:sans-serif;font-size:0.7rem;'
+                    f'font-weight:normal"><a href="/settings/profiles/edit/{_esc(profile_id)}" '
+                    f'style="color:var(--muted)">Profile: '
+                    f'<span style="color:var(--accent)">{_esc(profile_id)}</span></a></div>'
+                )
             run_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
                 f'<form method="POST" action="/settings/run/{sid}" id="run-form-{sid}"'
@@ -2991,18 +3155,21 @@ def _settings_list_page(servers: list, username: str,
                 f'</div>'
                 f'</div>'
             )
+            is_linux_ssh = s.get("target_type") == "linux_ssh"
+            upload_label = "Force Linux Upload" if is_linux_ssh else "Force ClearPass Upload"
+            upload_dest = "the Linux server" if is_linux_ssh else "ClearPass"
             upload_btn = (
                 f'<div class="action-group" style="position:relative;display:inline-flex;flex-shrink:0">'
                 f'<form method="POST" action="/settings/upload/{sid}" id="upload-form-{sid}"'
                 f' style="display:inline-flex"'
                 f' onsubmit="return confirm('
-                f"'Force-upload the current certificate for {label} to ClearPass?\\n\\n"
+                f"'Force-upload the current certificate for {label} to {upload_dest}?\\n\\n"
                 f"Only use this to recover from a failed upload. "
                 f"Normal uploads happen automatically after each renewal.')\">"
                 f'<input type="hidden" name="debug" id="upload-debug-{sid}" value="0">'
                 f'<button type="submit" class="btn btn-warn" style="white-space:nowrap;border-top-right-radius:0;'
                 f'border-bottom-right-radius:0" title="Manual override — only needed if automatic upload has failed">'
-                f'&#8679; Force ClearPass Upload</button>'
+                f'&#8679; {upload_label}</button>'
                 f'</form>'
                 f'<button type="button" class="btn btn-warn" style="white-space:nowrap;padding:0 0.5rem;'
                 f'border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid rgba(0,0,0,0.25)"'
@@ -3020,11 +3187,11 @@ def _settings_list_page(servers: list, username: str,
             )
             rows += (
                 f'<tr>'
-                f'<td style="white-space:nowrap"><strong>{label}</strong></td>'
-                f'<td style="font-family:monospace;font-size:0.78rem">{host}</td>'
-                f'<td style="font-family:monospace;font-size:0.78rem">{domain}</td>'
-                f'<td>{prov}</td>'
-                f'<td style="text-align:right">'
+                f'<td style="white-space:nowrap;vertical-align:top"><strong>{label}</strong></td>'
+                f'<td style="font-family:monospace;font-size:0.78rem;vertical-align:top">{host}</td>'
+                f'<td style="font-family:monospace;font-size:0.78rem;vertical-align:top">{domain}</td>'
+                f'<td style="vertical-align:top">{prov}</td>'
+                f'<td style="text-align:right;vertical-align:top">'
                 f'<div style="display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.4rem 0.5rem;row-gap:0.4rem">'
                 f'<a href="/settings/edit/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap">Edit</a>'
                 f'<a href="/settings/notifications/{sid}" class="btn btn-ghost" style="flex-shrink:0;white-space:nowrap;padding-left:0.6rem;padding-right:0.6rem" title="Notifications">&#128276;</a>'
@@ -3054,19 +3221,20 @@ document.addEventListener('click', function(ev) {
     body = f"""
 <div class="app">
   <div class="page-hdr">
-    <span class="page-title">ClearPass Servers</span>
+    <span class="page-title">Servers</span>
     <a href="/settings/add" class="btn btn-primary">&#43; Add Server</a>
   </div>
   {flash_html}
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-    Certificates are issued and uploaded to ClearPass automatically on the renewal schedule.
-    <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force ClearPass Upload</strong>
+    Certificates are issued and uploaded to their target automatically on the renewal schedule.
+    <strong style="color:var(--warn)">Force Cert Issue</strong> and <strong style="color:var(--warn)">Force Upload</strong>
     are manual overrides — only use them when troubleshooting a failed renewal or upload.
   </p>
   <div class="card" style="overflow-x:auto">
-    <table class="settings-table" style="min-width:52rem">
+    <table class="settings-table" style="min-width:55rem">
       <thead><tr>
-        <th style="white-space:nowrap">Label</th><th>ClearPass Host</th><th>Domain</th><th>DNS Provider</th><th></th>
+        <th style="white-space:nowrap">Label</th><th style="white-space:nowrap">Host</th>
+        <th style="white-space:nowrap">Domain</th><th style="white-space:nowrap">DNS Provider</th><th></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -3076,36 +3244,41 @@ document.addEventListener('click', function(ev) {
                  nav_user=username, active="settings", show_nav=True)
 
 
-def _settings_form_page(server: dict = None, error: str = "",
-                        is_edit: bool = False, username: str = "") -> str:
-    if server is None:
-        server = _default_server_from_env()
+def _identity_fields_html(values: dict, disabled: bool = False,
+                          show_cert_types: bool = True) -> str:
+    """Render the ACME Provider + Advanced (split-horizon) cards.
 
-    s       = server
-    creds   = s.get("dns_credentials", {})
-    sid     = _esc(str(s.get("id", "")))
-    action  = f'/settings/edit/{sid}' if is_edit else '/settings/add'
-    title   = "Edit Server" if is_edit else "Add Server"
-    submit  = "Save Changes" if is_edit else "Add Server"
+    This is exactly the cert-identity field set a certificate profile shares
+    across targets (config_utils._SHARED_PROFILE_FIELDS minus
+    dns_credential_id), so it's used both embedded in the per-server Add/Edit
+    form and standalone on the certificate-profile editor — one
+    implementation, so the two pages can never drift apart. DNS vendor
+    credentials are rendered separately by _dns_credential_fields_html.
 
-    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    disabled=True wraps the fields in a disabled <fieldset> — used by the
+    per-server edit form when this target shares a profile with another
+    target, so a shared value can't be silently clobbered by editing it here
+    instead of on the profile (see _settings_form_page).
 
-    # Shorthand helpers (closures over s / creds)
+    show_cert_types=False swaps the ClearPass certificate-type checkboxes for a
+    note; used on the profile editor when every member is a Linux target (a
+    Linux server picks ECC or RSA on its own form, not on the profile).
+    """
+    s = values
+
     def fv(k, d=""):  return _esc(str(s.get(k, d)))
-    def cv(k, d=""):  return _esc(str(creds.get(k, d)))
     def sel(v, t):    return " selected" if v == t else ""
-    def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
 
     acme_srv_raw = s.get("acme_server", "letsencrypt")
     acme_is_custom = acme_srv_raw.startswith("http")
     acme_srv   = "custom" if acme_is_custom else acme_srv_raw
     acme_custom_url = _esc(acme_srv_raw) if acme_is_custom else ""
-    verify     = " checked" if s.get("cppm_verify_ssl") else ""
-    cert_types = s.get("cert_types") or ["https_ecc", "https_rsa", "radius", "radsec"]
-    chk_https_ecc = " checked" if "https_ecc" in cert_types or "ecc" in cert_types else ""
-    chk_https_rsa = " checked" if "https_rsa" in cert_types else ""
-    chk_radius = " checked" if "radius" in cert_types or "rsa" in cert_types else ""
-    chk_radsec = " checked" if "radsec" in cert_types or "rsa" in cert_types else ""
+    cert_types = s.get("cert_types") or list(cert_slot_keys("clearpass"))
+    selected_slots = set(cert_types)
+    if "ecc" in selected_slots:
+        selected_slots.add("https_ecc")
+    if "rsa" in selected_slots:
+        selected_slots.update(("radius", "radsec"))
     split_on = bool(s.get("split_horizon_dns"))
     chk_split = " checked" if split_on else ""
     split_resolvers = _esc(", ".join(s.get("split_horizon_resolvers") or []))
@@ -3116,174 +3289,32 @@ def _settings_form_page(server: dict = None, error: str = "",
            placeholder="alt{i}.{fv('domain')}"></div>'''
       for i in range(1, 11)
     )
-    # Certificate Profile ID field — a dropdown of existing profiles (add mode
-    # only) lets a new server reuse another target's ACME/DNS configuration.
-    # The backend (_inherit_certificate_profile) already re-derives the shared
-    # fields from the matching profile on save regardless of what the form
-    # posts for them; the dropdown + auto-fill below is purely to make that
-    # behavior visible and to save re-typing.
-    cert_profiles_script = ""
-    if is_edit:
-        cert_profile_field_html = f'''
-      <div class="field">
-        <label>Certificate Profile ID <span class="hint">(reuse this value on other ClearPass targets)</span></label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
-      </div>'''
-    else:
-        profiles = list_certificate_profiles()
-        profile_options = "".join(
-            f'<option value="{_esc(pid)}">{_esc(pid)} &mdash; {_esc(p.get("label") or p.get("domain") or p.get("cppm_host", ""))}</option>'
-            for p in profiles
-            for pid in [str(p.get("certificate_id", "")).strip()]
-        )
-        if profiles:
-            profiles_json = json.dumps({
-                str(p.get("certificate_id", "")).strip(): {
-                    "domain":           p.get("domain", ""),
-                    "san_dns":          p.get("san_dns") or [],
-                    "acme_email":       p.get("acme_email", ""),
-                    "acme_server":      p.get("acme_server", ""),
-                    "dns_provider":     p.get("dns_provider", ""),
-                    "dns_credentials":  p.get("dns_credentials") or {},
-                    "cert_types":       p.get("cert_types") or [],
-                    "split_horizon_dns": bool(p.get("split_horizon_dns")),
-                    "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
-                }
-                for p in profiles
-            }).replace("</", "<\\/")
-            cert_profile_field_html = f'''
-      <div class="field">
-        <label>Certificate Profile <span class="hint">(share one certificate across multiple ClearPass targets)</span></label>
-        <select id="cert_profile_select" onchange="applyCertProfile(this.value)">
-          <option value="">+ Create new certificate profile</option>
-          {profile_options}
-        </select>
-      </div>
-      <div class="field">
-        <label>Certificate Profile ID</label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
-        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
-      </div>'''
-            cert_profiles_script = f'<script>window.CERT_PROFILES = {profiles_json};</script>'
-        else:
-            cert_profile_field_html = f'''
-      <div class="field">
-        <label>Certificate Profile ID <span class="hint">(reuse this value on other ClearPass targets)</span></label>
-        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}"
-               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.-]+">
-      </div>'''
 
-    # Form body — f-string with all interpolated Python values.
-    del_section = ""
-    if is_edit:
-        del_section = f"""
-    <div class="card" style="margin-bottom:1rem;border-color:var(--danger)">
-      <div class="form-section-title" style="color:var(--danger)">Remove Server</div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
-        <p style="font-size:0.78rem;color:var(--muted);margin:0;max-width:32rem">
-          Permanently remove this server's configuration. This does not revoke or delete
-          already-issued certificates on ClearPass.
-        </p>
-        <div>
-          <button type="button" class="btn btn-danger" id="del-btn-{sid}"
-                  onclick="showDelConfirm('{sid}')">Delete Server</button>
-          <span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem;flex-wrap:nowrap">
-            <span style="font-size:0.78rem;color:var(--muted);white-space:nowrap">Delete '{fv('label')}'?</span>
-            <form method="POST" action="/settings/delete" style="display:inline">
-              <input type="hidden" name="id" value="{sid}">
-              <button type="submit" class="btn btn-danger">Yes, Delete</button>
-            </form>
-            <button type="button" class="btn btn-ghost" onclick="hideDelConfirm('{sid}')">Cancel</button>
-          </span>
-        </div>
-      </div>
-    </div>"""
-
-    # JavaScript is in a separate raw string appended below (no {{ }} issues).
-    form = f"""
-<div class="app">
-  <div class="page-hdr">
-    <span class="page-title">{title}</span>
-    <a href="/settings" class="btn btn-ghost">&#8592; Back</a>
-  </div>
-  {err_html}
-  <form method="POST" action="{action}">
-
-    <div class="card" style="margin-bottom:1rem">
-      <div class="form-section-title">Server Identity</div>
-      <div class="field">
-        <label>Label <span class="hint">(friendly name)</span></label>
-        <input type="text" name="label" value="{fv('label')}" required
-               placeholder="e.g. Production ClearPass">
-      </div>
-      {cert_profile_field_html}
-    </div>
-
-    <div class="card" style="margin-bottom:1rem">
-      <div class="form-section-title">ClearPass Server</div>
-      <div class="form-2col">
-        <div class="field">
-          <label>Host / IP</label>
-          <input type="text" name="cppm_host" value="{fv('cppm_host')}" required
-                 placeholder="cppm.example.com">
-        </div>
-        <div class="field" style="padding-bottom:0.5rem">
-          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-bottom:0.5rem">
-            <input type="checkbox" name="cppm_cluster_mode" id="cppm_cluster_mode" value="true"{(' checked' if s.get('cppm_cluster_mode') else '')}
-                   style="width:auto;margin:0" onchange="onClusterModeChange(this)">
-            Cluster mode <span class="hint">— upload to all ClearPass nodes</span>
-          </label>
-          <div id="cluster-check-bar" style="display:{('flex' if s.get('cppm_cluster_mode') else 'none')};align-items:center;gap:0.6rem">
-            <input type="hidden" id="cluster-server-id" value="{sid}">
-            <button type="button" class="btn btn-ghost" id="cluster-check-btn" onclick="runClusterCheck()">
-              &#128270; Check nodes
-            </button>
-            <span id="cluster-check-spinner" style="display:none;font-size:0.78rem;color:var(--muted)">Checking…</span>
-          </div>
-          <div id="cluster-check-results" style="display:none;margin-top:0.75rem"></div>
-        </div>
-        <div class="field">
-          <label>Client ID</label>
-          <input type="text" name="cppm_client_id" value="{fv('cppm_client_id')}" required
-                 autocomplete="off">
-        </div>
-      </div>
-      <div class="form-2col">
-        <div class="field">
-          <label>Client Secret</label>
-          <input type="password" name="cppm_client_secret" value="{fv('cppm_client_secret')}"
-                 autocomplete="new-password">
-        </div>
-        <div class="field">
-          <label>Cert Passphrase <span class="hint">(PKCS12 export)</span></label>
-          <input type="password" name="cppm_cert_passphrase" value="{fv('cppm_cert_passphrase')}"
-                 autocomplete="new-password">
-        </div>
-      </div>
-      <div class="form-2col">
-        <div class="field">
-          <label>Callback Host <span class="hint">(Docker host LAN IP)</span>{_help_toggle('callback_host', 'The LAN IP of the Docker host &mdash; not the container IP. ClearPass fetches the certificate from this address. Find it with: <code>ip route get &lt;cppm-ip&gt;</code> &mdash; look for <code>src X.X.X.X</code>. Must be reachable from your ClearPass server on the callback port (default 8765).')}</label>
-          <input type="text" name="cppm_callback_host" value="{fv('cppm_callback_host')}"
-                 placeholder="10.0.0.5">
-        </div>
-        <div class="field">
-          <label>Callback Port</label>
-          <input type="number" name="cppm_callback_port"
-                 value="{fv('cppm_callback_port', '8765')}"
-                 min="1" max="65535">
-        </div>
-      </div>
-      <div class="field" style="margin-bottom:0">
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-          <input type="checkbox" name="cppm_verify_ssl" value="true"{verify}
+    slot_boxes = "".join(
+        f'''<label class="cert-slot" data-slot="{k}" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
+          <input type="checkbox" name="issue_{k}" class="cert-shared" value="true"{" checked" if k in selected_slots else ""}
                  style="width:auto;margin:0">
-          Verify SSL (enable after initial certificate install){_help_toggle('verify_ssl', 'Enable this <strong>after</strong> the first certificate has been successfully installed and is trusted by ClearPass. Enabling it before the cert is trusted will cause uploads to fail with an SSL verification error.')}
-        </label>
+          {_esc(lbl)} <span class="hint">— {_esc(hint)}</span>
+        </label>'''
+        for spec in TARGET_TYPES.values() for k, lbl, hint in spec["cert_slots"]
+    )
+    if show_cert_types:
+        cert_types_html = f'''      <div class="field cert-types-linux-note" style="margin-bottom:0;display:none">
+        <label>Certificate Types</label>
+        <div class="hint">Linux servers deploy one certificate. Choose ECC or RSA under <strong>Certificate Key Type</strong> in the Linux settings.</div>
       </div>
-    </div>
+      <div class="field cert-types-field" style="margin-bottom:0">
+        <label>Certificate Types <span class="hint">(ClearPass targets; Linux servers choose ECC or RSA on their own form)</span></label>
+        {slot_boxes}
+      </div>
+'''
+    else:
+        cert_types_html = '''<div class="field" style="margin-bottom:0">
+        <label>Certificate Types</label>
+        <div class="hint">Every target on this profile is a Linux server. Each server chooses ECC or RSA under <strong>Certificate Key Type</strong> on its own form.</div>
+      </div>'''
 
+    html = f'''
     <div class="card" style="margin-bottom:1rem">
       <div class="form-section-title">ACME Provider</div>
       <div class="form-2col">
@@ -3307,8 +3338,6 @@ def _settings_form_page(server: dict = None, error: str = "",
           <option value="letsencrypt"{sel(acme_srv,'letsencrypt')}>Let&apos;s Encrypt</option>
           <option value="letsencrypt_test"{sel(acme_srv,'letsencrypt_test')}>Let&apos;s Encrypt (Staging)</option>
           <option value="zerossl"{sel(acme_srv,'zerossl')}>ZeroSSL</option>
-          <option value="buypass"{sel(acme_srv,'buypass')}>Buypass</option>
-          <option value="buypass_test"{sel(acme_srv,'buypass_test')}>Buypass (Staging)</option>
           <option value="custom"{sel(acme_srv,'custom')}>Custom / Private CA</option>
         </select>
       </div>
@@ -3319,11 +3348,11 @@ def _settings_form_page(server: dict = None, error: str = "",
         <div class="form-2col">
           <div class="field">
             <label>EAB KID</label>
-            <input type="text" name="EAB_KID" id="EAB_KID" class="cert-shared" value="{cv('EAB_KID')}" autocomplete="off">
+            <input type="text" name="EAB_KID" id="EAB_KID" class="cert-shared" value="{fv('eab_kid')}" autocomplete="off">
           </div>
           <div class="field">
             <label>EAB HMAC Key</label>
-            <input type="password" name="EAB_HMAC_KEY" id="EAB_HMAC_KEY" class="cert-shared" value="{cv('EAB_HMAC_KEY')}" autocomplete="new-password">
+            <input type="password" name="EAB_HMAC_KEY" id="EAB_HMAC_KEY" class="cert-shared" value="{fv('eab_hmac_key')}" autocomplete="new-password">
           </div>
         </div>
       </div>
@@ -3342,31 +3371,43 @@ def _settings_form_page(server: dict = None, error: str = "",
                  autocomplete="off">
         </div>
       </div>
-      <div class="field" style="margin-bottom:0">
-        <label>Certificate Types</label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_ecc" class="cert-shared" value="true"{chk_https_ecc}
-                 style="width:auto;margin:0">
-             HTTPS (ECC) <span class="hint">— Web UI and API</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_https_rsa" class="cert-shared" value="true"{chk_https_rsa}
-                 style="width:auto;margin:0">
-             HTTPS (RSA) <span class="hint">— Web UI and API</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radius" class="cert-shared" value="true"{chk_radius}
-               style="width:auto;margin:0">
-             RADIUS <span class="hint">— 802.1X / EAP</span>
-           </label>
-           <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-top:0.35rem">
-             <input type="checkbox" name="issue_radsec" class="cert-shared" value="true"{chk_radsec}
-               style="width:auto;margin:0">
-             RadSec <span class="hint">— RADIUS over TLS</span>
-        </label>
-      </div>
-    </div>
+      {cert_types_html}
+      <details style="margin-top:1rem"{" open" if split_on else ""}>
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
+        <div class="field" style="margin:0.75rem 0 0">
+          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+            <input type="checkbox" name="split_horizon_dns" id="split_horizon_dns" class="cert-shared" value="true"{chk_split}
+                   style="width:auto;margin:0" onchange="toggleSplitHorizon(this.checked)">
+            This domain also exists on my internal DNS (split-horizon){_help_toggle('split_horizon', 'Check this if your internal DNS server has its own copy of this domain &mdash; common with Active Directory. Certificate validation will then check <strong>public</strong> DNS instead of your internal DNS.<br><br>This does not replace the Docker <code>dns:</code> setting: the container still uses that to reach ClearPass. This only changes where the certificate challenge is checked. Leave it unchecked if you are not sure &mdash; the dashboard warns you if it is needed.')}
+          </label>
+        </div>
+        <div class="field" id="split-horizon-resolvers" style="margin:0.75rem 0 0{"" if split_on else ";display:none"}">
+          <label>Custom public resolvers <span class="hint">(optional &mdash; default 1.1.1.1, 8.8.8.8; only needed if those are blocked)</span></label>
+          <input type="text" name="split_horizon_resolvers" class="cert-shared" value="{split_resolvers}"
+                 placeholder="1.1.1.1, 8.8.8.8" autocomplete="off">
+        </div>
+      </details>
+    </div>'''
+    if disabled:
+        return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
+    return html
 
+
+def _dns_credential_fields_html(values: dict, disabled: bool = False) -> str:
+    """Render the DNS Provider card (provider dropdown + per-provider fields).
+
+    Markup is unchanged from the original combined _acme_dns_fields_html —
+    only now standalone, reused by both the Add/Edit Server form's DNS
+    Credential picker ("create inline") and the DNS Credential form itself.
+    """
+    s     = values
+    creds = s.get("dns_credentials", {}) or {}
+
+    def cv(k, d=""):  return _esc(str(creds.get(k, d)))
+    def sel(v, t):    return " selected" if v == t else ""
+    def vis(p):       return "" if p == s.get("dns_provider", "cloudflare") else ' style="display:none"'
+
+    html = f'''
     <div class="card" style="margin-bottom:1.5rem">
       <div class="form-section-title">DNS Provider</div>
       <div class="field">
@@ -3541,23 +3582,791 @@ def _settings_form_page(server: dict = None, error: str = "",
                  value="{cv('RFC2136_DNS_TIMEOUT', '10')}" autocomplete="off">
         </div>
       </div>
+    </div>'''
+    if disabled:
+        return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
+    return html
 
-      <details style="margin-top:1rem"{" open" if split_on else ""}>
-        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Advanced</summary>
-        <div class="field" style="margin:0.75rem 0 0">
-          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-            <input type="checkbox" name="split_horizon_dns" id="split_horizon_dns" class="cert-shared" value="true"{chk_split}
-                   style="width:auto;margin:0" onchange="toggleSplitHorizon(this.checked)">
-            This domain also exists on my internal DNS (split-horizon){_help_toggle('split_horizon', 'Check this if your internal DNS server has its own copy of this domain &mdash; common with Active Directory. Certificate validation will then check <strong>public</strong> DNS instead of your internal DNS.<br><br>This does not replace the Docker <code>dns:</code> setting: the container still uses that to reach ClearPass. This only changes where the certificate challenge is checked. Leave it unchecked if you are not sure &mdash; the dashboard warns you if it is needed.')}
-          </label>
+
+def _dns_credential_select_html(selected_id: str, disabled: bool = False) -> str:
+    """Render a <select name="dns_credential_id"> populated from existing DNS
+    Credentials, plus a link to manage them. Used by the Certificate Profile
+    form and the Add/Edit Server form in place of the old inline DNS
+    Provider card.
+    """
+    creds = list_dns_credentials()
+    selected_id = str(selected_id or "").strip()
+    if creds:
+        opts = "".join(
+            f'<option value="{_esc(c["id"])}"{" selected" if c["id"] == selected_id else ""}>'
+            f'{_esc(c["id"])} ({_esc(c.get("dns_provider", ""))})</option>'
+            for c in creds
+        )
+        empty_opt = '<option value="">— Select a DNS Credential —</option>' if not selected_id else ""
+        select_html = (
+            f'<select name="dns_credential_id" id="dns_credential_id" class="cert-shared">'
+            f'{empty_opt}{opts}</select>'
+        )
+    else:
+        select_html = (
+            '<select name="dns_credential_id" id="dns_credential_id" class="cert-shared">'
+            '<option value="">— No DNS Credentials yet —</option></select>'
+        )
+    html = f'''
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="form-section-title">DNS Credential</div>
+      <div class="field" style="margin-bottom:0">
+        <label>DNS Credential</label>
+        {select_html}
+        <p class="hint" style="margin:0.4rem 0 0">
+          <a href="/settings/dns-credentials" style="color:var(--accent)">Manage DNS Credentials</a>
+        </p>
+      </div>
+    </div>'''
+    if disabled:
+        return f'<fieldset disabled style="border:0;padding:0;margin:0">{html}</fieldset>'
+    return html
+
+
+def _profile_tabs_html(active: str) -> str:
+    """Tab bar shared by the Certificate Profiles and DNS Credentials list
+    pages, so DNS Credentials is reachable without a separate top-nav entry.
+    """
+    def tab(href, label, slug):
+        cls = "subtab active" if slug == active else "subtab"
+        return f'<a href="{href}" class="{cls}">{label}</a>'
+    return (
+        '<div class="subtabs">'
+        + tab("/settings/profiles", "Certificate Profiles", "cert-profiles")
+        + tab("/settings/dns-credentials", "DNS Credentials", "dns-credentials")
+        + '</div>'
+    )
+
+
+def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "") -> str:
+    flash_html = ""
+    if flash_msg:
+        flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+
+    profiles = list_certificate_profiles()
+    if not profiles:
+        rows = ('<tr><td colspan="4"><div class="empty">'
+                'No certificate profiles yet.&nbsp; '
+                '<a href="/settings/profiles/new" style="color:var(--accent)">Create one</a> '
+                'to define a certificate once and attach servers to it.'
+                '</div></td></tr>')
+    else:
+        rows = ""
+        for p in profiles:
+            pid     = str(p.get("certificate_id", "")).strip()
+            pid_esc = _esc(pid)
+            domain  = _esc(p.get("domain", ""))
+            cred_id = str(p.get("dns_credential_id", "")).strip()
+            prov    = _esc((get_dns_credential(cred_id) or {}).get("dns_provider", "") or cred_id)
+            acme    = _esc(p.get("acme_server", "letsencrypt"))
+            members = list_profile_members(pid)
+            domain_html = (f'<br><span class="hint">{domain}</span>'
+                           if domain and domain != pid_esc else "")
+            members_html = "<br>".join(
+                f'{_esc(m.get("label", ""))} <span class="hint">({_esc(m.get("target_type", "clearpass"))})</span>'
+                for m in members
+            ) or '<span class="hint">No targets yet</span>'
+            if members:
+                action_btn = (
+                    f'<form method="POST" action="/settings/profiles/{pid_esc}/detach" style="display:inline"'
+                    f' onsubmit="return confirm(\'Detach all {len(members)} target(s) from this profile? '
+                    f'Each keeps its current ACME/DNS values but will no longer share edits.\')">'
+                    f'<button type="submit" class="btn btn-danger">Detach All</button>'
+                    f'</form>'
+                )
+            else:
+                action_btn = (
+                    f'<form method="POST" action="/settings/profiles/{pid_esc}/delete" style="display:inline"'
+                    f' onsubmit="return confirm(\'Delete certificate profile {pid_esc}?\')">'
+                    f'<button type="submit" class="btn btn-danger">Delete</button>'
+                    f'</form>'
+                )
+            rows += (
+                f'<tr>'
+                f'<td style="font-family:monospace;font-size:0.78rem">{pid_esc}{domain_html}</td>'
+                f'<td>{prov} <span class="hint">/ {acme}</span></td>'
+                f'<td style="font-size:0.78rem">{members_html}</td>'
+                f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/add?profile={_url_quote(pid)}" class="btn btn-ghost">+ Add server</a> '
+                f'<a href="/settings/profiles/edit/{pid_esc}" class="btn btn-ghost">Edit</a> '
+                f'{action_btn}'
+                f'</td>'
+                f'</tr>'
+            )
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">Certificate Profiles</span>
+    <a href="/settings/profiles/new" class="btn btn-primary">&#43; New profile</a>
+  </div>
+  {_profile_tabs_html("cert-profiles")}
+  {flash_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    A certificate profile is the ACME/DNS configuration shared by every server that has the
+    same Certificate Profile ID. Edit it here once to update every target that shares it.
+  </p>
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    <strong>Creating a profile:</strong> use <em>+ New profile</em> to define the domain, ACME
+    account and DNS credential once, then attach servers with <em>+ Add server</em>. Adding a
+    server with a new Certificate Profile ID still creates one implicitly.
+  </p>
+  <div class="card" style="overflow-x:auto">
+    <table class="settings-table" style="min-width:48rem">
+      <thead><tr>
+        <th>Profile</th><th>DNS / ACME</th><th>Members</th><th></th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>"""
+    return _base("Certificate Profiles", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _profile_form_page(profile_id: str, values: dict, error: str = "",
+                       username: str = "") -> str:
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    if not profile_id:
+        return _profile_create_page(values, err_html, username)
+    members = list_profile_members(profile_id)
+    members_html = "".join(
+        f'<li>{_esc(m.get("label", ""))} <span class="hint">'
+        f'({_esc(m.get("target_type", "clearpass"))})</span></li>'
+        for m in members
+    )
+
+    show_cert_types = not members or any(
+        cert_slot_keys(m.get("target_type", "clearpass")) for m in members)
+    save_confirm = (
+        f"return confirm('Save changes to this profile? It updates all {len(members)} target(s) that share it.')"
+        if members else "return true"
+    )
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">Edit Certificate Profile</span>
+    <a href="/settings/profiles" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Shared by</div>
+    <ul style="margin:0;padding-left:1.2rem;font-size:0.82rem">{members_html or '<li class="hint">No targets yet</li>'}</ul>
+    <p class="hint" style="margin:0.6rem 0 0">
+      Saving below updates these {len(members)} target(s) at once.
+      <a href="/settings/add?profile={_url_quote(profile_id)}" style="color:var(--accent)">+ Add server</a>
+    </p>
+  </div>
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Rename Profile</div>
+    <form method="POST" action="/settings/profiles/{_esc(profile_id)}/rename"
+          onsubmit="return confirm('Rename certificate profile \'{_esc(profile_id)}\' for all {len(members)} target(s)?\n\nThe certificate directory on disk is renamed too — already-issued certificates are kept, not reissued.')"
+          style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin-bottom:0;flex:1;min-width:16rem">
+        <label>Certificate Profile ID</label>
+        <input type="text" name="certificate_id" value="{_esc(profile_id)}" required
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+      </div>
+      <button type="submit" class="btn btn-warn">Rename</button>
+    </form>
+  </div>
+  <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}"
+        onsubmit="{save_confirm}">
+    {_identity_fields_html(values, show_cert_types=show_cert_types)}
+    {_dns_credential_select_html(values.get("dns_credential_id", ""))}
+    <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
+      <a href="/settings/profiles" class="btn btn-ghost">Cancel</a>
+      <button type="submit" class="btn btn-primary">Save Changes</button>
+    </div>
+  </form>
+</div>
+<script>
+function switchAcme(val) {{
+  document.getElementById('acme-eab-section').style.display = (val === 'zerossl') ? '' : 'none';
+  document.getElementById('acme-custom-section').style.display = (val === 'custom') ? '' : 'none';
+}}
+function toggleSplitHorizon(on) {{
+  document.getElementById('split-horizon-resolvers').style.display = on ? '' : 'none';
+}}
+</script>"""
+    return _base("Edit Certificate Profile", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _profile_create_page(values: dict, err_html: str, username: str) -> str:
+    """Form for a new, standalone certificate profile (no targets yet)."""
+    pid = _esc(str(values.get("certificate_id", "")))
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">New Certificate Profile</span>
+    <a href="/settings/profiles" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.8rem">
+    Define the certificate once (domain, ACME account, DNS credential). Servers you add to this
+    profile later reuse these settings and are issued the same certificate.
+  </p>
+  <form method="POST" action="/settings/profiles/new">
+    <div class="card" style="margin-bottom:1rem">
+      <div class="field" style="margin-bottom:0">
+        <label>Certificate Profile ID</label>
+        <input type="text" name="certificate_id" value="{pid}" required
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+        <p class="hint" style="margin:0.4rem 0 0">Letters, numbers, '.', '_' and '-'. It names the certificate directory on disk.</p>
+      </div>
+    </div>
+    {_identity_fields_html(values)}
+    {_dns_credential_select_html(values.get("dns_credential_id", ""))}
+    <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
+      <a href="/settings/profiles" class="btn btn-ghost">Cancel</a>
+      <button type="submit" class="btn btn-primary">Create Profile</button>
+    </div>
+  </form>
+</div>
+<script>
+function switchAcme(val) {{
+  document.getElementById('acme-eab-section').style.display = (val === 'zerossl') ? '' : 'none';
+  document.getElementById('acme-custom-section').style.display = (val === 'custom') ? '' : 'none';
+}}
+function toggleSplitHorizon(on) {{
+  document.getElementById('split-horizon-resolvers').style.display = on ? '' : 'none';
+}}
+</script>"""
+    return _base("New Certificate Profile", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _dns_credential_list_page(username: str, flash_type: str = "", flash_msg: str = "") -> str:
+    flash_html = ""
+    if flash_msg:
+        flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
+
+    creds = list_dns_credentials()
+    if not creds:
+        rows = ('<tr><td colspan="3"><div class="empty">'
+                'No DNS Credentials yet.&nbsp; '
+                '<a href="/settings/dns-credentials/new" style="color:var(--accent)">Add one</a> '
+                'to reuse a DNS vendor account across multiple Certificate Profiles.'
+                '</div></td></tr>')
+    else:
+        rows = ""
+        for c in creds:
+            cid     = str(c.get("id", "")).strip()
+            cid_esc = _esc(cid)
+            prov    = _esc(c.get("dns_provider", ""))
+            owners  = dns_credential_owner_ids(cid)
+            owners_html = "<br>".join(_esc(o) for o in owners) or '<span class="hint">(unused)</span>'
+            rows += (
+                f'<tr>'
+                f'<td style="font-family:monospace;font-size:0.78rem">{cid_esc}</td>'
+                f'<td>{prov}</td>'
+                f'<td style="font-size:0.78rem">{owners_html}</td>'
+                f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/dns-credentials/edit/{cid_esc}" class="btn btn-ghost">Edit</a> '
+                f'<form method="POST" action="/settings/dns-credentials/{cid_esc}/delete" style="display:inline"'
+                f' onsubmit="return confirm(\'Delete DNS Credential \\\'{cid_esc}\\\'? '
+                f'{len(owners)} certificate profile(s) will be detached from it.\')">'
+                f'<button type="submit" class="btn btn-danger">Delete</button>'
+                f'</form>'
+                f'</td>'
+                f'</tr>'
+            )
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">DNS Credentials</span>
+    <a href="/settings/dns-credentials/new" class="btn btn-primary">+ Add DNS Credential</a>
+  </div>
+  {_profile_tabs_html("dns-credentials")}
+  {flash_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    A DNS Credential is a reusable DNS vendor account (e.g. a Cloudflare API token) that any
+    number of Certificate Profiles or servers can point at via its DNS Credential ID.
+  </p>
+  <div class="card" style="overflow-x:auto">
+    <table class="settings-table" style="min-width:40rem">
+      <thead><tr>
+        <th>DNS Credential</th><th>Provider</th><th>Used by</th><th></th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>"""
+    return _base("DNS Credentials", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _dns_credential_form_page(cred_id: str, values: dict, error: str = "",
+                              username: str = "") -> str:
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    is_edit = bool(cred_id)
+    owners = dns_credential_owner_ids(cred_id) if is_edit else []
+
+    existing_ids_json = json.dumps([c["id"] for c in list_dns_credentials()])
+    id_field_html = (
+        f'<input type="hidden" name="dns_credential_id" value="{_esc(cred_id)}">'
+        if is_edit else
+        f'''<div class="field" style="margin-bottom:0">
+            <label>DNS Credential ID</label>
+            <input type="text" name="dns_credential_id" id="dns_credential_id_input" required
+                   placeholder="e.g. cloudflare-main" pattern="[A-Za-z0-9_.\\-]+"
+                   oninput="checkDnsCredentialIdConflict(this.value)" onblur="checkDnsCredentialIdConflict(this.value)">
+            <p id="dns-credential-id-notice" class="hint" style="display:none;color:var(--warn,#b45309);margin:0.4rem 0 0"></p>
+          </div>
+          <script>window.DNS_CREDENTIAL_IDS = {existing_ids_json};</script>'''
+    )
+
+    rename_html = ""
+    if is_edit:
+        rename_html = f"""
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Rename DNS Credential</div>
+    <form method="POST" action="/settings/dns-credentials/{_esc(cred_id)}/rename"
+          onsubmit="return confirm('Rename DNS Credential \\'{_esc(cred_id)}\\'?')"
+          style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin-bottom:0;flex:1;min-width:16rem">
+        <label>DNS Credential ID</label>
+        <input type="text" name="new_id" value="{_esc(cred_id)}" required
+               placeholder="e.g. cloudflare-main" pattern="[A-Za-z0-9_.\\-]+">
+      </div>
+      <button type="submit" class="btn btn-warn">Rename</button>
+    </form>
+  </div>"""
+
+    owners_html = ""
+    if is_edit:
+        owners_list = "".join(f'<li>{_esc(o)}</li>' for o in owners) or '<li class="hint">(none)</li>'
+        owners_html = f"""
+  <div class="card" style="margin-bottom:1rem">
+    <div class="form-section-title">Used by</div>
+    <ul style="margin:0;padding-left:1.2rem;font-size:0.82rem">{owners_list}</ul>
+    <p class="hint" style="margin:0.6rem 0 0">
+      Saving below updates these {len(owners)} certificate profile(s) at once.
+    </p>
+  </div>"""
+
+    action = f'/settings/dns-credentials/edit/{_esc(cred_id)}' if is_edit else '/settings/dns-credentials/new'
+
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">{"Edit" if is_edit else "Add"} DNS Credential</span>
+    <a href="/settings/dns-credentials" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  {owners_html}
+  {rename_html}
+  <form method="POST" action="{action}">
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="form-section-title">DNS Credential ID</div>
+      {id_field_html}
+    </div>
+    {_dns_credential_fields_html(values)}
+    <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
+      <a href="/settings/dns-credentials" class="btn btn-ghost">Cancel</a>
+      <button type="submit" class="btn btn-primary">Save Changes</button>
+    </div>
+  </form>
+</div>
+<script>
+function switchDns(val) {{
+  document.querySelectorAll('.dns-section').forEach(function(el) {{
+    var active = el.id === 'dns-' + val;
+    el.style.display = active ? '' : 'none';
+    el.querySelectorAll('input').forEach(function(inp) {{ inp.disabled = !active; }});
+  }});
+}}
+switchDns(document.getElementById('dns_provider').value);
+function checkDnsCredentialIdConflict(value) {{
+  var notice = document.getElementById('dns-credential-id-notice');
+  if (!notice) return;
+  if (value && (window.DNS_CREDENTIAL_IDS || []).indexOf(value) !== -1) {{
+    notice.style.display = '';
+    notice.textContent = "'" + value + "' is already used by another DNS Credential — " +
+      'saving will fail. Choose a different ID or edit that credential instead.';
+  }} else {{
+    notice.style.display = 'none';
+  }}
+}}
+</script>"""
+    return _base("DNS Credential", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _settings_form_page(server: dict = None, error: str = "",
+                        is_edit: bool = False, username: str = "") -> str:
+    if server is None:
+        server = _default_server_from_env()
+
+    s       = _resolve_target_fields(server)
+    sid     = _esc(str(s.get("id", "")))
+    action  = f'/settings/edit/{sid}' if is_edit else '/settings/add'
+    title   = "Edit Server" if is_edit else "Add Server"
+    submit  = "Save Changes" if is_edit else "Add Server"
+
+    err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+
+    # Shorthand helpers (closures over s / creds)
+    def fv(k, d=""):  return _esc(str(s.get(k, d)))
+    def sel(v, t):    return " selected" if v == t else ""
+
+    verify     = " checked" if s.get("cppm_verify_ssl") else ""
+    profile_id = str(s.get("certificate_id", "")).strip()
+    siblings = (
+        [m for m in list_profile_members(profile_id) if m.get("id") != s.get("id")]
+        if is_edit and profile_id else []
+    )
+    cur_type = s.get("target_type", "clearpass")
+    target_type_options = "".join(
+        f'<option value="{_esc(t)}"{sel(cur_type, t)}>{_esc(spec["label"])}</option>'
+        for t, spec in TARGET_TYPES.items()
+    )
+    acme_dns_fields_html = (
+        _identity_fields_html(s, disabled=bool(siblings))
+        + _dns_credential_select_html(s.get("dns_credential_id", ""), disabled=bool(siblings))
+    )
+    shared_profile_notice = ""
+    if siblings:
+        shared_profile_notice = f'''
+    <div class="flash flash-warn" style="margin-bottom:1rem">
+      This target shares its ACME/DNS configuration with {len(siblings)} other target(s)
+      on Certificate Profile <strong>{_esc(profile_id)}</strong> — the fields below are
+      read-only here. <a href="/settings/profiles/edit/{_esc(profile_id)}" style="color:var(--accent)">Edit the profile</a>
+      to change them for all shared targets, or
+      <form method="POST" action="/settings/detach/{sid}" style="display:inline"
+            onsubmit="return confirm('Detach this target from the profile? It will keep its current ACME/DNS values but changes here will no longer propagate to {_esc(profile_id)}.')">
+        <button type="submit" class="btn btn-ghost" style="padding:0;text-decoration:underline;border:0;background:none;color:var(--accent)">detach this target</button>
+      </form> to make them editable here instead.
+    </div>'''
+    # Certificate Profile ID field — a dropdown of existing profiles (add mode
+    # only) lets a new server reuse another target's ACME/DNS configuration.
+    # The backend (_inherit_certificate_profile) already re-derives the shared
+    # fields from the matching profile on save regardless of what the form
+    # posts for them; the dropdown + auto-fill below is purely to make that
+    # behavior visible and to save re-typing.
+    # Certificate profiles are loaded in both modes now: add-mode uses them for
+    # the "share an existing profile" dropdown, edit-mode just needs them (via
+    # window.CERT_PROFILES below) to warn if the typed ID collides with a
+    # *different* existing profile (checkCertIdConflict(), shared <script>
+    # block below) -- otherwise a hand-typed ID match silently overwrites
+    # whatever's on screen via _inherit_certificate_profile on save.
+    profiles = list_certificate_profiles()
+    own_id = profile_id if is_edit else ""
+    other_profiles = [p for p in profiles if str(p.get("certificate_id", "")).strip() != own_id]
+    profiles_json = json.dumps({
+        str(p.get("certificate_id", "")).strip(): {
+            "label":            p.get("label", ""),
+            "member_count":     len(list_profile_members(str(p.get("certificate_id", "")).strip())),
+            "domain":           p.get("domain", ""),
+            "san_dns":          p.get("san_dns") or [],
+            "acme_email":       p.get("acme_email", ""),
+            "acme_server":      p.get("acme_server", ""),
+            "dns_credential_id": p.get("dns_credential_id", ""),
+            "eab_kid":          p.get("eab_kid", ""),
+            "eab_hmac_key":     p.get("eab_hmac_key", ""),
+            "cert_types":       p.get("cert_types") or [],
+            "split_horizon_dns": bool(p.get("split_horizon_dns")),
+            "split_horizon_resolvers": p.get("split_horizon_resolvers") or [],
+        }
+        for p in other_profiles
+    }).replace("</", "<\\/")
+    cert_slots_json = json.dumps(
+        {t: list(cert_slot_keys(t)) for t in TARGET_TYPES}).replace("</", "<\\/")
+    all_slots_json = json.dumps(list(cert_slot_keys())).replace("</", "<\\/")
+    cert_profiles_script = (
+        f'<script>window.CERT_PROFILES = {profiles_json};'
+        f'var CERT_SLOTS = {cert_slots_json}; var ALL_CERT_SLOTS = {all_slots_json};'
+        f'window.CERT_ID_AUTOSUGGEST = {"false" if is_edit else "true"};</script>'
+    )
+    if not is_edit:
+        # ?profile=<id> preselects an existing profile; ?new_profile=1 focuses the ID field.
+        cert_profiles_script += '''<script>
+window.addEventListener('DOMContentLoaded', function() {
+  var q = new URLSearchParams(location.search);
+  var sel = document.getElementById('cert_profile_select');
+  var want = q.get('profile');
+  if (want && sel && (window.CERT_PROFILES || {})[want]) {
+    sel.value = want; applyCertProfile(want);
+  } else if (q.get('new_profile')) {
+    var i = document.getElementById('certificate_id_input');
+    if (i) { i.focus(); }
+  }
+});
+</script>'''
+
+    if is_edit:
+        cert_profile_field_html = f'''
+      <div class="field">
+        <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
+        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
+      </div>'''
+    elif other_profiles:
+        profile_options = "".join(
+            f'<option value="{_esc(pid)}">{_esc(pid)} &mdash; {_esc(p.get("label") or p.get("domain") or server_host(p))}</option>'
+            for p in other_profiles
+            for pid in [str(p.get("certificate_id", "")).strip()]
+        )
+        cert_profile_field_html = f'''
+      <div class="field">
+        <label>Certificate Profile <span class="hint">(share one certificate's ACME/DNS config across multiple targets, of any target type)</span></label>
+        <select id="cert_profile_select" onchange="applyCertProfile(this.value)">
+          <option value="">+ Create new certificate profile</option>
+          {profile_options}
+        </select>
+      </div>
+      <div class="field">
+        <label>Certificate Profile ID</label>
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
+        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
+      </div>'''
+    else:
+        cert_profile_field_html = f'''
+      <div class="field">
+        <label>Certificate Profile ID <span class="hint">(reuse this value on other targets, of any target type, to share this ACME/DNS config)</span></label>
+        <input type="text" name="certificate_id" id="certificate_id_input" value="{fv('certificate_id')}" required
+               placeholder="e.g. myserver.example.com-prod" pattern="[A-Za-z0-9_.-]+"
+               oninput="this.dataset.touched='1'; checkCertIdConflict(this.value)" onblur="checkCertIdConflict(this.value)">
+        <div class="hint" id="cert-profile-notice" style="display:none;margin-top:0.35rem;color:var(--accent)"></div>
+      </div>'''
+
+    # Form body — f-string with all interpolated Python values.
+    del_section = ""
+    if is_edit:
+        removal_scope = (", or remove files already deployed to the host"
+                         if s.get("target_type") == "linux_ssh" else " on ClearPass")
+        del_section = f"""
+    <div class="card" style="margin-bottom:1rem;border-color:var(--danger)">
+      <div class="form-section-title" style="color:var(--danger)">Remove Server</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <p style="font-size:0.78rem;color:var(--muted);margin:0;max-width:32rem">
+          Permanently remove this server's configuration. This does not revoke or delete
+          already-issued certificates{removal_scope}.
+        </p>
+        <div>
+          <button type="button" class="btn btn-danger" id="del-btn-{sid}"
+                  onclick="showDelConfirm('{sid}')">Delete Server</button>
+          <span id="del-conf-{sid}" style="display:none;align-items:center;gap:0.4rem;flex-wrap:nowrap">
+            <span style="font-size:0.78rem;color:var(--muted);white-space:nowrap">Delete '{fv('label')}'?</span>
+            <form method="POST" action="/settings/delete" style="display:inline">
+              <input type="hidden" name="id" value="{sid}">
+              <button type="submit" class="btn btn-danger">Yes, Delete</button>
+            </form>
+            <button type="button" class="btn btn-ghost" onclick="hideDelConfirm('{sid}')">Cancel</button>
+          </span>
         </div>
-        <div class="field" id="split-horizon-resolvers" style="margin:0.75rem 0 0{"" if split_on else ";display:none"}">
-          <label>Custom public resolvers <span class="hint">(optional &mdash; default 1.1.1.1, 8.8.8.8; only needed if those are blocked)</span></label>
-          <input type="text" name="split_horizon_resolvers" class="cert-shared" value="{split_resolvers}"
-                 placeholder="1.1.1.1, 8.8.8.8" autocomplete="off">
+      </div>
+    </div>"""
+
+    # JavaScript is in a separate raw string appended below (no {{ }} issues).
+    form = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">{title}</span>
+    <a href="/settings" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  {shared_profile_notice}
+  <form method="POST" action="{action}">
+
+    <div class="card" style="margin-bottom:1rem">
+      <div class="form-section-title">Server Identity</div>
+      <div class="field">
+        <label>Label <span class="hint">(friendly name)</span></label>
+        <input type="text" name="label" value="{fv('label')}" required
+               placeholder="e.g. Production ClearPass">
+      </div>
+      <div class="field">
+        <label>Target Type</label>
+        <select name="target_type" id="target_type" onchange="switchTargetType(this.value)">
+          {target_type_options}
+        </select>
+      </div>
+      {cert_profile_field_html}
+    </div>
+
+    <div class="card target-section" id="section-clearpass" style="margin-bottom:1rem">
+      <div class="form-section-title">ClearPass Server</div>
+      <div class="form-2col">
+        <div class="field">
+          <label>Host / IP</label>
+          <input type="text" name="cppm_host" value="{fv('cppm_host')}" required
+                 placeholder="cppm.example.com">
+        </div>
+        <div class="field" style="padding-bottom:0.5rem">
+          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin-bottom:0.5rem">
+            <input type="checkbox" name="cppm_cluster_mode" id="cppm_cluster_mode" value="true"{(' checked' if s.get('cppm_cluster_mode') else '')}
+                   style="width:auto;margin:0" onchange="onClusterModeChange(this)">
+            Cluster mode <span class="hint">— upload to all ClearPass nodes</span>
+          </label>
+          <div id="cluster-check-bar" style="display:{('flex' if s.get('cppm_cluster_mode') else 'none')};align-items:center;gap:0.6rem">
+            <input type="hidden" id="cluster-server-id" value="{sid}">
+            <button type="button" class="btn btn-ghost" id="cluster-check-btn" onclick="runClusterCheck()">
+              &#128270; Check nodes
+            </button>
+            <span id="cluster-check-spinner" style="display:none;font-size:0.78rem;color:var(--muted)">Checking…</span>
+          </div>
+          <div id="cluster-check-results" style="display:none;margin-top:0.75rem"></div>
+        </div>
+        <div class="field">
+          <label>Client ID</label>
+          <input type="text" name="cppm_client_id" value="{fv('cppm_client_id')}" required
+                 autocomplete="off">
+        </div>
+      </div>
+      <div class="form-2col">
+        <div class="field">
+          <label>Client Secret</label>
+          <input type="password" name="cppm_client_secret" value="{fv('cppm_client_secret')}"
+                 autocomplete="new-password">
+        </div>
+        <div class="field">
+          <label>Cert Passphrase <span class="hint">(PKCS12 export)</span></label>
+          <input type="password" name="cppm_cert_passphrase" value="{fv('cppm_cert_passphrase')}"
+                 autocomplete="new-password">
+        </div>
+      </div>
+      <div class="form-2col">
+        <div class="field">
+          <label>Callback Host <span class="hint">(Docker host LAN IP)</span>{_help_toggle('callback_host', 'The LAN IP of the Docker host &mdash; not the container IP. ClearPass fetches the certificate from this address. Find it with: <code>ip route get &lt;cppm-ip&gt;</code> &mdash; look for <code>src X.X.X.X</code>. Must be reachable from your ClearPass server on the callback port (default 8765).')}</label>
+          <input type="text" name="cppm_callback_host" value="{fv('cppm_callback_host')}"
+                 placeholder="10.0.0.5">
+        </div>
+        <div class="field">
+          <label>Callback Port</label>
+          <input type="number" name="cppm_callback_port"
+                 value="{fv('cppm_callback_port', '8765')}"
+                 min="1" max="65535">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+          <input type="checkbox" name="cppm_verify_ssl" value="true"{verify}
+                 style="width:auto;margin:0">
+          Verify SSL (enable after initial certificate install){_help_toggle('verify_ssl', 'Enable this <strong>after</strong> the first certificate has been successfully installed and is trusted by ClearPass. Enabling it before the cert is trusted will cause uploads to fail with an SSL verification error.')}
+        </label>
+      </div>
+    </div>
+
+    <div class="card target-section" id="section-linux_ssh" style="margin-bottom:1rem;display:none">
+      <div class="form-section-title">Linux Server (SSH)</div>
+      <div class="form-2col">
+        <div class="field">
+          <label>SSH Host / IP</label>
+          <input type="text" name="ssh_host" id="ssh_host" value="{fv('ssh_host')}"
+                 placeholder="server.example.com">
+        </div>
+        <div class="field">
+          <label>SSH Port</label>
+          <input type="number" name="ssh_port" value="{fv('ssh_port', '22')}" min="1" max="65535">
+        </div>
+      </div>
+      <div class="field">
+        <label>SSH User</label>
+        <input type="text" name="ssh_user" id="ssh_user" value="{fv('ssh_user')}" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Private Key <span class="hint">(primary — paste the PEM-format key)</span></label>
+        <textarea name="ssh_private_key" id="ssh_private_key" rows="4" style="font-family:monospace;font-size:0.78rem"
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+                  autocomplete="off">{fv('ssh_private_key')}</textarea>
+        <details style="margin:0.5rem 0 0">
+          <summary style="cursor:pointer;font-size:0.78rem;color:var(--muted)">Best practice: use a dedicated deploy key, not your personal SSH key</summary>
+          <div class="hint" style="margin-top:0.5rem;line-height:1.5">
+            Generate a key just for this tool, so a leaked <code>servers.json</code> can't be
+            used to reach anything else — run this on your own machine, not the target:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">ssh-keygen -t ed25519 -f ./acme-deploy-key -N "" -C "acme-deploy"</pre>
+            On the target, create a low-privilege account (not root) and its cert directory:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">sudo useradd --system --create-home --home-dir /opt/acme-deploy --shell /bin/bash deploy
+sudo mkdir -p /opt/acme-deploy/certs
+sudo chown deploy:deploy /opt/acme-deploy/certs
+sudo chmod 750 /opt/acme-deploy/certs</pre>
+            Use a real shell (<code>/bin/bash</code>/<code>/bin/sh</code>), not
+            <code>nologin</code> — this tool runs its deploy step as a remote SSH command, which
+            a <code>nologin</code> shell silently blocks. Then install the public key and scope
+            the account to just that directory — plus a narrow <code>sudoers</code> rule below
+            if the reload command needs elevation:
+            <pre style="background:#0a0f1a;padding:0.5rem 0.6rem;border-radius:4px;font-size:0.72rem;overflow-x:auto;margin:0.4rem 0">sudo mkdir -p /opt/acme-deploy/.ssh
+sudo cp acme-deploy-key.pub /opt/acme-deploy/.ssh/authorized_keys
+sudo chown -R deploy:deploy /opt/acme-deploy/.ssh
+sudo chmod 700 /opt/acme-deploy/.ssh
+sudo chmod 600 /opt/acme-deploy/.ssh/authorized_keys</pre>
+            Paste the private half (<code>acme-deploy-key</code>, no passphrase — this runs
+            unattended) into the field above. Full walkthrough and target-side examples:
+            <a href="/help/linux-ssh-target#best-practice-full-setup-walkthrough" target="_blank"
+               style="color:var(--accent)">Linux SSH Target docs</a>.
+          </div>
+        </details>
+      </div>
+      <div class="field">
+        <label>Password <span class="hint">(fallback — only used if no private key is set)</span></label>
+        <input type="password" name="ssh_password" value="{fv('ssh_password')}" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label>Certificate Key Type</label>
+        <select name="ssh_key_type">
+          <option value="ecc"{sel(fv('ssh_key_type') or 'ecc', 'ecc')}>ECC (recommended)</option>
+          <option value="rsa"{sel(fv('ssh_key_type') or 'ecc', 'rsa')}>RSA</option>
+          <option value="both"{sel(fv('ssh_key_type') or 'ecc', 'both')}>Both (ECC and RSA)</option>
+        </select>
+        <div class="hint">The kind of certificate this server receives. ECC is the modern default; choose RSA for older software. <strong>Both</strong> deploys one of each, for services that can use either (e.g. FreeRADIUS). Check the documentation of the service you are configuring to confirm which key type it supports.</div>
+      </div>
+      <div class="field">
+        <label>Remote Certificate Directory</label>
+        <input type="text" name="remote_cert_dir" id="remote_cert_dir" value="{fv('remote_cert_dir')}"
+               placeholder="e.g. /opt/acme-deploy/certs" oninput="updateConfigureHelper()">
+        <div class="hint">Files are written here as <code>fullchain.pem</code> and <code>privkey.pem</code>. With <strong>Both</strong>, the names are <code>fullchain.ecc.pem</code>, <code>privkey.ecc.pem</code>, <code>fullchain.rsa.pem</code> and <code>privkey.rsa.pem</code>.</div>
+      </div>
+      <details style="margin:0.75rem 0">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--muted)">Show me how to configure...</summary>
+        <div class="field" style="margin-top:0.5rem">
+          <select id="configure_helper_service" onchange="updateConfigureHelper()">
+            <option value="apache">Apache</option>
+            <option value="nginx">nginx</option>
+            <option value="frigate">Frigate (Docker)</option>
+            <option value="freeradius">FreeRADIUS</option>
+            <option value="docker">Generic Docker container</option>
+          </select>
+        </div>
+        <pre id="configure_helper_snippet" style="font-size:0.75rem;background:var(--bg2,var(--sidebar-bg));border-radius:0.4rem;padding:0.6rem;overflow-x:auto"></pre>
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <span class="hint">Suggested reload command:</span>
+          <code id="configure_helper_reload" style="font-size:0.75rem"></code>
+          <button type="button" class="btn btn-ghost" onclick="useConfigureHelperReload()">Use this</button>
         </div>
       </details>
+      <div class="field">
+        <label>Services <span class="hint">(optional — what uses this certificate; shown in the server list, does not affect deployment)</span></label>
+        <input type="text" name="services" id="services" value="{_esc(", ".join(s.get("services") or []))}"
+               placeholder="Apache, Frigate" autocomplete="off" maxlength="400">
+        <div class="svc-tags" style="margin-top:0.4rem">
+          {"".join(f'<button type="button" class="svc-tag" style="cursor:pointer;background:none" onclick="addService(this.textContent)">{n}</button>' for n in ("Apache", "nginx", "Frigate", "Home Assistant", "Grafana", "Docker"))}
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Reload Command <span class="hint">(run on the target over the same SSH connection after deploy)</span></label>
+        <input type="text" name="reload_command" id="reload_command" value="{fv('reload_command')}"
+               placeholder="sudo systemctl reload nginx" autocomplete="off">
+      </div>
+      <div style="margin-top:0.75rem;display:flex;align-items:center;gap:0.6rem">
+        <button type="button" class="btn btn-ghost" id="ssh-test-btn" onclick="runSshTest()">&#128270; Test Connection</button>
+        <span id="ssh-test-spinner" style="display:none;font-size:0.78rem;color:var(--muted)">Testing…</span>
+      </div>
+      <div id="ssh-test-results" style="display:none;margin-top:0.75rem"></div>
     </div>
+
+  {acme_dns_fields_html}
 
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
       <a href="/settings" class="btn btn-ghost">Cancel</a>
@@ -3570,13 +4379,128 @@ def _settings_form_page(server: dict = None, error: str = "",
     # JavaScript — separate raw string: no {{ }} escaping needed.
     script = """
 <script>
-function switchDns(val) {
-  document.querySelectorAll('.dns-section').forEach(function(el) {
-    var active = el.id === 'dns-' + val;
+function switchTargetType(val) {
+  document.querySelectorAll('.target-section').forEach(function(el) {
+    var active = el.id === 'section-' + val;
     el.style.display = active ? '' : 'none';
-    el.querySelectorAll('input').forEach(function(inp) {
+    el.querySelectorAll('input, textarea, select').forEach(function(inp) {
       inp.disabled = !active;
     });
+  });
+  // Cert-type checkboxes come from the registry (CERT_SLOTS): show only the
+  // slots this type offers, and disable the rest so they don't post.
+  var slots = CERT_SLOTS[val] || [];
+  document.querySelectorAll('.cert-slot').forEach(function(el) {
+    var on = slots.indexOf(el.getAttribute('data-slot')) !== -1;
+    el.style.display = on ? 'flex' : 'none';
+    el.querySelector('input').disabled = !on;
+  });
+  document.querySelectorAll('.cert-types-field').forEach(function(el) {
+    el.style.display = slots.length ? '' : 'none';
+  });
+  document.querySelectorAll('.cert-types-linux-note').forEach(function(el) {
+    el.style.display = slots.length ? 'none' : '';
+  });
+}
+var CONFIGURE_HELPER_SNIPPETS = {
+  apache: {
+    snippet: 'SSLCertificateFile      {{DIR}}/fullchain.pem\\nSSLCertificateKeyFile   {{DIR}}/privkey.pem',
+    reload: 'sudo systemctl reload apache2'
+  },
+  nginx: {
+    snippet: 'ssl_certificate      {{DIR}}/fullchain.pem;\\nssl_certificate_key  {{DIR}}/privkey.pem;',
+    reload: 'sudo systemctl reload nginx'
+  },
+  frigate: {
+    // Frigate's cert path is hardcoded to /etc/letsencrypt/live/frigate
+    // inside the container (not configurable) — see
+    // https://docs.frigate.video/configuration/tls/
+    snippet: 'services:\\n  frigate:\\n    volumes:\\n      - {{DIR}}:/etc/letsencrypt/live/frigate:ro\\n'
+      + '# After adding/changing this volumes line, run `docker compose up -d` to\\n'
+      + '# recreate the container — `docker restart frigate` reuses the container\\n'
+      + '# as already created and will NOT pick up a new/changed mount.\\n'
+      + '#\\n'
+      + '# No reload command is needed for routine renewals after that: Frigate\\n'
+      + '# checks the fullchain.pem fingerprint every minute and reloads NGINX\\n'
+      + '# itself. The reload command below is only a fallback if you want a\\n'
+      + '# renewal to take effect immediately instead of within a minute.',
+    reload: 'docker restart frigate'
+  },
+  freeradius: {
+    // One cert/key pair serves both 802.1X (EAP) and RadSec. Set Certificate Key Type to
+    // RSA for the widest supplicant compatibility, or Both for ECC + RSA files.
+    snippet: '# mods-available/eap  (tls-config tls-common { ... })\\n'
+      + 'certificate_file = {{DIR}}/fullchain.pem\\n'
+      + 'private_key_file = {{DIR}}/privkey.pem\\n'
+      + '#\\n'
+      + '# The same pair works for RadSec (sites-available/tls).\\n'
+      + '# The freeradius service user must be able to read privkey.pem, e.g. make\\n'
+      + '# the deploy account a member of the freerad group and chmod 750 the directory.\\n'
+      + '# FreeRADIUS loads certs at start, so use a restart, not a reload.',
+    reload: 'sudo systemctl restart freeradius'
+  },
+  docker: {
+    snippet: '# Bind-mount the directory read-only into the container:\\n#   -v {{DIR}}:{{DIR}}:ro\\n# Then reload or restart the container to pick up the new files.',
+    reload: 'docker restart <container>'
+  }
+};
+function updateConfigureHelper() {
+  var svcEl = document.getElementById('configure_helper_service');
+  var dirEl = document.getElementById('remote_cert_dir');
+  if (!svcEl || !dirEl) return;
+  var dir = dirEl.value || '/opt/acme-deploy/certs';
+  var cfg = CONFIGURE_HELPER_SNIPPETS[svcEl.value];
+  if (!cfg) return;
+  document.getElementById('configure_helper_snippet').textContent = cfg.snippet.split('{{DIR}}').join(dir);
+  document.getElementById('configure_helper_reload').textContent = cfg.reload.split('{{DIR}}').join(dir);
+}
+function useConfigureHelperReload() {
+  var reload = document.getElementById('configure_helper_reload').textContent;
+  if (reload) document.getElementById('reload_command').value = reload;
+}
+function addService(name) {
+  var el = document.getElementById('services');
+  var cur = el.value.split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+  if (cur.map(function(x) { return x.toLowerCase(); }).indexOf(name.toLowerCase()) < 0) cur.push(name);
+  el.value = cur.join(', ');
+}
+function runSshTest() {
+  var fields = ['ssh_host', 'ssh_port', 'ssh_user', 'ssh_private_key', 'ssh_password', 'remote_cert_dir', 'reload_command'];
+  var body = fields.map(function(name) {
+    var el = document.querySelector('#section-linux_ssh [name="' + name + '"]');
+    return name + '=' + encodeURIComponent((el && el.value) || '');
+  }).join('&');
+  var btn = document.getElementById('ssh-test-btn');
+  var spin = document.getElementById('ssh-test-spinner');
+  var res = document.getElementById('ssh-test-results');
+  btn.disabled = true;
+  spin.style.display = '';
+  res.style.display = 'none';
+  res.innerHTML = '';
+  fetch('/api/server/test-ssh', {method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body})
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    btn.disabled = false; spin.style.display = 'none';
+    var colors = {ok: 'var(--success)', warn: 'var(--warning,#e8a000)', error: 'var(--danger)', unknown: 'var(--muted)'};
+    var icons = {ok: '&#10003;', warn: '&#9888;', error: '&#10007;', unknown: '?'};
+    var st = data.status || 'error';
+    var html = '<div style="border:1px solid var(--border);border-radius:0.5rem;padding:0.6rem 0.75rem">';
+    html += '<div style="display:flex;align-items:center;gap:0.4rem"><span style="color:' + (colors[st] || colors.error) + ';font-weight:700">' + (icons[st] || icons.error) + '</span>';
+    html += '<span style="font-size:0.82rem">' + esc(data.message || '') + '</span></div>';
+    if (data.remediation && data.remediation.length) {
+      html += '<div style="font-size:0.75rem;color:var(--muted);background:var(--bg2,var(--sidebar-bg));border-radius:0.3rem;padding:0.5rem;margin-top:0.5rem">';
+      html += '<strong>Fix:</strong><br>' + data.remediation.map(esc).join('<br>');
+      html += '</div>';
+    }
+    html += '</div>';
+    res.innerHTML = html;
+    res.style.display = 'block';
+  })
+  .catch(function(err) {
+    btn.disabled = false; spin.style.display = 'none';
+    res.innerHTML = '<div class="hint" style="color:var(--danger)">Request failed: ' + esc(String(err)) + '</div>';
+    res.style.display = 'block';
   });
 }
 function switchAcme(val) {
@@ -3608,17 +4532,17 @@ function applyCertProfile(value) {
       var san = document.querySelector('[name="san_dns_' + i + '"]');
       if (san) san.value = '';
     }
-    document.querySelectorAll('.dns-section input').forEach(function(el) { el.value = ''; });
     document.getElementById('acme_server_url').value = '';
-    ['issue_https_ecc', 'issue_https_rsa', 'issue_radius', 'issue_radsec'].forEach(function(name) {
-      var el = document.querySelector('[name="' + name + '"]');
+    var credSel = document.getElementById('dns_credential_id');
+    if (credSel) credSel.value = '';
+    ALL_CERT_SLOTS.forEach(function(slot) {
+      var el = document.querySelector('[name="issue_' + slot + '"]');
       if (el) el.checked = true;
     });
     document.getElementById('split_horizon_dns').checked = false;
     document.querySelector('[name="split_horizon_resolvers"]').value = '';
     toggleSplitHorizon(false);
     setSharedFieldsDisabled(false);
-    switchDns(document.getElementById('dns_provider').value);
     switchAcme(document.getElementById('acme_server').value);
     if (notice) notice.style.display = 'none';
     return;
@@ -3637,28 +4561,20 @@ function applyCertProfile(value) {
   var acmeSel = rawAcme.indexOf('http') === 0 ? 'custom' : rawAcme;
   document.getElementById('acme_server').value = acmeSel;
   document.getElementById('acme_server_url').value = acmeSel === 'custom' ? rawAcme : '';
-  var creds = p.dns_credentials || {};
-  document.getElementById('EAB_KID').value = creds.EAB_KID || '';
-  document.getElementById('EAB_HMAC_KEY').value = creds.EAB_HMAC_KEY || '';
-  var dnsProv = p.dns_provider || 'cloudflare';
-  document.getElementById('dns_provider').value = dnsProv;
-  document.querySelectorAll('.dns-section input').forEach(function(el) { el.value = ''; });
-  Object.keys(creds).forEach(function(k) {
-    if (k === 'EAB_KID' || k === 'EAB_HMAC_KEY') return;
-    var el = document.querySelector('.dns-section [name="' + k + '"]');
-    if (el) el.value = creds[k];
-  });
+  document.getElementById('EAB_KID').value = p.eab_kid || '';
+  document.getElementById('EAB_HMAC_KEY').value = p.eab_hmac_key || '';
+  var credSel2 = document.getElementById('dns_credential_id');
+  if (credSel2) credSel2.value = p.dns_credential_id || '';
   var types = (p.cert_types || []).slice();
   if (types.indexOf('ecc') !== -1) types.push('https_ecc');
   if (types.indexOf('rsa') !== -1) { types.push('radius'); types.push('radsec'); }
-  ['https_ecc', 'https_rsa', 'radius', 'radsec'].forEach(function(t) {
+  ALL_CERT_SLOTS.forEach(function(t) {
     var el = document.querySelector('[name="issue_' + t + '"]');
     if (el) el.checked = types.indexOf(t) !== -1;
   });
   document.getElementById('split_horizon_dns').checked = !!p.split_horizon_dns;
   document.querySelector('[name="split_horizon_resolvers"]').value = (p.split_horizon_resolvers || []).join(', ');
   toggleSplitHorizon(!!p.split_horizon_dns);
-  switchDns(dnsProv);
   switchAcme(acmeSel);
   setSharedFieldsDisabled(true);
   if (notice) {
@@ -3666,9 +4582,36 @@ function applyCertProfile(value) {
     notice.textContent = 'Populated from certificate profile "' + value + '". These fields are shared by every server on this profile — edit a server already on the profile to change them.';
   }
 }
+function slugifyCertId(value) {
+  return (value || '').replace(/[^\\w.-]/g, '_').replace(/^[._-]+|[._-]+$/g, '');
+}
+function checkCertIdConflict(value) {
+  var notice = document.getElementById('cert-profile-notice');
+  if (!notice) return;
+  var p = (window.CERT_PROFILES || {})[value];
+  if (value && p) {
+    notice.style.display = '';
+    notice.textContent = "'" + value + "' is already used by profile " +
+      (p.label ? '"' + p.label + '"' : '"' + value + '"') + ' (' + p.member_count +
+      ' other target(s)) — saving will share its ACME/DNS config here, replacing what is shown below.';
+  } else {
+    notice.style.display = 'none';
+  }
+}
+function suggestCertId() {
+  if (!window.CERT_ID_AUTOSUGGEST) return;
+  var idInput = document.getElementById('certificate_id_input');
+  if (!idInput || idInput.dataset.touched === '1') return;
+  var domainEl = document.getElementById('domain');
+  idInput.value = slugifyCertId(domainEl ? domainEl.value : '');
+  checkCertIdConflict(idInput.value);
+}
 (function() {
-  switchDns(document.getElementById('dns_provider').value);
   switchAcme(document.getElementById('acme_server').value);
+  switchTargetType(document.getElementById('target_type').value);
+  updateConfigureHelper();
+  var domainEl = document.getElementById('domain');
+  if (domainEl) domainEl.addEventListener('input', suggestCertId);
 })();
 function onClusterModeChange(cb) {
   document.getElementById('cluster-check-bar').style.display = cb.checked ? 'flex' : 'none';
@@ -3775,8 +4718,6 @@ _ACME_DISPLAY = {
     "letsencrypt":      "Let's Encrypt",
     "letsencrypt_test": "Let's Encrypt (Staging)",
     "zerossl":          "ZeroSSL",
-    "buypass":          "Buypass",
-    "buypass_test":     "Buypass (Staging)",
 }
 
 
@@ -3868,15 +4809,92 @@ def _cluster_overview_row(s: dict) -> str:
             f'</td></tr>')
 
 
+def _last_used_acme_defaults() -> dict:
+    """ACME email/CA from the most recently added server, to prefill a new one."""
+    for entry in reversed(load_servers()):
+        r = _resolve_target_fields(entry)
+        if r.get("acme_email"):
+            return {"acme_email": r["acme_email"],
+                    "acme_server": r.get("acme_server") or "letsencrypt"}
+    return {}
+
+
+def _get_started_html() -> str:
+    """Empty-state checklist shown when no servers exist."""
+    try:
+        has_dns = bool(list_dns_credentials())
+    except Exception:
+        has_dns = False
+
+    def step(num, done, title, blurb, body=""):
+        mark = "&#10003;" if done else str(num)
+        color = "var(--ok, #4ade80)" if done else "var(--accent)"
+        return (
+            f'<div style="display:flex;gap:0.9rem;margin-bottom:1.4rem">'
+            f'<div style="flex:0 0 1.8rem;height:1.8rem;border-radius:50%;'
+            f'border:1px solid {color};color:{color};display:flex;align-items:center;'
+            f'justify-content:center;font-size:0.85rem">{mark}</div>'
+            f'<div style="flex:1;min-width:0">'
+            f'<div style="font-weight:600;margin-bottom:0.2rem">{title}</div>'
+            f'<div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.6rem">{blurb}</div>'
+            f'{body}</div></div>'
+        )
+
+    def card(target, title, blurb, needs):
+        items = "".join(f"<li>{_esc(n)}</li>" for n in needs)
+        return (
+            f'<a href="/settings/add?target_type={target}" class="btn btn-primary" '
+            f'style="display:block;text-align:left;padding:1rem 1.1rem;flex:1 1 240px;'
+            f'white-space:normal;text-decoration:none">'
+            f'<strong style="display:block;margin-bottom:0.25rem">{_esc(title)}</strong>'
+            f'<span style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem">'
+            f'{_esc(blurb)}</span>'
+            f'<span style="font-size:0.75rem;color:var(--subtle)">You will need:</span>'
+            f'<ul style="margin:0.25rem 0 0 1.1rem;padding:0;font-size:0.78rem;color:var(--muted)">'
+            f'{items}</ul></a>'
+        )
+
+    dns_body = (
+        '' if has_dns else
+        '<a href="/settings/dns-credentials/new" class="btn btn-primary">'
+        '&#43; Add DNS credential</a>'
+    )
+    cards = (
+        '<div style="display:flex;flex-wrap:wrap;gap:1rem">'
+        + "".join(card(t, spec["label"], spec["blurb"], spec["needs"])
+                  for t, spec in TARGET_TYPES.items())
+        + '</div>'
+    )
+    return (
+        '<div style="padding:2rem 1.5rem">'
+        '<div style="font-size:1rem;font-weight:600;margin-bottom:1.2rem">Get started</div>'
+        + step(1, has_dns, "Add a DNS credential",
+               "The DNS-01 challenge needs API access to your DNS provider. One credential can "
+               "be reused by every server. (You can also create it inline in step 2.)", dns_body)
+        + step(2, False, "Add your first server",
+               "Choose what to deploy certificates to. You can add more servers of either type later.",
+               cards)
+        + '</div>'
+    )
+
+
+def _svc_tags_html(services) -> str:
+    """Render the informational service tags of a Linux SSH entry ('' if none)."""
+    if not services:
+        return ""
+    return ('<div class="svc-tags">'
+            + "".join(f'<span class="svc-tag">{_esc(str(n))}</span>' for n in services)
+            + '</div>')
+
+
 def _overview_rows(servers: list) -> str:
     if not servers:
-        return (f'<tr><td colspan="{_OVERVIEW_COLSPAN}"><div class="empty">No servers configured. '
-                '<a href="/settings/add" style="color:var(--accent)">Add a server</a>.'
-                '</div></td></tr>')
+        return f'<tr><td colspan="{_OVERVIEW_COLSPAN}">{_get_started_html()}</td></tr>'
     rows = []
     for s in servers:
         sid  = _esc(str(s.get("id", "")))
-        host = _esc(s.get("cppm_host", ""))
+        is_linux_ssh = s.get("target_type") == "linux_ssh"
+        host = _esc(s.get("host", ""))
         dns  = _esc(_DNS_DISPLAY.get(s.get("dns_provider", ""), s.get("dns_provider", "")))
         _acme_raw = s.get("acme_server", "")
         acme = _esc(_ACME_DISPLAY.get(_acme_raw, "Custom CA" if _acme_raw.startswith("http") else _acme_raw))
@@ -3887,13 +4905,16 @@ def _overview_rows(servers: list) -> str:
         def _dot(kind: str) -> str:
             return (f'<span id="ov-{_esc(raw_sid)}-{kind}" class="sdot checking"'
                     f' title="checking…" style="margin-right:0.2rem"></span>')
+        if is_linux_ssh:
+            dot_items = (("ssh", "SSH"), ("dns", "DNS/ACME"))
+        else:
+            dot_items = (("cppm", "CPPM"), ("dns", "DNS/ACME"), ("cb", "Callback"))
         dots = (f'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
-                f'{_dot("cppm")}<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'
-                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
-                f'{_dot("dns")}<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'
-                f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'
-                f'{_dot("cb")}<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
-                f'</div>')
+                + f'<span style="color:var(--border2);margin:0 0.15rem">·</span>'.join(
+                    f'{_dot(kind)}<span style="font-size:0.68rem;color:var(--subtle)">{label}</span>'
+                    for kind, label in dot_items
+                )
+                + f'</div>')
         cert_badges = (
             (f'{_mini_cert(ecc, "HTTPS(ECC)")}' if "https_ecc" in tgts else "")
             + (f'{_mini_cert(rsa, "HTTPS(RSA)")}' if "https_rsa" in tgts else "")
@@ -3903,8 +4924,9 @@ def _overview_rows(servers: list) -> str:
         rows.append(
             f'<tr class="server-row" onclick="window.location.href=\'/server/{sid}\'">'
             f'<td>'
-            f'<div class="srv-label">{_esc(s.get("label", "") or s.get("cppm_host", ""))}</div>'
+            f'<div class="srv-label">{_esc(s.get("label", "") or host)}</div>'
             f'<div class="srv-host">{host}</div>'
+            f'{_svc_tags_html(s.get("services"))}'
             f'{dots}</td>'
             f'<td>'
             f'{dns}'
@@ -4005,7 +5027,7 @@ def _notifications_page(server_id: str, username: str,
     if flash_msg:
         flash_html = f'<div class="flash flash-{_esc(flash_type)}">{_esc(flash_msg)}</div>'
 
-    label     = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label     = _esc(srv.get("label") or server_host(srv))
     sid       = _esc(server_id)
     notif_cfg = srv.get("notifications") or {}
     channels  = notif_cfg.get("channels") or []
@@ -4097,7 +5119,7 @@ def _notification_form_page(server_id: str, channel: dict = None,
 
     is_edit  = bool(channel and channel.get("id"))
     sid      = _esc(server_id)
-    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label    = _esc(srv.get("label") or server_host(srv))
     ch       = channel or {}
     cid      = _esc(str(ch.get("id", "")))
     action   = (f"/settings/notifications/{sid}/edit/{cid}" if is_edit
@@ -4233,7 +5255,7 @@ def _notification_threshold_page(server_id: str, error: str = "",
     if not srv:
         return _settings_list_page(load_servers(), username, "err", "Server not found")
     sid      = _esc(server_id)
-    label    = _esc(srv.get("label") or srv.get("cppm_host", ""))
+    label    = _esc(srv.get("label") or server_host(srv))
     notif    = srv.get("notifications") or {}
     threshold = int(notif.get("expiry_warning_days") or 14)
     err_html  = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
@@ -4270,7 +5292,7 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 function cls(d){if(d==null)return'none';if(d>30)return'ok';if(d>14)return'warn';return'danger';}
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function dnsLabel(p){var m={cloudflare:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route 53',digitalocean:'DigitalOcean',godaddy:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p||'—';}
-function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s)||'—';}
+function acmeLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s)||'—';}
 
 function renderMiniCert(cert,label){
   if(!cert||!cert.exists){return'<div class="mini-cert none"><div class="mini-days none">—</div><div class="mini-label">'+esc(label)+'</div><div class="mini-exp">Not found</div></div>';}
@@ -4280,6 +5302,10 @@ function renderMiniCert(cert,label){
 function svcBadge(name,status){
   var c=status==='installed'?'badge-ok':'badge-none';
   return'<span class="badge '+c+'">'+esc(name)+' &middot; '+esc(status)+'</span>';
+}
+function svcTags(list){
+  if(!list||!list.length)return'';
+  return'<div class="svc-tags">'+list.map(function(n){return'<span class="svc-tag">'+esc(n)+'</span>';}).join('')+'</div>';
 }
 function renderClusterRow(s){
   if(!s.cluster_mode)return'';
@@ -4317,12 +5343,13 @@ function ovDot(sid,kind){
   var tip=h?(state+(h.message?': '+h.message:'')):'checking…';
   return'<span id="ov-'+esc(sid)+'-'+kind+'" class="sdot '+state+'" data-tooltip="'+esc(tip)+'" style="margin-right:0.2rem"></span>';
 }
-function renderDots(sid){
+function renderDots(sid,targetType){
   var sep='<span style="color:var(--border2);margin:0 0.15rem">\xb7</span>';
+  var items=targetType==='linux_ssh'
+    ?[['ssh','SSH'],['dns','DNS/ACME']]
+    :[['cppm','CPPM'],['dns','DNS/ACME'],['cb','Callback']];
   return'<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.35rem">'
-    +ovDot(sid,'cppm')+'<span style="font-size:0.68rem;color:var(--subtle)">CPPM</span>'+sep
-    +ovDot(sid,'dns')+'<span style="font-size:0.68rem;color:var(--subtle)">DNS/ACME</span>'+sep
-    +ovDot(sid,'cb')+'<span style="font-size:0.68rem;color:var(--subtle)">Callback</span>'
+    +items.map(function(it){return ovDot(sid,it[0])+'<span style="font-size:0.68rem;color:var(--subtle)">'+it[1]+'</span>';}).join(sep)
     +'</div>';
 }
 function nav(el){window.location.href='/server/'+el.dataset.sid;}
@@ -4336,10 +5363,12 @@ function renderRow(s){
     +(tgts.indexOf('https_rsa')>=0?renderMiniCert(rsa,'HTTPS(RSA)'):'')
     +(tgts.indexOf('radsec')>=0?renderMiniCert(rsa,'RadSec'):'')
     +(tgts.indexOf('radius')>=0?renderMiniCert(rsa,'RADIUS'):'');
+  var host=s.host||'';
   return'<tr class="server-row" data-sid="'+esc(sid)+'" onclick="nav(this)">'
-    +'<td><div class="srv-label">'+esc(s.label||s.cppm_host)+'</div>'
-    +'<div class="srv-host">'+esc(s.cppm_host)+'</div>'
-    +renderDots(sid)+'</td>'
+    +'<td><div class="srv-label">'+esc(s.label||host)+'</div>'
+    +'<div class="srv-host">'+esc(host)+'</div>'
+    +svcTags(s.services)
+    +renderDots(sid,s.target_type)+'</td>'
     +'<td>'+esc(dnsLabel(s.dns_provider))
     +'<div style="font-size:0.65rem;color:var(--subtle);margin-top:0.18rem">'+esc(acmeLabel(s.acme_server))+'</div></td>'
     +'<td><div class="cert-badges">'+certBadges+'</div></td>'
@@ -4354,7 +5383,7 @@ function applyAllHealthDots(){
   var servers=(_ovHealth&&_ovHealth.servers)||{};
   Object.keys(servers).forEach(function(sid){
     var sh=servers[sid]||{};
-    ['cppm','dns','callback'].forEach(function(k){
+    Object.keys(sh).forEach(function(k){
       var elId='ov-'+sid+'-'+(k==='callback'?'cb':k);
       var el=document.getElementById(elId);
       if(el&&sh[k])applyDot(el,sh[k]);
@@ -4449,7 +5478,7 @@ _DETAIL_BODY = """
     <div class="log-tabs" id="log-tabs">
       <button class="log-tab active" data-tab="activity" onclick="switchLogTab(this,'activity')">Activity Log</button>
       <button class="log-tab" data-tab="renewal" id="log-tab-renewal" onclick="switchLogTab(this,'renewal')">ACME Renewal</button>
-      <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">ClearPass Upload</button>
+      <button class="log-tab" data-tab="upload" id="log-tab-upload" onclick="switchLogTab(this,'upload')">Upload</button>
     </div>
     <span class="log-count" id="log-count"></span>
     <a class="btn btn-ghost" id="log-download-btn" style="font-size:0.72rem;padding:0.2rem 0.6rem;display:none" href="#" download>&#8681; Download Logs</a>
@@ -4516,7 +5545,7 @@ function cls(d) {
 function fmtDate(iso){if(!iso)return'—';try{return new Date(iso).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});}catch(e){return iso;}}
 function fmtDT(iso){if(!iso)return'—';try{return new Date(iso).toLocaleString('en-US',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});}catch(e){return iso;}}
 function dnsLabel(p){var m={cloudflare:'Cloudflare',cf:'Cloudflare',porkbun:'Porkbun',route53:'AWS Route53',aws:'AWS Route53',r53:'AWS Route53',digitalocean:'DigitalOcean',do:'DigitalOcean',godaddy:'GoDaddy',gd:'GoDaddy',infoblox:'Infoblox',rfc2136:'RFC 2136'};return m[p]||p;}
-function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL',buypass:'Buypass',buypass_test:'Buypass (Staging)'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s);}
+function caLabel(s){var m={letsencrypt:"Let's Encrypt",letsencrypt_test:"Let's Encrypt (Staging)",zerossl:'ZeroSSL'};return m[s]||(s&&s.startsWith('http')?'Custom CA':s);}
 function lvlBadge(l){var c={OK:'lvl-ok',WARN:'lvl-warn',FAILED:'lvl-failed',INFO:'lvl-info'}[l]||'lvl-info';return'<span class="lvl '+c+'">'+esc(l)+'</span>';}
 function keyLabel(cert){if(!cert.key_type)return'—';if(cert.key_type==='ECDSA'&&cert.key_curve)return cert.key_type+' ('+cert.key_curve+')';if(cert.key_size)return cert.key_type+' '+cert.key_size+'-bit';return cert.key_type;}
 
@@ -4552,11 +5581,16 @@ function renderInfoCards(data, health){
     +'<div class="row"><span class="lbl">Schedule</span><span class="val">'+esc(sc.schedule||'—')+'</span></div>'
     +'<div class="row"><span class="lbl">Renews at</span><span class="val">'+esc(sc.threshold||'—')+'</span></div>'
     +'</div></div>';
+  var isLinuxSsh=data.target_type==='linux_ssh';
+  var targetRow=isLinuxSsh
+    ?'<div class="row"><span class="lbl">Host</span><span class="val">'+sdot('d-dot-cppm',sh.ssh)+esc(data.host)+'</span></div>'
+      +((data.services&&data.services.length)?'<div class="row"><span class="lbl">Services</span><span class="val">'+data.services.map(esc).join(', ')+'</span></div>':'')
+    :'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.host)+'</span></div>';
   var cfg='<div class="card"><div class="card-title">Configuration</div><div class="meta">'
     +'<div class="row"><span class="lbl">Domain</span><span class="val">'+esc(data.domain)+'</span></div>'
     +'<div class="row"><span class="lbl">DNS</span><span class="val">'+sdot('d-dot-dns',sh.dns)+esc(dnsLabel(data.dns_provider))+'</span></div>'
     +'<div class="row"><span class="lbl">CA</span><span class="val">'+esc(caLabel(data.acme_server))+'</span></div>'
-    +'<div class="row"><span class="lbl">ClearPass</span><span class="val">'+sdot('d-dot-cppm',sh.cppm)+esc(data.cppm_host)+'</span></div>'
+    +targetRow
     +(data.callback_host
       ?'<div class="row"><span class="lbl">Callback</span><span class="val">'+sdot('d-dot-cb',sh.callback)+'http://'+esc(data.callback_host)+':'+esc(data.callback_port)+'/'+'</span></div>'
       :'')
@@ -4590,6 +5624,7 @@ function renderLog(activity){
 function render(data){
   _statusData=data;
   document.getElementById('hdr-domain').textContent=data.domain||'—';
+  document.getElementById('log-tab-upload').textContent=data.target_type==='linux_ssh'?'Linux Upload':'ClearPass Upload';
   document.getElementById('last-updated').textContent='Updated '+new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   var ecc=(data.certs&&data.certs.ecc)||{exists:false};
   var rsa=(data.certs&&data.certs.rsa)||{exists:false};
@@ -4642,7 +5677,8 @@ async function loadHealth(){
       var ce=document.getElementById('d-dot-cppm');
       var de=document.getElementById('d-dot-dns');
       var cbe=document.getElementById('d-dot-cb');
-      if(ce&&sh.cppm)    applyDot(ce,sh.cppm);
+      var targetCheck=(_statusData&&_statusData.target_type==='linux_ssh')?sh.ssh:sh.cppm;
+      if(ce&&targetCheck) applyDot(ce,targetCheck);
       if(de&&sh.dns)     applyDot(de,sh.dns);
       if(cbe&&sh.callback) applyDot(cbe,sh.callback);
       ok=true;
@@ -4895,7 +5931,7 @@ class Handler(BaseHTTPRequestHandler):
             if flash_ok:
                 html = _base("Sign In", f"""
 <div class="auth-wrap"><div class="auth-card">
-  <div class="auth-logo">ClearPass ACME Certificate Manager</div>
+  <div class="auth-logo">ACME Certificate Manager</div>
   <h1 class="auth-title">Sign In</h1>
   <div class="flash flash-ok">{_esc(flash_ok)}</div>
   <form method="POST" action="/login">
@@ -5017,7 +6053,7 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         import re
                         slug = re.sub(r"[^\w.-]", "_",
-                                       str(srv.get("cppm_host") or srv.get("label") or log_server_id))
+                                       str(server_host(srv) or srv.get("label") or log_server_id))
                         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
                         data = build_log_bundle(srv)
                         return self._serve_bytes(
@@ -5068,7 +6104,12 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/settings/add":
-            return self._serve_html(_settings_form_page(username=username))
+            blank = _default_server_from_env()
+            blank.update(_last_used_acme_defaults())
+            wanted = parse_qs(urlparse(self.path).query).get("target_type", [""])[0]
+            if wanted in TARGET_TYPES:
+                blank["target_type"] = wanted
+            return self._serve_html(_settings_form_page(blank, username=username))
 
         if path.startswith("/settings/edit/"):
             server_id = path[len("/settings/edit/"):].strip("/")
@@ -5077,6 +6118,45 @@ class Handler(BaseHTTPRequestHandler):
                 return self._redirect("/settings?ft=err&fm=Server+not+found")
             return self._serve_html(
                 _settings_form_page(srv, is_edit=True, username=username)
+            )
+
+        if path == "/settings/profiles":
+            qs    = parse_qs(urlparse(self.path).query)
+            ftype = qs.get("ft", [""])[0]
+            fmsg  = qs.get("fm", [""])[0]
+            return self._serve_html(_profile_list_page(username, ftype, fmsg))
+
+        if path == "/settings/profiles/new":
+            return self._serve_html(_profile_form_page("", {}, username=username))
+
+        if path.startswith("/settings/profiles/edit/"):
+            profile_id = path[len("/settings/profiles/edit/"):].strip("/")
+            members = list_profile_members(profile_id)
+            values = members[0] if members else get_profile(profile_id)
+            if not values:
+                return self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
+            return self._serve_html(
+                _profile_form_page(profile_id, values, username=username)
+            )
+
+        if path == "/settings/dns-credentials":
+            qs    = parse_qs(urlparse(self.path).query)
+            ftype = qs.get("ft", [""])[0]
+            fmsg  = qs.get("fm", [""])[0]
+            return self._serve_html(_dns_credential_list_page(username, ftype, fmsg))
+
+        if path == "/settings/dns-credentials/new":
+            return self._serve_html(
+                _dns_credential_form_page("", {}, username=username)
+            )
+
+        if path.startswith("/settings/dns-credentials/edit/"):
+            cred_id = path[len("/settings/dns-credentials/edit/"):].strip("/")
+            credential = get_dns_credential(cred_id)
+            if credential is None:
+                return self._redirect("/settings/dns-credentials?ft=err&fm=DNS+Credential+not+found")
+            return self._serve_html(
+                _dns_credential_form_page(cred_id, credential, username=username)
             )
 
         if path == "/settings/traefik":
@@ -5164,6 +6244,31 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_delete()
         elif path.startswith("/settings/edit/"):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
+        elif path.startswith("/settings/detach/"):
+            self._handle_settings_detach(path[len("/settings/detach/"):].strip("/"))
+        elif path == "/settings/profiles/new":
+            self._handle_profile_create()
+        elif path.startswith("/settings/profiles/") and path.endswith("/delete"):
+            profile_id = path[len("/settings/profiles/"):-len("/delete")].strip("/")
+            self._handle_profile_delete(profile_id)
+        elif path.startswith("/settings/profiles/") and path.endswith("/detach"):
+            profile_id = path[len("/settings/profiles/"):-len("/detach")].strip("/")
+            self._handle_profile_detach(profile_id)
+        elif path.startswith("/settings/profiles/") and path.endswith("/rename"):
+            profile_id = path[len("/settings/profiles/"):-len("/rename")].strip("/")
+            self._handle_profile_rename(profile_id)
+        elif path.startswith("/settings/profiles/edit/"):
+            self._handle_profile_edit(path[len("/settings/profiles/edit/"):].strip("/"))
+        elif path == "/settings/dns-credentials/new":
+            self._handle_dns_credential_add()
+        elif path.startswith("/settings/dns-credentials/") and path.endswith("/delete"):
+            cred_id = path[len("/settings/dns-credentials/"):-len("/delete")].strip("/")
+            self._handle_dns_credential_delete(cred_id)
+        elif path.startswith("/settings/dns-credentials/") and path.endswith("/rename"):
+            cred_id = path[len("/settings/dns-credentials/"):-len("/rename")].strip("/")
+            self._handle_dns_credential_rename(cred_id)
+        elif path.startswith("/settings/dns-credentials/edit/"):
+            self._handle_dns_credential_edit(path[len("/settings/dns-credentials/edit/"):].strip("/"))
         elif path.startswith("/settings/run/"):
             self._handle_settings_run(path[len("/settings/run/"):].strip("/"))
         elif path.startswith("/settings/upload/"):
@@ -5189,6 +6294,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._serve_json({"nodes": nodes})
             except Exception as exc:
                 return self._serve_json({"error": str(exc)}, status=500)
+        elif path == "/api/server/test-ssh":
+            username = self._get_session_user()
+            if not username:
+                return self._serve_json({"error": "Unauthorized"}, status=401)
+            f = self._parse_form()
+            entry = {
+                "ssh_host":        f.get("ssh_host", "").strip(),
+                "ssh_port":        f.get("ssh_port", "22").strip() or "22",
+                "ssh_user":        f.get("ssh_user", "").strip(),
+                "ssh_private_key": f.get("ssh_private_key", ""),
+                "ssh_password":    f.get("ssh_password", ""),
+                "remote_cert_dir": f.get("remote_cert_dir", "").strip(),
+                "reload_command":  f.get("reload_command", "").strip(),
+            }
+            try:
+                import ssh_upload
+                return self._serve_json(ssh_upload.test_ssh_target(entry))
+            except Exception as exc:
+                return self._serve_json({"status": "error", "message": str(exc)[:300]}, status=500)
         elif path.startswith("/settings/notifications/"):
             rest  = path[len("/settings/notifications/"):].strip("/")
             parts = rest.split("/")
@@ -5359,7 +6483,11 @@ class Handler(BaseHTTPRequestHandler):
             server_id = add_server(entry)
             _log.info("settings: '%s' added server '%s'", username, entry.get("label"))
             _spawn_cert_pipeline(server_id, force=True)
-            self._redirect("/settings?ft=ok&fm=Server+added.+Certificate+pipeline+started.")
+            warning = _split_horizon_preflight(entry)
+            msg = "Server+added.+Certificate+pipeline+started."
+            if warning:
+                msg = f"{msg}+Warning:+{_url_enc(warning)}"
+            self._redirect(f"/settings?ft=ok&fm={msg}")
         except Exception as e:
             _log.error("settings: add failed: %s\n%s", e, traceback.format_exc())
             self._serve_html(
@@ -5377,7 +6505,11 @@ class Handler(BaseHTTPRequestHandler):
             if not found:
                 return self._redirect("/settings?ft=err&fm=Server+not+found")
             _log.info("settings: '%s' updated server '%s'", username, entry.get("label"))
-            self._redirect("/settings?ft=ok&fm=Server+updated")
+            warning = _split_horizon_preflight(entry)
+            msg = "Server+updated"
+            if warning:
+                msg = f"{msg}.+Warning:+{_url_enc(warning)}"
+            self._redirect(f"/settings?ft=ok&fm={msg}")
         except Exception as e:
             _log.error("settings: edit '%s' failed: %s\n%s",
                        server_id, e, traceback.format_exc())
@@ -5397,6 +6529,174 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/settings?ft=ok&fm=Server+deleted")
         else:
             self._redirect("/settings?ft=err&fm=Server+not+found")
+
+    def _handle_settings_detach(self, server_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        entry = get_server(server_id)
+        if entry is None:
+            return self._redirect("/settings?ft=err&fm=Server+not+found")
+        entry = dict(entry)
+        entry["certificate_id"] = ""
+        update_server(server_id, entry)
+        _log.info("settings: '%s' detached server '%s' from its certificate profile",
+                  username, entry.get("label"))
+        self._redirect(f"/settings/edit/{server_id}")
+
+    def _handle_profile_create(self):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f = self._parse_form()
+        pid = f.get("certificate_id", "").strip()
+        fields = _parse_identity_fields(f)
+        try:
+            create_profile(pid, fields)
+            _log.info("settings: '%s' created certificate profile '%s'", username, pid)
+            self._redirect(f"/settings/profiles?ft=ok&fm=Profile+{_url_quote(pid)}+created.")
+        except Exception as e:
+            _log.error("settings: profile create '%s' failed: %s\n%s",
+                       pid, e, traceback.format_exc())
+            values = dict(fields)
+            values["certificate_id"] = pid
+            self._serve_html(
+                _profile_form_page("", values, str(e), username=username)
+            )
+
+    def _handle_profile_delete(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        try:
+            if remove_profile(profile_id):
+                _log.info("settings: '%s' deleted certificate profile '%s'", username, profile_id)
+                return self._redirect("/settings/profiles?ft=ok&fm=Profile+deleted.")
+            self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
+        except ValueError as e:
+            self._redirect(f"/settings/profiles?ft=err&fm={_url_quote(str(e))}")
+
+    def _handle_profile_edit(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f      = self._parse_form()
+        fields = _parse_identity_fields(f)
+        try:
+            n = update_certificate_profile(profile_id, fields)
+            _log.info("settings: '%s' updated certificate profile '%s' (%d target(s))",
+                      username, profile_id, n)
+            self._redirect(f"/settings/profiles?ft=ok&fm={n}+target(s)+updated.")
+        except Exception as e:
+            _log.error("settings: profile edit '%s' failed: %s\n%s",
+                       profile_id, e, traceback.format_exc())
+            values = dict(fields)
+            values["certificate_id"] = profile_id
+            self._serve_html(
+                _profile_form_page(profile_id, values, str(e), username=username)
+            )
+
+    def _handle_profile_rename(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f = self._parse_form()
+        new_id = f.get("certificate_id", "").strip()
+        try:
+            n = rename_certificate_profile(profile_id, new_id)
+            _log.info("settings: '%s' renamed certificate profile '%s' -> '%s' (%d target(s))",
+                      username, profile_id, new_id, n)
+            self._redirect(f"/settings/profiles/edit/{new_id or profile_id}?ft=ok&fm={n}+target(s)+renamed.")
+        except Exception as e:
+            _log.error("settings: profile rename '%s' -> '%s' failed: %s\n%s",
+                       profile_id, new_id, e, traceback.format_exc())
+            members = list_profile_members(profile_id)
+            values = dict(members[0] if members else (get_profile(profile_id) or {}))
+            values.setdefault("certificate_id", profile_id)
+            self._serve_html(
+                _profile_form_page(profile_id, values, str(e), username=username)
+            )
+
+    def _handle_profile_detach(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        n = delete_certificate_profile(profile_id)
+        if n:
+            _log.info("settings: '%s' detached %d target(s) from profile '%s'",
+                      username, n, profile_id)
+            self._redirect(f"/settings/profiles?ft=ok&fm={n}+target(s)+detached.")
+        else:
+            self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
+
+    def _handle_dns_credential_add(self):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f       = self._parse_form()
+        cred_id = f.get("dns_credential_id", "").strip()
+        fields  = _parse_dns_credential_fields(f)
+        try:
+            add_dns_credential(cred_id, fields["dns_provider"], fields["dns_credentials"])
+            _log.info("settings: '%s' created DNS credential '%s'", username, cred_id)
+            self._redirect(f"/settings/dns-credentials/edit/{cred_id}?ft=ok&fm=DNS+Credential+created.")
+        except Exception as e:
+            _log.error("settings: DNS credential add '%s' failed: %s\n%s",
+                       cred_id, e, traceback.format_exc())
+            self._serve_html(
+                _dns_credential_form_page(cred_id, fields, str(e), username=username)
+            )
+
+    def _handle_dns_credential_edit(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f      = self._parse_form()
+        fields = _parse_dns_credential_fields(f)
+        try:
+            update_dns_credential(cred_id, fields)
+            n = len(dns_credential_owner_ids(cred_id))
+            _log.info("settings: '%s' updated DNS credential '%s' (%d profile(s))",
+                      username, cred_id, n)
+            self._redirect(f"/settings/dns-credentials?ft=ok&fm=DNS+Credential+updated.")
+        except Exception as e:
+            _log.error("settings: DNS credential edit '%s' failed: %s\n%s",
+                       cred_id, e, traceback.format_exc())
+            self._serve_html(
+                _dns_credential_form_page(cred_id, fields, str(e), username=username)
+            )
+
+    def _handle_dns_credential_rename(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f      = self._parse_form()
+        new_id = f.get("new_id", "").strip()
+        try:
+            rename_dns_credential(cred_id, new_id)
+            _log.info("settings: '%s' renamed DNS credential '%s' -> '%s'",
+                      username, cred_id, new_id)
+            self._redirect(f"/settings/dns-credentials/edit/{new_id or cred_id}?ft=ok&fm=DNS+Credential+renamed.")
+        except Exception as e:
+            _log.error("settings: DNS credential rename '%s' -> '%s' failed: %s\n%s",
+                       cred_id, new_id, e, traceback.format_exc())
+            credential = get_dns_credential(cred_id) or {}
+            self._serve_html(
+                _dns_credential_form_page(cred_id, credential, str(e), username=username)
+            )
+
+    def _handle_dns_credential_delete(self, cred_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        existed = get_dns_credential(cred_id) is not None
+        n = delete_dns_credential(cred_id)
+        if existed:
+            _log.info("settings: '%s' deleted DNS credential '%s' (%d profile(s) detached)",
+                      username, cred_id, n)
+            self._redirect(f"/settings/dns-credentials?ft=ok&fm=DNS+Credential+deleted.")
+        else:
+            self._redirect("/settings/dns-credentials?ft=err&fm=DNS+Credential+not+found")
 
     def _handle_settings_run(self, server_id: str):
         username = self._get_session_user()

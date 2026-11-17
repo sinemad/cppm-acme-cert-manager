@@ -55,8 +55,60 @@ if output:
     print(output)
 " 2>/dev/null) || true
         [[ -z "$member_env" ]] && continue
-        ( eval "$member_env"; /opt/cppm/deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
+        ( eval "$member_env"; /opt/cppm/clearpass_deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
             err "Upload failed for target ${member_id} – check target upload log"
+    done
+}
+
+# Forces an immediate, unconditional trust-list check on every ClearPass target
+# sharing this certificate profile, regardless of each target's configured
+# upload flags (UPLOAD_HTTPS_RSA/UPLOAD_RADIUS/UPLOAD_RADSEC) -- those flags
+# only control which *services* get the new cert, and can leave an issued
+# key type's CA chain out of clearpass_deploy_hook.sh's normal upload entirely. Without
+# this, a chain-drift warning on such a target would wait for the next
+# Sunday trust_check.sh run instead of being caught right away.
+run_trust_check_for_members() {
+    local profile_id="$1"
+    local member_ids
+    member_ids=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import certificate_members
+for s in certificate_members('${profile_id}'):
+    if s.get('id'):
+        print(s['id'])
+" 2>/dev/null || true)
+    for member_id in $member_ids; do
+        local member_env
+        member_env=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import get_server_shell_env
+output = get_server_shell_env('${member_id}')
+if output:
+    print(output)
+" 2>/dev/null) || true
+        [[ -z "$member_env" ]] && continue
+        (
+            eval "$member_env"
+            DOMAIN_FILE="$(cert_file_stem "$DOMAIN")"
+            CERT_DIR="${SERVER_CERT_DIR:-/data/certs}"
+            TRUST_ARGS=(--only-trust-check)
+            [[ "${CONSUME_ECC:-${ISSUE_ECC:-true}}" == "true" ]] && TRUST_ARGS+=(
+                --https-ecc-cert  "${CERT_DIR}/${DOMAIN_FILE}.ecc.cer"
+                --https-ecc-key   "${CERT_DIR}/${DOMAIN_FILE}.ecc.key"
+                --https-fullchain "${CERT_DIR}/${DOMAIN_FILE}.ecc.fullchain.cer"
+                --https-ca        "${CERT_DIR}/${DOMAIN_FILE}.ecc.ca.cer"
+            )
+            [[ "${CONSUME_RSA:-${ISSUE_RSA:-true}}" == "true" ]] && TRUST_ARGS+=(
+                --radius-cert      "${CERT_DIR}/${DOMAIN_FILE}.rsa.cer"
+                --radius-key       "${CERT_DIR}/${DOMAIN_FILE}.rsa.key"
+                --radius-fullchain "${CERT_DIR}/${DOMAIN_FILE}.rsa.fullchain.cer"
+                --radius-ca        "${CERT_DIR}/${DOMAIN_FILE}.rsa.ca.cer"
+            )
+            python3 /opt/cppm/clearpass_upload.py "${TRUST_ARGS[@]}"
+        ) 2>&1 | tee -a "$LOG" || \
+            err "Immediate trust check failed for target ${member_id} – check target upload log"
     done
 }
 
@@ -89,8 +141,6 @@ if output:
         letsencrypt)      ACME_CA_LABEL="Let's Encrypt" ;;
         letsencrypt_test) ACME_CA_LABEL="Let's Encrypt (Staging)" ;;
         zerossl)          ACME_CA_LABEL="ZeroSSL" ;;
-        buypass)          ACME_CA_LABEL="Buypass" ;;
-        buypass_test)     ACME_CA_LABEL="Buypass (Staging)" ;;
         http*)            ACME_CA_LABEL="Custom CA (${ACME_CA_LABEL})" ;;
     esac
 
@@ -290,12 +340,17 @@ except Exception:
     python3 /opt/cppm/acme_cli.py renew 2>&1 | tee -a "$LOG" 2>/dev/null || RENEW_EXIT=$?
 
     case $RENEW_EXIT in
-        0)
+        0|3)
             log "Certificate(s) renewed for ${DOMAIN}."
             status_write "OK" "RENEW" "Certificate renewed for ${DOMAIN} – running install and upload"
             SKIP_UPLOAD=true /opt/cppm/install_cert.sh 2>&1 | tee -a "$LOG" 2>/dev/null || \
                 err "install_cert.sh failed for ${DOMAIN}"
             upload_profile_targets "${CERTIFICATE_ID}"
+            if [[ "$RENEW_EXIT" -eq 3 ]]; then
+                log "Chain drift detected for ${DOMAIN} – forcing immediate trust-list check for all profile targets."
+                status_write "INFO" "RENEW" "Chain drift detected for ${DOMAIN} – running immediate trust-list check"
+                run_trust_check_for_members "${CERTIFICATE_ID}"
+            fi
             ;;
         2)
             log "Certificate for ${DOMAIN} not due for renewal."

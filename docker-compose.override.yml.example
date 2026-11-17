@@ -1,7 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.override.yml.example
 #
-# Local configuration overrides for ClearPass ACME Certificate Manager.
+# Local configuration overrides for the ACME Certificate Manager.
+#
+# Sections marked [ClearPass only] can be ignored if you deploy only to Linux
+# servers over SSH. Sections marked [Internal hostnames] matter for either
+# target type when it is addressed by a private/internal hostname.
 #
 # SETUP:
 #   cp docker-compose.override.yml.example docker-compose.override.yml
@@ -18,7 +22,7 @@
 services:
   cppm-acme-cert-manager:
 
-    # ── DNS resolvers ────────────────────────────────────────────────────────
+    # ── DNS resolvers  [Internal hostnames] ──────────────────────────────────
     # Controls which DNS server(s) the container uses to resolve hostnames.
     #
     # The default in docker-compose.yml points at public resolvers (1.1.1.1,
@@ -60,7 +64,7 @@ services:
     #   - 192.168.1.53      # your internal DNS server (resolves cppm.corp.example.com)
     #   - 1.1.1.1           # public resolver for ACME CA / DNS provider API lookups — required, not optional, unless 192.168.1.53 already forwards public queries
 
-    # ── Static host entries (extra_hosts) ───────────────────────────────────
+    # ── Static host entries (extra_hosts)  [Internal hostnames] ─────────────
     # Pins a hostname to a specific IP inside the container's /etc/hosts,
     # bypassing DNS entirely for that name. Use this instead of (or alongside)
     # the dns: block above when:
@@ -68,9 +72,9 @@ services:
     #   - the ClearPass hostname is only resolvable from certain networks, or
     #   - you want certainty that this one name never depends on DNS being up.
     #
-    # Add one entry per hostname your ClearPass server(s) use. This must match
-    # exactly what you entered as "ClearPass Host" in the web UI (Servers →
-    # Edit). For a cluster, add an entry for every node hostname too — the
+    # Add one entry per hostname your servers use. This must match exactly what
+    # you entered as "ClearPass Host" (or "SSH Host" for a Linux server) in the
+    # web UI (Servers → Edit). For a cluster, add an entry for every node hostname too — the
     # cluster health check resolves each node independently.
     #
     # Default: none (not set in docker-compose.yml)
@@ -145,7 +149,7 @@ services:
       # Default: 8
       # SESSION_LIFETIME_HOURS: "24"
 
-      # ── PKCS12 callback port ──────────────────────────────────────────────────
+      # ── PKCS12 callback port  [ClearPass only] ────────────────────────────────
       # !! If you change this, you MUST also update the ports section below !!
       # Port used by the temporary HTTP server that delivers the PKCS12 to
       # ClearPass during certificate upload. ClearPass connects to:
@@ -170,7 +174,7 @@ services:
       # Default: INFO
       # LOG_LEVEL: DEBUG
 
-      # ── Bearer token cache (cluster/status checks) ────────────────────────────
+      # ── Bearer token cache (cluster/status checks)  [ClearPass only] ──────────
       # How long (seconds) a ClearPass OAuth2 bearer token is cached and reused
       # across the status dashboard, the "Check nodes" button, and per-node
       # cluster retries, before a new one is minted.

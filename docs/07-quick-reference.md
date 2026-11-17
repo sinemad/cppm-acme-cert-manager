@@ -143,7 +143,7 @@ docker compose up -d
 docker compose up -d --force-recreate
 
 # Re-upload cert to CPPM (certs unchanged)
-docker exec -it cppm-acme-cert-manager /opt/cppm/deploy_hook.sh
+docker exec -it cppm-acme-cert-manager /opt/cppm/clearpass_deploy_hook.sh
 
 # Install flat files from Lego state (no re-issue)
 docker exec -it cppm-acme-cert-manager /opt/cppm/install_cert.sh
@@ -161,7 +161,7 @@ docker exec -it cppm-acme-cert-manager cat /etc/crontabs/root
 
 # List certs known to Lego (replace hostname/path as needed)
 docker exec -it cppm-acme-cert-manager \
-    lego --path /data/certs/cppm.example.com/lego-ecc list
+    lego certificates list --path /data/certs/cppm.example.com/lego-ecc
 
 # Shell into container
 docker exec -it cppm-acme-cert-manager bash
@@ -259,5 +259,5 @@ docker exec -it cppm-acme-cert-manager sh -c '
 
 # List Lego cert state (replace hostname as needed)
 docker exec -it cppm-acme-cert-manager \
-    lego --path /data/certs/cppm.example.com/lego-ecc list
+    lego certificates list --path /data/certs/cppm.example.com/lego-ecc
 ```

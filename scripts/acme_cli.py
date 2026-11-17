@@ -17,6 +17,8 @@ Environment variables (exported by entrypoint.sh via get_server_shell_env):
 Exit codes:
     0  Action taken (cert issued, renewed, installed, or revoked)
     2  No action needed (cert not due for renewal)
+    3  Renewed, and chain drift detected (renew only; treat like 0 plus an
+       immediate trust-list check)
     1  Error
 """
 from __future__ import annotations
@@ -103,8 +105,6 @@ def _ca_label(acme_server: str) -> str:
         "letsencrypt":      "Let's Encrypt",
         "letsencrypt_test": "Let's Encrypt (Staging)",
         "zerossl":          "ZeroSSL",
-        "buypass":          "Buypass",
-        "buypass_test":     "Buypass (Staging)",
     }
     if acme_server in _KNOWN:
         return _KNOWN[acme_server]
@@ -177,6 +177,9 @@ def cmd_renew(_args: argparse.Namespace) -> None:
         )
         if result.newly_issued:
             log.info("Certificate(s) renewed for %s", domain)
+            if result.chain_drift_detected:
+                log.warning("Chain drift detected for %s – signaling for immediate trust-list check", domain)
+                sys.exit(3)
             sys.exit(0)
         else:
             log.info("Certificate not due for renewal for %s", domain)
@@ -226,6 +229,18 @@ def cmd_revoke(_args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_migrate(_args: argparse.Namespace) -> None:
+    cert_dir = _require("SERVER_CERT_DIR")
+    key_types = _key_types()
+
+    provider = get_provider("lego")
+    try:
+        provider.migrate_legacy_storage(cert_dir=cert_dir, key_types=key_types)
+    except AcmeError as exc:
+        log.error("Migrate failed for %s: %s", cert_dir, exc)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ACME certificate CLI (Lego)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +260,11 @@ def main() -> None:
 
     p_revoke = sub.add_parser("revoke", help="Revoke issued certificates")
     p_revoke.set_defaults(func=cmd_revoke)
+
+    p_migrate = sub.add_parser(
+        "migrate", help="Convert legacy account storage to the current layout (local-only, no-op if current)"
+    )
+    p_migrate.set_defaults(func=cmd_migrate)
 
     args = parser.parse_args()
     args.func(args)

@@ -44,9 +44,26 @@ err()  { echo "[$(ts)] [ERROR] $*" | tee -a "$LOG" >&2; }
 die()  { err "$*"; status_write "FAILED" "STARTUP" "$*"; exit 1; }
 
 LEGO_VER=$("$LEGO_BIN" --version 2>&1 | head -1 || echo "lego (version unknown)")
-log "=== ClearPass Certificate Manager v2.0 ==="
+APP_VERSION=$(cat /opt/cppm/VERSION 2>/dev/null || echo "unknown")
+log "=== ACME Certificate Manager v${APP_VERSION} ==="
 log "lego    : $LEGO_VER"
 status_write "INFO" "STARTUP" "Container started – lego=${LEGO_VER}"
+
+# Warn (don't block) if the installed lego binary has drifted from the
+# version LegoProvider's CLI flags were last verified against — catches a
+# Dockerfile LEGO_VERSION bump that wasn't paired with a code review.
+LEGO_COMPAT_WARNING=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from lego_provider import lego_version_warning
+msg = lego_version_warning()
+if msg:
+    print(msg)
+" 2>/dev/null) || true
+if [[ -n "$LEGO_COMPAT_WARNING" ]]; then
+    warn "$LEGO_COMPAT_WARNING"
+    status_write "WARN" "STARTUP" "$LEGO_COMPAT_WARNING"
+fi
 
 # ── Migrate .env → servers.json (backwards compatibility) ─────────────────────
 log "Checking server configuration..."
@@ -60,6 +77,39 @@ if result:
 " 2>&1) || true
 if [[ -n "$MIGRATE_MSG" ]]; then
     log "  Migrated .env configuration to servers.json: $MIGRATE_MSG"
+fi
+
+# ── Backfill certificate_id on entries that predate it being required ─────────
+BACKFILL_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import backfill_certificate_ids
+print(backfill_certificate_ids())
+" 2>/dev/null || echo "0")
+if [[ "$BACKFILL_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Assigned certificate profile IDs to $BACKFILL_COUNT existing server(s)."
+fi
+
+# ── Extract embedded DNS credentials into the reusable DNS Credential store ──
+DNS_CRED_MIGRATE_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import migrate_dns_credentials_from_servers
+print(migrate_dns_credentials_from_servers())
+" 2>/dev/null || echo "0")
+if [[ "$DNS_CRED_MIGRATE_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Extracted DNS credentials into dns_credentials.json for $DNS_CRED_MIGRATE_COUNT existing server(s)."
+fi
+
+# ── Split shared ACME/DNS fields out into profiles.json ──────────────────────
+PROFILE_MIGRATE_COUNT=$(python3 -c "
+import sys
+sys.path.insert(0, '/opt/cppm')
+from config_utils import migrate_profiles_from_servers
+print(migrate_profiles_from_servers())
+" 2>/dev/null || echo "0")
+if [[ "$PROFILE_MIGRATE_COUNT" -gt 0 ]] 2>/dev/null; then
+    log "  Moved shared ACME/DNS settings of $PROFILE_MIGRATE_COUNT certificate profile(s) into profiles.json (backup: servers.json.pre-profiles)."
 fi
 
 # ── Load server IDs from servers.json ─────────────────────────────────────────
@@ -148,7 +198,7 @@ if output:
 " 2>/dev/null) || true
         [[ -z "$member_env" ]] && continue
         log "  Uploading shared certificate profile ${profile_id} to target ${member_id}..."
-        ( eval "$member_env"; export CPPM_UPLOAD_TRIGGER="${CPPM_UPLOAD_TRIGGER:-}"; /opt/cppm/deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
+        ( eval "$member_env"; export CPPM_UPLOAD_TRIGGER="${CPPM_UPLOAD_TRIGGER:-}"; /opt/cppm/clearpass_deploy_hook.sh ) 2>&1 | tee -a "$LOG" || \
             err "Upload failed for target ${member_id} – check target upload log"
     done
 }
@@ -190,9 +240,6 @@ if output:
             [[ -f "${CERT_DIR}/${DOMAIN}.${ext}" ]] \
                 && mv "${CERT_DIR}/${DOMAIN}.${ext}" "${SERVER_CERT_DIR}/" || true
         done
-        # Move acme.sh state dirs so the per-server cleanup below can remove them
-        [[ -d "${CERT_DIR}/${DOMAIN}" ]]     && mv "${CERT_DIR}/${DOMAIN}"     "${SERVER_CERT_DIR}/" || true
-        [[ -d "${CERT_DIR}/${DOMAIN}_ecc" ]] && mv "${CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/" || true
         # Seed per-server logs from global copies (status.log must be copied
         # before status_server_init creates a new empty one)
         [[ -f "${CERT_DIR}/status.log" ]] \
@@ -275,18 +322,15 @@ if output:
     [[ "$NEED_ECC" == "true" && ! -f "$LEGO_ECC_CERT" ]] && LEGO_STATE_OK=false
     [[ "$NEED_RSA" == "true" && ! -f "$LEGO_RSA_CERT" ]] && LEGO_STATE_OK=false
 
-    # ── Remove legacy acme.sh per-cert state dirs (one-time, post-upgrade) ───────
-    # Guard: only run when certs are already present (flat or Lego state) so this
-    # never fires on a first-run container that hasn't issued any certs yet.
-    if [[ "$FLAT_OK" == "true" || "$LEGO_STATE_OK" == "true" ]]; then
-        for legacy_dir in "${SERVER_CERT_DIR}/${DOMAIN}_ecc" "${SERVER_CERT_DIR}/${DOMAIN}"; do
-            if [[ -d "$legacy_dir" ]]; then
-                rm -rf "$legacy_dir"
-                log "  Removed legacy acme.sh state: ${legacy_dir}"
-                status_write "INFO" "STARTUP" "Removed legacy acme.sh state dir: ${legacy_dir}"
-            fi
-        done
-    fi
+    # ── Migrate legacy ACME account storage (one-time, per server) ────────────
+    # Local-only (no ACME network call) and a no-op once storage is current, so
+    # this runs unconditionally on every start rather than waiting for the next
+    # scheduled renew to pick up a storage-layout change after an upgrade.
+    # Written to the per-server acme_renewal.log (not $LOG/startup.log) to match
+    # where issue_cert.sh/renew.sh log their own acme_cli.py calls.
+    SERVER_ACME_LOG="${SERVER_CERT_DIR}/logs/acme_renewal.log"
+    python3 /opt/cppm/acme_cli.py migrate 2>&1 | tee -a "$SERVER_ACME_LOG" || \
+        err "Legacy storage migration check failed for ${DOMAIN} – check ${SERVER_ACME_LOG}"
 
     # Primary cert for expiry reporting (ECC preferred, else RSA)
     PRIMARY_FLAT="$FLAT_ECC"
@@ -337,14 +381,6 @@ except Exception:
         CPPM_UPLOAD_TRIGGER=restart upload_profile_targets "${CERTIFICATE_ID}"
     fi
 done
-
-# ── Remove legacy acme.sh shared state directory (one-time, post-upgrade) ────
-ACME_LEGACY_SHARED="${CERT_DIR}/.acme-state"
-if [[ -d "$ACME_LEGACY_SHARED" ]]; then
-    rm -rf "$ACME_LEGACY_SHARED"
-    log "Removed legacy acme.sh shared state: ${ACME_LEGACY_SHARED}"
-    status_write "INFO" "STARTUP" "Removed legacy acme.sh shared state dir"
-fi
 
 # Restore global STATUS_LOG so post-loop container-level messages go to the
 # right place regardless of how many servers were processed.

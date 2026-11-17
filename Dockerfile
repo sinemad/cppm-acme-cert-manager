@@ -1,8 +1,8 @@
 FROM alpine:3.24
 
 ARG VERSION=2.0.0
-LABEL org.opencontainers.image.title="ClearPass ACME Certificate Manager" \
-      org.opencontainers.image.description="Automated TLS certificate management for Aruba ClearPass Policy Manager via Lego DNS-01" \
+LABEL org.opencontainers.image.title="ACME Certificate Manager" \
+      org.opencontainers.image.description="Automated ACME (Lego DNS-01) certificate management for Aruba ClearPass Policy Manager and Linux services over SSH" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       maintainer="Network Engineering"
@@ -12,6 +12,8 @@ RUN apk add --no-cache \
     bash \
     curl \
     openssl \
+    openssh-client \
+    sshpass \
     python3 \
     py3-pip \
     py3-cryptography \
@@ -50,7 +52,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # ── Install Lego ──────────────────────────────────────────────────────────────
 # Single static binary — no git, no shell patching, no seed directory needed.
 # Check latest releases: https://github.com/go-acme/lego/releases
-ENV LEGO_VERSION=4.19.0
+ENV LEGO_VERSION=5.6.0
 RUN set -e \
     && curl -fsSL \
        "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz" \
