@@ -30,7 +30,8 @@ already there.
 ## Adding a target
 
 In the web UI, **Add Server** → set **Target Type** to **Linux Server
-(SSH)**. The CLI (`cppm-servers add`) offers the same choice.
+(SSH)**. The CLI (`cppm-servers add`) offers the same choice, and
+prompts for the Key Type (ECC, RSA or Both) when you add or edit a Linux server.
 
 ![Add Linux server form](ui-server-form-linux.png)
 

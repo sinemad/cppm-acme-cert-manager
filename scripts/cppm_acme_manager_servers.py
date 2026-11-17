@@ -64,6 +64,7 @@ try:
         get_dns_credential,
         get_server,
         get_server_shell_env,
+        linux_key_type,
         list_certificate_profiles,
         list_dns_credentials,
         list_profile_members,
@@ -302,9 +303,18 @@ def _collect_ssh_server(s: dict) -> dict:
     if not tc.get("ssh_private_key") and not tc.get("ssh_password"):
         print("  Either a private key or a password is required.")
         return _collect_ssh_server(s)
+    tc["ssh_key_type"] = _prompt_choice(
+        "Key Type (which certificate this server receives)",
+        {
+            "ecc": "ECC  (fullchain.pem / privkey.pem)",
+            "rsa": "RSA  (fullchain.pem / privkey.pem)",
+            "both": "Both ECC and RSA  (fullchain.ecc.pem, privkey.ecc.pem, fullchain.rsa.pem, privkey.rsa.pem)",
+        },
+        default=linux_key_type({"ssh_key_type": tc.get("ssh_key_type", "")}),
+    )
     tc["remote_cert_dir"] = _prompt("Remote Cert Directory", tc.get("remote_cert_dir", ""),
                                     required=True,
-                                    hint="e.g. /opt/acme-deploy/certs — holds fullchain.pem/privkey.pem")
+                                    hint="e.g. /opt/acme-deploy/certs — holds the certificate and key files")
     tc["reload_command"] = _prompt("Reload Command", tc.get("reload_command", ""),
                                    hint="e.g. sudo systemctl reload nginx — optional")
     s["target_config"] = tc
@@ -541,6 +551,7 @@ def cmd_show(server_id: str) -> int:
         print(f"  SSH User:         {s.get('ssh_user', '')}")
         print(f"  Private Key:      {'(set)' if s.get('ssh_private_key') else '(empty)'}")
         print(f"  Password:         {'(set)' if s.get('ssh_password') else '(empty)'}")
+        print(f"  Key Type:         {linux_key_type(s).upper()}")
         print(f"  Remote Cert Dir:  {s.get('remote_cert_dir', '')}")
         print(f"  Reload Command:   {s.get('reload_command', '')}")
     else:
