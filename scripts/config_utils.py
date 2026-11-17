@@ -447,9 +447,14 @@ _SHARED_PROFILE_FIELDS = (
 # that reads or edits entries through config_utils therefore keeps seeing the
 # same flat entries it always did.
 #
-# A profile exists while at least one server references it. TODO(profiles-B):
-# once the UI can create standalone profiles, stop pruning member-less
-# profiles in _split_profiles() and have issuance skip them.
+# Two kinds of profile live in the store. One created explicitly
+# (create_profile) carries "explicit": true and persists with no members. One
+# defined implicitly by the first server that names a new certificate_id has no
+# flag and is dropped when its last member goes. The store is the source of
+# truth: stored profiles change only through update_certificate_profile (or a
+# sole member's own edit, see update_server), never as a side effect of saving
+# some other entry. Issuance is driven by servers (certificate_owner_ids), so a
+# member-less profile never issues anything.
 
 def _profiles_file() -> Path:
     # Resolved at call time so tests (and SERVERS_FILE overrides) redirect it.
@@ -493,16 +498,18 @@ def _hydrate(entry: dict, profiles: dict) -> dict:
     return merged
 
 
-def _split_profiles(servers: list) -> tuple:
+def _split_profiles(servers: list, writethrough: tuple = ()) -> tuple:
     """Pure inverse of hydration: return (entries without shared fields, profiles).
 
-    - A profile already in the store is updated from any member whose shared
-      value differs (that is an edit made through that entry).
-    - A profile not yet stored is defined by its first member. Later members
-      that disagree are ignored (only the first member's values were ever used
-      to issue the certificate) and a warning names the fields.
+    - A profile already in the store is NOT changed by the entries that name it
+      (the store wins), except for pids listed in writethrough, which take the
+      shared values from their members (a sole member editing its own profile).
+    - A profile not yet stored is defined by its first member that carries a
+      domain. Later members that disagree are ignored (only the first member's
+      values were ever used to issue the certificate) and a warning names the
+      fields.
     - Entries with no certificate_id keep their shared fields inline.
-    - Profiles with no member are dropped (see the TODO above).
+    - Implicit profiles with no member are dropped; explicit ones are kept.
     """
     stored = load_profiles()
     profiles = {pid: {k: _copy_value(v) for k, v in p.items()}
@@ -517,10 +524,11 @@ def _split_profiles(servers: list) -> tuple:
         used.add(pid)
         shared = {k: _copy_value(entry[k]) for k in _SHARED_PROFILE_FIELDS if k in entry}
         if pid not in profiles:
-            profiles[pid] = shared
-        elif pid in stored:
+            if str(shared.get("domain", "")).strip():
+                profiles[pid] = shared
+        elif pid in writethrough:
             profiles[pid].update(shared)
-        else:
+        elif pid not in stored:
             differing = [k for k, v in shared.items() if profiles[pid].get(k) != v]
             if differing:
                 import logging
@@ -529,7 +537,8 @@ def _split_profiles(servers: list) -> tuple:
                     "using the first member's values.",
                     pid, entry.get("label") or entry.get("id"), ", ".join(differing))
         out.append({k: v for k, v in entry.items() if k not in _SHARED_PROFILE_FIELDS})
-    return out, {pid: p for pid, p in profiles.items() if pid in used}
+    return out, {pid: p for pid, p in profiles.items()
+                 if pid in used or p.get("explicit")}
 
 
 @_locked
@@ -561,29 +570,22 @@ def migrate_profiles_from_servers() -> int:
     return len(set(profiles) - set(old_profiles))
 
 
-def _inherit_certificate_profile(entry: dict, exclude_id: str = None) -> dict:
-    """Fill shared ACME fields from an existing explicit certificate profile."""
-    profile_id = str(entry.get("certificate_id", "")).strip()
-    if not profile_id:
-        return entry
-    for existing in load_servers():
-        if existing.get("id") == exclude_id:
-            continue
-        if str(existing.get("certificate_id", "")).strip() != profile_id:
-            continue
-        merged = dict(entry)
-        for field in _SHARED_PROFILE_FIELDS:
-            if field in existing:
-                value = existing[field]
-                merged[field] = list(value) if isinstance(value, list) else value
-        return merged
-    return entry
+def server_profile_error(entry: dict) -> str:
+    """Non-empty message when entry names a profile that is not in the store
+    and carries no ACME/DNS values of its own (e.g. profiles.json was lost)."""
+    pid = str(entry.get("certificate_id", "")).strip()
+    if pid and pid not in load_profiles() and not str(entry.get("domain", "")).strip():
+        return f"Certificate profile '{pid}' is missing (no profile data found)."
+    return ""
 
 
 @_locked
 def add_server(entry: dict) -> str:
-    """Validate, check for duplicate host, and append. Returns the assigned server ID."""
-    entry = _inherit_certificate_profile(dict(entry))
+    """Validate, check for duplicate host, and append. Returns the assigned server ID.
+
+    If the entry names a stored profile, the profile's shared fields win over
+    whatever the entry carries; otherwise the entry defines a new profile."""
+    entry = _hydrate(dict(entry), load_profiles())
     validate_server(entry)
     _check_duplicate_host(entry)
     entry = dict(entry)
@@ -596,17 +598,32 @@ def add_server(entry: dict) -> str:
 
 @_locked
 def update_server(server_id: str, entry: dict) -> bool:
-    """Replace the existing entry with the given ID. Returns True if found."""
-    entry = _inherit_certificate_profile(dict(entry), exclude_id=server_id)
+    """Replace the existing entry with the given ID. Returns True if found.
+
+    A stored profile wins over the entry's shared fields, except when this
+    server is already its only member, in which case the typed values update
+    the profile (there is nobody else to surprise)."""
+    servers = load_servers()
+    old = next((s for s in servers if s.get("id") == server_id), None)
+    pid = str(entry.get("certificate_id", "")).strip()
+    entry = dict(entry)
+    writethrough: tuple = ()
+    profiles = load_profiles()
+    if pid and pid in profiles:
+        others = [s for s in servers if s.get("id") != server_id
+                  and str(s.get("certificate_id", "")).strip() == pid]
+        if old is not None and str(old.get("certificate_id", "")).strip() == pid \
+                and not others:
+            writethrough = (pid,)
+        else:
+            entry = _hydrate(entry, profiles)
     validate_server(entry)
     _check_duplicate_host(entry, exclude_id=server_id)
-    servers = load_servers()
     for i, s in enumerate(servers):
         if s.get("id") == server_id:
-            entry = dict(entry)
             entry["id"] = server_id
             servers[i] = entry
-            _write(servers)
+            _write(servers, writethrough)
             return True
     return False
 
@@ -622,7 +639,8 @@ def delete_server(server_id: str) -> bool:
         _write(filtered)
     else:
         SERVERS_FILE.unlink(missing_ok=True)
-        _write_profiles({})
+        _write_profiles({pid: p for pid, p in load_profiles().items()
+                         if isinstance(p, dict) and p.get("explicit")})
     return True
 
 
@@ -761,29 +779,42 @@ def backfill_certificate_ids() -> int:
 
 
 def list_certificate_profiles() -> list[dict]:
-    """Return one representative server entry per distinct *explicit* certificate
-    profile ID (the value typed into the Certificate Profile ID field — this is
-    what _inherit_certificate_profile matches on, not the host-based fallback).
+    """Return one representative entry per certificate profile.
 
-    Entries are resolved (target_config flattened) so callers can read a
-    profile's host/label the same way regardless of target_type."""
-    profiles: list[dict] = []
-    seen: set[str] = set()
+    A profile with members is represented by its first member (resolved, so
+    host/label read the same for every target_type). A stored profile without
+    members is represented by {"certificate_id", shared fields...} — it has no
+    label or host. Profiles come from the store first, then any pid that only
+    servers mention."""
+    by_pid: dict = {}
     for server in load_servers():
-        profile_id = str(server.get("certificate_id", "")).strip()
-        if not profile_id or profile_id in seen:
-            continue
-        seen.add(profile_id)
-        profiles.append(_resolve_target_fields(server))
-    return profiles
+        pid = str(server.get("certificate_id", "")).strip()
+        if pid and pid not in by_pid:
+            by_pid[pid] = _resolve_target_fields(server)
+    out: list = []
+    for pid, shared in load_profiles().items():
+        if pid in by_pid:
+            out.append(by_pid.pop(pid))
+        elif isinstance(shared, dict):
+            out.append({"certificate_id": pid,
+                        **{k: _copy_value(v) for k, v in shared.items()
+                           if k in _SHARED_PROFILE_FIELDS}})
+    out.extend(by_pid.values())
+    return out
+
+
+def get_profile(profile_id: str) -> Optional[dict]:
+    """Shared fields of a stored profile (plus certificate_id), or None."""
+    pid = str(profile_id).strip()
+    shared = load_profiles().get(pid)
+    if not isinstance(shared, dict):
+        return None
+    return {"certificate_id": pid,
+            **{k: _copy_value(v) for k, v in shared.items() if k in _SHARED_PROFILE_FIELDS}}
 
 
 def list_profile_members(profile_id: str) -> list[dict]:
-    """Return every (resolved) entry whose explicit certificate_id matches.
-
-    Same matching rule as _inherit_certificate_profile — the typed-in
-    certificate_id field, not the host-based fallback certificate_members()
-    uses for cert-directory/trust-sync purposes."""
+    """Return every (resolved) entry whose explicit certificate_id matches."""
     profile_id = str(profile_id).strip()
     if not profile_id:
         return []
@@ -793,34 +824,108 @@ def list_profile_members(profile_id: str) -> list[dict]:
     ]
 
 
+def _validate_profile_fields(shared: dict) -> None:
+    """Shape check for a profile on its own (no target): domain + ACME/DNS."""
+    if not str(shared.get("domain", "")).strip():
+        raise ValueError(f"{_FIELD_LABELS.get('domain', 'Domain')} is required.")
+    problems = le_dns_problems(shared)
+    if problems:
+        raise ValueError(" ".join(problems))
+    try:
+        acme_dns_resolvers(shared)
+    except ValueError as exc:
+        raise ValueError(f"Split-horizon DNS resolvers: {exc}.") from None
+
+
+def _check_profile_id(pid: str) -> str:
+    pid = str(pid).strip()
+    if not pid:
+        raise ValueError("Certificate Profile ID is required.")
+    if not _ID_PATTERN.fullmatch(pid):
+        raise ValueError(
+            "Certificate Profile ID may only contain letters, numbers, '.', '_', and '-'."
+        )
+    return pid
+
+
+@_locked
+def create_profile(profile_id: str, fields: dict) -> str:
+    """Create a standalone (explicit) profile with no members. Create-only:
+    raises ValueError if the ID, or its certificate directory name, is taken
+    by an existing profile or server reference."""
+    pid = _check_profile_id(profile_id)
+    taken = set(load_profiles()) | {
+        str(s.get("certificate_id", "")).strip() for s in load_servers()}
+    taken.discard("")
+    if pid in taken:
+        raise ValueError(f"Certificate profile '{pid}' already exists.")
+    slug = _slugify_certificate_id(pid)
+    if slug in {_slugify_certificate_id(t) for t in taken}:
+        raise ValueError(
+            f"'{pid}' resolves to the same certificate directory as an existing profile.")
+    shared = {k: _copy_value(fields[k]) for k in _SHARED_PROFILE_FIELDS if k in fields}
+    _validate_profile_fields(shared)
+    profiles = load_profiles()
+    profiles[pid] = {**shared, "explicit": True}
+    _write_profiles(profiles)
+    return pid
+
+
+@_locked
+def remove_profile(profile_id: str) -> bool:
+    """Delete a profile that has no members. Returns False if it doesn't exist.
+    Raises ValueError while servers still use it (detach them first). The
+    certificate directory on disk is left alone."""
+    pid = str(profile_id).strip()
+    profiles = load_profiles()
+    if pid not in profiles:
+        return False
+    n = len(list_profile_members(pid))
+    if n:
+        raise ValueError(
+            f"Profile '{pid}' is still used by {n} target(s); detach or remove them first.")
+    del profiles[pid]
+    _write_profiles(profiles)
+    return True
+
+
 @_locked
 def update_certificate_profile(profile_id: str, fields: dict) -> int:
-    """Apply shared ACME/DNS fields to every entry sharing profile_id.
+    """Apply shared ACME/DNS fields to a profile and so to all its members.
 
-    All-or-nothing: every affected entry is validated with the merged fields
-    before anything is written, so one entry's required fields (e.g. a
-    clearpass sibling's cert_types) can't be silently broken by an edit made
-    through the profile rather than through that entry. Returns the number
-    of entries updated. Raises ValueError if the profile doesn't exist or if
-    any affected entry would fail validation.
+    All-or-nothing: the profile and every member are validated with the merged
+    fields before anything is written. Works for profiles with no members.
+    Returns the number of member entries affected. Raises ValueError if the
+    profile doesn't exist or anything would fail validation.
     """
     profile_id = str(profile_id).strip()
     servers = load_servers()
+    profiles = load_profiles()
     indices = [i for i, s in enumerate(servers)
                if str(s.get("certificate_id", "")).strip() == profile_id]
-    if not indices:
+    if not indices and profile_id not in profiles:
         raise ValueError("Certificate profile not found.")
+
+    base = dict(profiles.get(profile_id) or {})
+    if not base and indices:
+        base = {k: _copy_value(servers[indices[0]][k])
+                for k in _SHARED_PROFILE_FIELDS if k in servers[indices[0]]}
+    for field in _SHARED_PROFILE_FIELDS:
+        if field in fields:
+            base[field] = _copy_value(fields[field])
+    _validate_profile_fields(base)
 
     updated = list(servers)
     for i in indices:
         merged = dict(updated[i])
         for field in _SHARED_PROFILE_FIELDS:
-            if field in fields:
-                value = fields[field]
-                merged[field] = list(value) if isinstance(value, list) else value
+            if field in base:
+                merged[field] = _copy_value(base[field])
         validate_server(merged)
         updated[i] = merged
 
+    profiles[profile_id] = base
+    _write_profiles(profiles)
     _write(updated)
     return len(indices)
 
@@ -829,8 +934,10 @@ def update_certificate_profile(profile_id: str, fields: dict) -> int:
 def delete_certificate_profile(profile_id: str) -> int:
     """Detach every entry sharing profile_id (clears certificate_id on each).
 
-    Each entry keeps whatever ACME/DNS values it last had — this only stops
-    them being linked, it does not delete any server entry."""
+    Each entry keeps the ACME/DNS values it had (hydrated from the profile) —
+    this only stops them being linked, it does not delete any server entry.
+    The profile itself is dropped from the store once it has no members, unless
+    it was created explicitly."""
     profile_id = str(profile_id).strip()
     servers = load_servers()
     indices = [i for i, s in enumerate(servers)
@@ -876,18 +983,18 @@ def rename_certificate_profile(old_id: str, new_id: str) -> int:
         return 0
 
     servers = load_servers()
+    profiles = load_profiles()
     indices = [i for i, s in enumerate(servers)
                if str(s.get("certificate_id", "")).strip() == old_id]
-    if not indices:
+    if not indices and old_id not in profiles:
         raise ValueError("Certificate profile not found.")
 
-    other_ids = {
-        str(s.get("certificate_id", "")).strip() for s in servers
-    } - {old_id}
+    other_ids = ({str(s.get("certificate_id", "")).strip() for s in servers}
+                 | set(profiles)) - {old_id, ""}
     if new_id in other_ids:
         raise ValueError(f"'{new_id}' is already used by another certificate profile.")
     new_slug = _slugify_certificate_id(new_id)
-    if new_slug in {_slugify_certificate_id(pid) for pid in other_ids if pid}:
+    if new_slug in {_slugify_certificate_id(pid) for pid in other_ids}:
         raise ValueError(
             f"'{new_id}' resolves to the same certificate directory as an existing profile."
         )
@@ -907,9 +1014,12 @@ def rename_certificate_profile(old_id: str, new_id: str) -> int:
         merged = dict(updated[i])
         merged["certificate_id"] = new_id
         updated[i] = merged
+    new_profiles = {(new_id if pid == old_id else pid): p for pid, p in profiles.items()}
     try:
+        _write_profiles(new_profiles)
         _write(updated)
     except Exception:
+        _write_profiles(profiles)
         if moved:
             new_dir.rename(old_dir)
         raise
@@ -921,6 +1031,12 @@ def certificate_owner_ids() -> list[str]:
     owners: list[str] = []
     seen: set[str] = set()
     for server in load_servers():
+        err = server_profile_error(server)
+        if err:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Skipping '%s': %s", server.get("label") or server.get("id"), err)
+            continue
         profile_id = certificate_id(server)
         if profile_id not in seen and server.get("id"):
             seen.add(profile_id)
@@ -1043,6 +1159,20 @@ def update_dns_credential(dns_credential_id: str, fields: dict) -> None:
     _write_dns_credentials(creds)
 
 
+def _retarget_profile_dns_credential(old: str, new: str) -> None:
+    """Point every stored profile (including member-less ones) at a different
+    DNS Credential ID. Servers are hydrated from the store, so this is what
+    makes a DNS Credential rename/delete reach them."""
+    profiles = load_profiles()
+    changed = False
+    for p in profiles.values():
+        if isinstance(p, dict) and str(p.get("dns_credential_id", "")).strip() == old:
+            p["dns_credential_id"] = new
+            changed = True
+    if changed:
+        _write_profiles(profiles)
+
+
 @_locked
 def delete_dns_credential(dns_credential_id: str) -> int:
     """Delete a DNS Credential, detaching it (clears dns_credential_id) from
@@ -1066,6 +1196,7 @@ def delete_dns_credential(dns_credential_id: str) -> int:
         merged["dns_credential_id"] = ""
         updated[i] = merged
         detached += 1
+    _retarget_profile_dns_credential(dns_credential_id, "")
     if detached:
         _write(updated)
     return detached
@@ -1107,6 +1238,7 @@ def rename_dns_credential(old_id: str, new_id: str) -> int:
         merged["dns_credential_id"] = new_id
         updated[i] = merged
         renamed += 1
+    _retarget_profile_dns_credential(old_id, new_id)
     if renamed:
         _write(updated)
     return renamed
@@ -1168,7 +1300,9 @@ def migrate_dns_credentials_from_servers() -> int:
 
     if changed:
         _write_dns_credentials(creds)
-        _write(updated)
+        # Entries carry the freshly extracted credential reference; let it
+        # reach any already-stored profile (the store normally wins).
+        _write(updated, tuple(str(e.get("certificate_id", "")).strip() for e in updated))
     return changed
 
 
@@ -1462,8 +1596,8 @@ def get_traefik_log(lines: int = 150) -> list:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _write(servers: list) -> None:
-    entries, profiles = _split_profiles(servers)
+def _write(servers: list, writethrough: tuple = ()) -> None:
+    entries, profiles = _split_profiles(servers, writethrough)
     if profiles != load_profiles():
         _write_profiles(profiles)  # first: a crash between the two writes is harmless
     servers = entries

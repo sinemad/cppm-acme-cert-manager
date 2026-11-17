@@ -38,22 +38,28 @@ reload command, service labels — stays on each server entry.
 
 ### Creating a profile
 
-Profiles are created from the server form: a profile exists as soon as a
-server has a **Certificate Profile ID**. The Profiles page has shortcuts into
-that form:
+On **Certificate Profiles**, click **+ New profile**, enter a Certificate Profile
+ID, the domain, ACME account and DNS credential, and save. The profile exists on
+its own, with no targets yet (the list shows *No targets yet*). Then attach
+servers to it:
 
-- **+ New profile** (top right) opens **Add Server** with the Certificate
-  Profile ID field focused.
-- **+ Add server** on a profile row opens **Add Server** with that profile
+- **+ Add server** on the profile row opens **Add Server** with the profile
   already selected and its shared ACME/DNS fields filled in.
+- Or, in **Servers → + Add Server**, pick the profile from the **Certificate
+  Profile** dropdown.
 
-Or do it by hand:
+A profile with no targets issues nothing. **Delete** removes an empty profile
+(it is refused while servers still use it; use **Detach All** first).
 
-1. **Servers → + Add Server**.
-2. In **Certificate Profile**, either keep **+ Create new certificate profile**
-   and type a new ID, or pick an existing profile from the dropdown. Picking
-   one fills in the shared ACME/DNS fields for you.
-3. Save. Any other server that uses the same ID shares the configuration.
+You can also skip this: giving a new server an ID that doesn't exist yet
+creates the profile implicitly, defined by that server. It disappears again if
+its last server is removed, whereas a profile made with **+ New profile**
+stays until you delete it.
+
+The stored profile is the single source of truth. Saving one server never
+changes the profile other servers share; edit the profile itself to change it
+for all of them. (A server that is the only member of its profile can still
+edit the values from its own form.)
 
 A profile can mix target types, so one ClearPass publisher, a subscriber and a
 Linux host can all share one certificate. IDs may contain letters, numbers,

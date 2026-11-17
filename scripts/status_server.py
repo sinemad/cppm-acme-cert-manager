@@ -50,7 +50,7 @@ from config_utils import (
     load_servers, get_server, add_server, update_server, delete_server,
     server_cert_dir, get_server_env_dict, certificate_members, list_certificate_profiles,
     list_profile_members, update_certificate_profile, delete_certificate_profile,
-    rename_certificate_profile,
+    rename_certificate_profile, create_profile, remove_profile, get_profile,
     list_dns_credentials, get_dns_credential, add_dns_credential,
     update_dns_credential, delete_dns_credential, rename_dns_credential,
     dns_credential_owner_ids,
@@ -3646,8 +3646,8 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
     if not profiles:
         rows = ('<tr><td colspan="4"><div class="empty">'
                 'No certificate profiles yet.&nbsp; '
-                '<a href="/settings/add?new_profile=1" style="color:var(--accent)">Add a server</a> '
-                'and give it a Certificate Profile ID to create one.'
+                '<a href="/settings/profiles/new" style="color:var(--accent)">Create one</a> '
+                'to define a certificate once and attach servers to it.'
                 '</div></td></tr>')
     else:
         rows = ""
@@ -3664,7 +3664,22 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
             members_html = "<br>".join(
                 f'{_esc(m.get("label", ""))} <span class="hint">({_esc(m.get("target_type", "clearpass"))})</span>'
                 for m in members
-            )
+            ) or '<span class="hint">No targets yet</span>'
+            if members:
+                action_btn = (
+                    f'<form method="POST" action="/settings/profiles/{pid_esc}/detach" style="display:inline"'
+                    f' onsubmit="return confirm(\'Detach all {len(members)} target(s) from this profile? '
+                    f'Each keeps its current ACME/DNS values but will no longer share edits.\')">'
+                    f'<button type="submit" class="btn btn-danger">Detach All</button>'
+                    f'</form>'
+                )
+            else:
+                action_btn = (
+                    f'<form method="POST" action="/settings/profiles/{pid_esc}/delete" style="display:inline"'
+                    f' onsubmit="return confirm(\'Delete certificate profile {pid_esc}?\')">'
+                    f'<button type="submit" class="btn btn-danger">Delete</button>'
+                    f'</form>'
+                )
             rows += (
                 f'<tr>'
                 f'<td style="font-family:monospace;font-size:0.78rem">{pid_esc}{domain_html}</td>'
@@ -3673,11 +3688,7 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
                 f'<td style="text-align:right;white-space:nowrap">'
                 f'<a href="/settings/add?profile={_url_quote(pid)}" class="btn btn-ghost">+ Add server</a> '
                 f'<a href="/settings/profiles/edit/{pid_esc}" class="btn btn-ghost">Edit</a> '
-                f'<form method="POST" action="/settings/profiles/{pid_esc}/detach" style="display:inline"'
-                f' onsubmit="return confirm(\'Detach all {len(members)} target(s) from this profile? '
-                f'Each keeps its current ACME/DNS values but will no longer share edits.\')">'
-                f'<button type="submit" class="btn btn-danger">Detach All</button>'
-                f'</form>'
+                f'{action_btn}'
                 f'</td>'
                 f'</tr>'
             )
@@ -3686,7 +3697,7 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
 <div class="app">
   <div class="page-hdr">
     <span class="page-title">Certificate Profiles</span>
-    <a href="/settings/add?new_profile=1" class="btn btn-primary">&#43; New profile</a>
+    <a href="/settings/profiles/new" class="btn btn-primary">&#43; New profile</a>
   </div>
   {_profile_tabs_html("cert-profiles")}
   {flash_html}
@@ -3695,9 +3706,9 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
     same Certificate Profile ID. Edit it here once to update every target that shares it.
   </p>
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-    <strong>Creating a profile:</strong> profiles are created from the server form. Add a server
-    and give it a Certificate Profile ID, or pick an existing profile to add another target to it
-    (<em>+ Add server</em> below does that for you).
+    <strong>Creating a profile:</strong> use <em>+ New profile</em> to define the domain, ACME
+    account and DNS credential once, then attach servers with <em>+ Add server</em>. Adding a
+    server with a new Certificate Profile ID still creates one implicitly.
   </p>
   <div class="card" style="overflow-x:auto">
     <table class="settings-table" style="min-width:48rem">
@@ -3715,6 +3726,8 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
 def _profile_form_page(profile_id: str, values: dict, error: str = "",
                        username: str = "") -> str:
     err_html = f'<div class="flash flash-err">{_esc(error)}</div>' if error else ""
+    if not profile_id:
+        return _profile_create_page(values, err_html, username)
     members = list_profile_members(profile_id)
     members_html = "".join(
         f'<li>{_esc(m.get("label", ""))} <span class="hint">'
@@ -3722,6 +3735,10 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
         for m in members
     )
 
+    save_confirm = (
+        f"return confirm('Save changes to this profile? It updates all {len(members)} target(s) that share it.')"
+        if members else "return true"
+    )
     body = f"""
 <div class="app">
   <div class="page-hdr">
@@ -3731,9 +3748,10 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
   {err_html}
   <div class="card" style="margin-bottom:1rem">
     <div class="form-section-title">Shared by</div>
-    <ul style="margin:0;padding-left:1.2rem;font-size:0.82rem">{members_html}</ul>
+    <ul style="margin:0;padding-left:1.2rem;font-size:0.82rem">{members_html or '<li class="hint">No targets yet</li>'}</ul>
     <p class="hint" style="margin:0.6rem 0 0">
       Saving below updates these {len(members)} target(s) at once.
+      <a href="/settings/add?profile={_url_quote(profile_id)}" style="color:var(--accent)">+ Add server</a>
     </p>
   </div>
   <div class="card" style="margin-bottom:1rem">
@@ -3749,7 +3767,8 @@ def _profile_form_page(profile_id: str, values: dict, error: str = "",
       <button type="submit" class="btn btn-warn">Rename</button>
     </form>
   </div>
-  <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}">
+  <form method="POST" action="/settings/profiles/edit/{_esc(profile_id)}"
+        onsubmit="{save_confirm}">
     {_identity_fields_html(values)}
     {_dns_credential_select_html(values.get("dns_credential_id", ""))}
     <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
@@ -3768,6 +3787,50 @@ function toggleSplitHorizon(on) {{
 }}
 </script>"""
     return _base("Edit Certificate Profile", body,
+                 nav_user=username, active="profiles", show_nav=True)
+
+
+def _profile_create_page(values: dict, err_html: str, username: str) -> str:
+    """Form for a new, standalone certificate profile (no targets yet)."""
+    pid = _esc(str(values.get("certificate_id", "")))
+    body = f"""
+<div class="app">
+  <div class="page-hdr">
+    <span class="page-title">New Certificate Profile</span>
+    <a href="/settings/profiles" class="btn btn-ghost">&#8592; Back</a>
+  </div>
+  {err_html}
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.8rem">
+    Define the certificate once (domain, ACME account, DNS credential). Servers you add to this
+    profile later reuse these settings and are issued the same certificate.
+  </p>
+  <form method="POST" action="/settings/profiles/new">
+    <div class="card" style="margin-bottom:1rem">
+      <div class="field" style="margin-bottom:0">
+        <label>Certificate Profile ID</label>
+        <input type="text" name="certificate_id" value="{pid}" required
+               placeholder="e.g. arubasecurity.com-prod" pattern="[A-Za-z0-9_.\\-]+">
+        <p class="hint" style="margin:0.4rem 0 0">Letters, numbers, '.', '_' and '-'. It names the certificate directory on disk.</p>
+      </div>
+    </div>
+    {_identity_fields_html(values)}
+    {_dns_credential_select_html(values.get("dns_credential_id", ""))}
+    <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-bottom:2rem">
+      <a href="/settings/profiles" class="btn btn-ghost">Cancel</a>
+      <button type="submit" class="btn btn-primary">Create Profile</button>
+    </div>
+  </form>
+</div>
+<script>
+function switchAcme(val) {{
+  document.getElementById('acme-eab-section').style.display = (val === 'zerossl') ? '' : 'none';
+  document.getElementById('acme-custom-section').style.display = (val === 'custom') ? '' : 'none';
+}}
+function toggleSplitHorizon(on) {{
+  document.getElementById('split-horizon-resolvers').style.display = on ? '' : 'none';
+}}
+</script>"""
+    return _base("New Certificate Profile", body,
                  nav_user=username, active="profiles", show_nav=True)
 
 
@@ -6025,13 +6088,17 @@ class Handler(BaseHTTPRequestHandler):
             fmsg  = qs.get("fm", [""])[0]
             return self._serve_html(_profile_list_page(username, ftype, fmsg))
 
+        if path == "/settings/profiles/new":
+            return self._serve_html(_profile_form_page("", {}, username=username))
+
         if path.startswith("/settings/profiles/edit/"):
             profile_id = path[len("/settings/profiles/edit/"):].strip("/")
             members = list_profile_members(profile_id)
-            if not members:
+            values = members[0] if members else get_profile(profile_id)
+            if not values:
                 return self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
             return self._serve_html(
-                _profile_form_page(profile_id, members[0], username=username)
+                _profile_form_page(profile_id, values, username=username)
             )
 
         if path == "/settings/dns-credentials":
@@ -6141,6 +6208,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_edit(path[len("/settings/edit/"):].strip("/"))
         elif path.startswith("/settings/detach/"):
             self._handle_settings_detach(path[len("/settings/detach/"):].strip("/"))
+        elif path == "/settings/profiles/new":
+            self._handle_profile_create()
+        elif path.startswith("/settings/profiles/") and path.endswith("/delete"):
+            profile_id = path[len("/settings/profiles/"):-len("/delete")].strip("/")
+            self._handle_profile_delete(profile_id)
         elif path.startswith("/settings/profiles/") and path.endswith("/detach"):
             profile_id = path[len("/settings/profiles/"):-len("/detach")].strip("/")
             self._handle_profile_detach(profile_id)
@@ -6434,6 +6506,38 @@ class Handler(BaseHTTPRequestHandler):
                   username, entry.get("label"))
         self._redirect(f"/settings/edit/{server_id}")
 
+    def _handle_profile_create(self):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        f = self._parse_form()
+        pid = f.get("certificate_id", "").strip()
+        fields = _parse_identity_fields(f)
+        try:
+            create_profile(pid, fields)
+            _log.info("settings: '%s' created certificate profile '%s'", username, pid)
+            self._redirect(f"/settings/profiles?ft=ok&fm=Profile+{_url_quote(pid)}+created.")
+        except Exception as e:
+            _log.error("settings: profile create '%s' failed: %s\n%s",
+                       pid, e, traceback.format_exc())
+            values = dict(fields)
+            values["certificate_id"] = pid
+            self._serve_html(
+                _profile_form_page("", values, str(e), username=username)
+            )
+
+    def _handle_profile_delete(self, profile_id: str):
+        username = self._get_session_user()
+        if not username:
+            return self._redirect("/login")
+        try:
+            if remove_profile(profile_id):
+                _log.info("settings: '%s' deleted certificate profile '%s'", username, profile_id)
+                return self._redirect("/settings/profiles?ft=ok&fm=Profile+deleted.")
+            self._redirect("/settings/profiles?ft=err&fm=Certificate+profile+not+found")
+        except ValueError as e:
+            self._redirect(f"/settings/profiles?ft=err&fm={_url_quote(str(e))}")
+
     def _handle_profile_edit(self, profile_id: str):
         username = self._get_session_user()
         if not username:
@@ -6469,7 +6573,8 @@ class Handler(BaseHTTPRequestHandler):
             _log.error("settings: profile rename '%s' -> '%s' failed: %s\n%s",
                        profile_id, new_id, e, traceback.format_exc())
             members = list_profile_members(profile_id)
-            values = dict(members[0]) if members else {"certificate_id": profile_id}
+            values = dict(members[0] if members else (get_profile(profile_id) or {}))
+            values.setdefault("certificate_id", profile_id)
             self._serve_html(
                 _profile_form_page(profile_id, values, str(e), username=username)
             )
