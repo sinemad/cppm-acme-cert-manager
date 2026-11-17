@@ -38,8 +38,16 @@ reload command, service labels — stays on each server entry.
 
 ### Creating a profile
 
-There is no separate "new profile" button. A profile exists as soon as a server
-has a **Certificate Profile ID**:
+Profiles are created from the server form: a profile exists as soon as a
+server has a **Certificate Profile ID**. The Profiles page has shortcuts into
+that form:
+
+- **+ New profile** (top right) opens **Add Server** with the Certificate
+  Profile ID field focused.
+- **+ Add server** on a profile row opens **Add Server** with that profile
+  already selected and its shared ACME/DNS fields filled in.
+
+Or do it by hand:
 
 1. **Servers → + Add Server**.
 2. In **Certificate Profile**, either keep **+ Create new certificate profile**

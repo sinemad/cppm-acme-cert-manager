@@ -30,7 +30,7 @@ import traceback
 import zoneinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote as _url_quote
 
 try:
     from cryptography import x509
@@ -3645,9 +3645,9 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
     profiles = list_certificate_profiles()
     if not profiles:
         rows = ('<tr><td colspan="4"><div class="empty">'
-                'No certificate profiles yet.&nbsp; Set a Certificate Profile ID on two or '
-                'more servers in <a href="/settings" style="color:var(--accent)">Servers</a> '
-                'to share one ACME/DNS config between them.'
+                'No certificate profiles yet.&nbsp; '
+                '<a href="/settings/add?new_profile=1" style="color:var(--accent)">Add a server</a> '
+                'and give it a Certificate Profile ID to create one.'
                 '</div></td></tr>')
     else:
         rows = ""
@@ -3659,17 +3659,19 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
             prov    = _esc((get_dns_credential(cred_id) or {}).get("dns_provider", "") or cred_id)
             acme    = _esc(p.get("acme_server", "letsencrypt"))
             members = list_profile_members(pid)
+            domain_html = (f'<br><span class="hint">{domain}</span>'
+                           if domain and domain != pid_esc else "")
             members_html = "<br>".join(
                 f'{_esc(m.get("label", ""))} <span class="hint">({_esc(m.get("target_type", "clearpass"))})</span>'
                 for m in members
             )
             rows += (
                 f'<tr>'
-                f'<td style="font-family:monospace;font-size:0.78rem">{pid_esc}<br>'
-                f'<span class="hint">{domain}</span></td>'
+                f'<td style="font-family:monospace;font-size:0.78rem">{pid_esc}{domain_html}</td>'
                 f'<td>{prov} <span class="hint">/ {acme}</span></td>'
                 f'<td style="font-size:0.78rem">{members_html}</td>'
                 f'<td style="text-align:right;white-space:nowrap">'
+                f'<a href="/settings/add?profile={_url_quote(pid)}" class="btn btn-ghost">+ Add server</a> '
                 f'<a href="/settings/profiles/edit/{pid_esc}" class="btn btn-ghost">Edit</a> '
                 f'<form method="POST" action="/settings/profiles/{pid_esc}/detach" style="display:inline"'
                 f' onsubmit="return confirm(\'Detach all {len(members)} target(s) from this profile? '
@@ -3684,12 +3686,18 @@ def _profile_list_page(username: str, flash_type: str = "", flash_msg: str = "")
 <div class="app">
   <div class="page-hdr">
     <span class="page-title">Certificate Profiles</span>
+    <a href="/settings/add?new_profile=1" class="btn btn-primary">&#43; New profile</a>
   </div>
   {_profile_tabs_html("cert-profiles")}
   {flash_html}
   <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
     A certificate profile is the ACME/DNS configuration shared by every server that has the
     same Certificate Profile ID. Edit it here once to update every target that shares it.
+  </p>
+  <p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+    <strong>Creating a profile:</strong> profiles are created from the server form. Add a server
+    and give it a Certificate Profile ID, or pick an existing profile to add another target to it
+    (<em>+ Add server</em> below does that for you).
   </p>
   <div class="card" style="overflow-x:auto">
     <table class="settings-table" style="min-width:48rem">
@@ -3997,6 +4005,21 @@ def _settings_form_page(server: dict = None, error: str = "",
         f'<script>window.CERT_PROFILES = {profiles_json};'
         f'window.CERT_ID_AUTOSUGGEST = {"false" if is_edit else "true"};</script>'
     )
+    if not is_edit:
+        # ?profile=<id> preselects an existing profile; ?new_profile=1 focuses the ID field.
+        cert_profiles_script += '''<script>
+window.addEventListener('DOMContentLoaded', function() {
+  var q = new URLSearchParams(location.search);
+  var sel = document.getElementById('cert_profile_select');
+  var want = q.get('profile');
+  if (want && sel && (window.CERT_PROFILES || {})[want]) {
+    sel.value = want; applyCertProfile(want);
+  } else if (q.get('new_profile')) {
+    var i = document.getElementById('certificate_id_input');
+    if (i) { i.focus(); }
+  }
+});
+</script>'''
 
     if is_edit:
         cert_profile_field_html = f'''
