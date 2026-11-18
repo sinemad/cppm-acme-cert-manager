@@ -41,7 +41,7 @@ docker compose up -d --force-recreate
 
 If Lego is not found, rebuild the image:
 ```bash
-docker compose build --no-cache && docker compose up -d
+docker compose build --pull --no-cache && docker compose up -d
 ```
 
 > **Note:** If no servers are configured in `servers.json`, the container logs

@@ -164,7 +164,7 @@ examples, are in [Linux SSH target](10-linux-ssh-target.md).
 ## Step 5 – Build the image
 
 ```bash
-docker compose build --no-cache
+docker compose build --pull --no-cache
 ```
 
 The build downloads the Lego binary from GitHub and CA certificates from supported ACME providers. Both are baked into the image so the running container needs no access to either site at runtime.

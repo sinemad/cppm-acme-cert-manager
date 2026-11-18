@@ -7,7 +7,7 @@ Safe to do at any time. The certificate data and server configuration in
 
 ```bash
 docker compose down
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 ```
 

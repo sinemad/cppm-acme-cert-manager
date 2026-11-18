@@ -122,7 +122,7 @@ echo "  through the web UI after the container starts — no file editing needed
 echo ""
 echo "  Next steps:"
 echo "    1. (Optional) nano ${SCRIPT_DIR}/docker-compose.override.yml"
-echo "    2. docker compose build --no-cache"
+echo "    2. docker compose build --pull --no-cache"
 echo "    3. docker compose up -d"
 echo "    4. docker compose logs -f"
 echo "    5. Open http://<docker-host>:8080/ in a browser"

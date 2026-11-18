@@ -340,7 +340,7 @@ reload command. See [docs/10-linux-ssh-target.md](docs/10-linux-ssh-target.md).
 ### 5. Build and start
 
 ```bash
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 docker compose logs -f
 ```

@@ -5,7 +5,7 @@
 ```bash
 ./setup.sh                           # create /opt/cppm-certs, copy override template
 # Optional: nano docker-compose.override.yml   # set TZ and any port/flag overrides
-docker compose build --no-cache      # build image (downloads Lego + ACME CA certs)
+docker compose build --pull --no-cache      # build image (downloads Lego + ACME CA certs)
 docker compose up -d                 # start container
 docker compose logs -f               # watch startup
 
@@ -136,7 +136,7 @@ docker exec -it cppm-acme-cert-manager cppm-users list
 ```bash
 # Rebuild image (cert data and servers.json preserved)
 docker compose down
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d
 
 # Apply docker-compose.override.yml changes (port or timezone change)
