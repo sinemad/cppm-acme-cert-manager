@@ -1,6 +1,6 @@
 FROM alpine:3.24
 
-ARG VERSION=2.0.0
+ARG VERSION=2.2.0
 LABEL org.opencontainers.image.title="ACME Certificate Manager" \
       org.opencontainers.image.description="Automated ACME (Lego DNS-01) certificate management for Aruba ClearPass Policy Manager and Linux services over SSH" \
       org.opencontainers.image.version="${VERSION}" \
